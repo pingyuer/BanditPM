@@ -1,0 +1,50 @@
+# OS / editor
+.DS_Store
+*.DS_Store
+.vscode/
+.idea/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Training outputs and experiment logs
+outputs/
+wandb/
+runs/
+logs/
+tensorboard/
+.hydra/
+events.out.tfevents.*
+*.log
+*.out
+
+# Model checkpoints and binary artifacts
+checkpoints/
+checkpoint/
+ckpt/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+*.h5
+*.wandb
+
+# Local data / cache artifacts
+cache/
+*.tmp
+*.swp

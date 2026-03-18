@@ -1,0 +1,128 @@
+pixel_mean: [0.485]
+pixel_std: [0.229]
+
+pixel_dim: 256
+key_dim: 64
+value_dim: 256
+sensory_dim: 256
+embed_dim: 256
+
+pixel_encoder:
+  type: resnet50
+  ms_dims: [1024, 512, 256]
+
+mask_encoder:
+  type: resnet18
+  final_dim: 256
+
+pixel_pe_scale: 32
+pixel_pe_temperature: 128
+
+object_transformer:
+  embed_dim: ${model.embed_dim}
+  ff_dim: 2048
+  num_heads: 8
+  num_blocks: 3
+  num_queries: 16
+  read_from_pixel:
+    input_norm: False
+    input_add_pe: False
+    add_pe_to_qkv: [True, True, False]
+  read_from_past:
+    add_pe_to_qkv: [True, True, False]
+  read_from_memory:
+    add_pe_to_qkv: [True, True, False]
+  read_from_query:
+    add_pe_to_qkv: [True, True, False]
+    output_norm: False
+  query_self_attention:
+    add_pe_to_qkv: [True, True, False]
+  pixel_self_attention:
+    add_pe_to_qkv: [True, True, False]
+
+object_summarizer:
+  embed_dim: ${model.object_transformer.embed_dim}
+  num_summaries: ${model.object_transformer.num_queries}
+  add_pe: True
+
+aux_loss:
+  sensory:
+    enabled: True
+    weight: 0.01
+  query:
+    enabled: True
+    weight: 0.01
+
+mask_decoder:
+  # first value must equal embed_dim
+  up_dims: [256, 128, 128]
+
+use_first_frame_gt_init: True
+
+temporal_memory:
+  type: "gdr"  # gdr | none | bpm
+
+  bpm:
+    ENABLE: false
+    USE_RULE_BASED_POLICY: true
+    USE_LEARNED_POLICY: false
+    ENABLE_POLICY_LOSS: false
+    TRAIN_POLICY_ONLY: false
+    FREEZE_BACKBONE: false
+
+    BANK_SIZE: 4
+    PROTO_ALPHA: 0.1
+    POLICY_LOSS_WEIGHT: 1.0
+    POLICY_HIDDEN_DIM: 256
+    READOUT_TEMPERATURE: 1.0
+    SIM_THRESHOLD_HIGH: 0.8
+    SIM_THRESHOLD_LOW: 0.5
+    DEFAULT_ACTION: 1
+    SPAWN_REPLACE_WHEN_FULL: true
+    PROTO_POOLING: "mask"
+    FUSION_TYPE: "add"
+    DEBUG_MODE: false
+
+    ACTION_COSTS:
+      keep: 0.0
+      refine: 0.05
+      replace: 0.1
+      spawn: 0.2
+
+prototype_value:
+  enable: false
+  module_mode: "fast"
+  mode: "augment"
+  feature_source: "value"
+  replace_ratio: 1.0
+
+  bank:
+    num_proto: 16
+    dim: 256
+    temperature: 1.0
+    normalize: true
+    init_mode: "learnable"
+    topk: 0
+
+  temporal:
+    enable_slow_state: false
+    momentum: 0.9
+    learnable_momentum: false
+    detach_prev_state: false
+    reset_per_video: true
+
+  fuse:
+    type: "add"
+    hidden_dim: 256
+
+  aux_loss:
+    enable_entropy_reg: false
+    entropy_weight: 0.0
+    enable_temporal_smooth: false
+    temporal_smooth_weight: 0.0
+
+  debug:
+    log_assignment_entropy: false
+    log_proto_hist: false
+    log_state_stats: false
+    log_feature_norm: false

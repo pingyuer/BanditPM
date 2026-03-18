@@ -1,0 +1,89 @@
+defaults:
+  - model: base
+  - _self_
+
+exp_id: "gdkvm_echonet_proto_concat"
+dataset_name: "echonet"
+seed: 42
+debug: false
+wandb_mode: "offline"
+cudnn_benchmark: true
+log_text_interval: 10
+log_image_interval: 50
+save: 0
+save_weights_interval: 200
+save_checkpoint_interval: 200
+
+data_path: "/home/tahara/datasets/processed/echonet_png128_10f"
+
+main_training:
+  name: "main_training"
+  enabled: true
+  batch_size: 16
+  num_workers: 24
+  amp: true
+  num_iterations: 3000
+  learning_rate: 1.0e-4
+  lr_schedule: step
+  lr_schedule_gamma: 0.1
+  point_supervision: true
+  train_num_points: 12544
+  oversample_ratio: 3.0
+  importance_sample_ratio: 0.75
+  clip_grad_norm: 3.0
+  weight_decay: 0.001
+  embed_weight_decay: 0.0
+  backbone_lr_ratio: 0.1
+  lr_schedule_steps: [1000, 2000]
+  num_ref_frames: 10
+  seq_length: 10
+  num_objects: 1
+  crop_size: [128, 128]
+  pos_weight_val: 2.0
+
+pre_training:
+  enabled: false
+
+val:
+  enabled: true
+
+eval_stage:
+  name: "eval_stage"
+  amp: false
+  eval_interval: 20
+  num_vis: 0
+  crop_size: [128, 128]
+  learning_rate: 1e-4
+  weight_decay: 1e-3
+  lr_schedule: "constant"
+  clip_grad_norm: 0.0
+  point_supervision: false
+  train_num_points: 0
+  oversample_ratio: 3.0
+  importance_sample_ratio: 0.75
+  embed_weight_decay: 0.0
+  backbone_lr_ratio: 0.1
+
+model:
+  prototype_value:
+    enable: true
+    module_mode: "fast"
+    mode: "augment"
+    feature_source: "value"
+    replace_ratio: 1.0
+    bank:
+      num_proto: 16
+      dim: 256
+      temperature: 1.0
+      normalize: true
+      init_mode: "learnable"
+      topk: 0
+    temporal:
+      enable_slow_state: false
+      momentum: 0.9
+      learnable_momentum: false
+      detach_prev_state: false
+      reset_per_video: true
+    fuse:
+      type: "concat"
+      hidden_dim: 256

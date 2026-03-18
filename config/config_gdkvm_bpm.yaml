@@ -1,0 +1,27 @@
+defaults:
+  - config_gdkvm_01
+  - _self_
+
+exp_id: "gdkvm_bpm_echonet_10f"
+
+eval_stage:
+  eval_interval: 200
+
+model:
+  temporal_memory:
+    type: "bpm"
+    bpm:
+      ENABLE: true
+      USE_RULE_BASED_POLICY: true
+      USE_LEARNED_POLICY: false
+      ENABLE_POLICY_LOSS: true
+      TRAIN_POLICY_ONLY: false
+      FREEZE_BACKBONE: false
+      BANK_SIZE: 4
+      PROTO_ALPHA: 0.1
+      POLICY_LOSS_WEIGHT: 0.2
+      SIM_THRESHOLD_HIGH: 0.8
+      SIM_THRESHOLD_LOW: 0.5
+      FUSION_TYPE: "add"
+      PROTO_POOLING: "mask"
+      DEBUG_MODE: false
