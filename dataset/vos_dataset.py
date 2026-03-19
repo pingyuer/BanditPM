@@ -112,6 +112,7 @@ class TenCamusDataset(Dataset):
         cls_gt = torch.zeros_like(masks_t)
         first_frame_gt = torch.zeros((1, self.max_num_obj, self.size, self.size), dtype=torch.long)
         selector = torch.zeros(self.max_num_obj, dtype=torch.float32)
+        label_valid = torch.ones(self.seq_length, dtype=torch.bool)
 
         if masks_t[0].max() > 0:
             selector[0] = 1.0
@@ -125,6 +126,7 @@ class TenCamusDataset(Dataset):
             'rgb': frames_t,
             'ff_gt': first_frame_gt,
             'cls_gt': cls_gt,
+            'label_valid': label_valid,
             'selector': selector,
             'info': info,
         }

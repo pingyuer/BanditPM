@@ -13,13 +13,27 @@ model:
     bpm:
       ENABLE: true
       USE_RULE_BASED_POLICY: true
-      USE_LEARNED_POLICY: false
+      USE_LEARNED_POLICY: true
+      EXEC_POLICY: "rule"
       ENABLE_POLICY_LOSS: true
+      ENABLE_POLICY_CE_LOSS: true
+      ENABLE_RL_LOSS: false
       TRAIN_POLICY_ONLY: false
       FREEZE_BACKBONE: false
       BANK_SIZE: 4
       PROTO_ALPHA: 0.1
+      REFINE_EMA_ALPHA: 0.2
+      POLICY_WARMUP_EPOCHS: 20
       POLICY_LOSS_WEIGHT: 0.2
+      LAMBDA_POLICY_CE: 0.2
+      LAMBDA_RL: 0.05
+      LAMBDA_ENTROPY: 0.001
+      RL_BASELINE_MOMENTUM: 0.95
+      ADV_CLAMP: 1.0
+      EPSILON_RULE_MIX_INIT: 1.0
+      EPSILON_RULE_MIX_FINAL: 0.1
+      EPSILON_RULE_MIX_EPOCHS: 30
+      SPAWN_WITHOUT_EMPTY_SLOT: "replace_fallback"
       SIM_THRESHOLD_HIGH: 0.8
       SIM_THRESHOLD_LOW: 0.5
       FUSION_TYPE: "add"

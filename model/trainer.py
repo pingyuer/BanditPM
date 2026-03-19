@@ -252,6 +252,9 @@ class Trainer:
     def do_pass(self, data, it=0):
         torch.set_grad_enabled(self._is_train)
         self._move_to_device(data)
+        data["current_iter"] = it
+        data["current_epoch"] = it // max(len(self.train_loader), 1)
+        data["iters_per_epoch"] = max(len(self.train_loader), 1)
 
         with torch.amp.autocast("cuda", enabled=self.use_amp):
             out = self.model(data)
@@ -332,6 +335,9 @@ class Trainer:
 
         try:
             action_tensors = []
+            entropy_tensors = []
+            agreement_tensors = []
+            occupancy_tensors = []
             age_tensors = []
             usage_tensors = []
             conf_tensors = []
@@ -339,6 +345,12 @@ class Trainer:
                 aux = data[key]
                 if "policy_actions" in aux:
                     action_tensors.append(aux["policy_actions"].detach().flatten())
+                if "entropy" in aux:
+                    entropy_tensors.append(aux["entropy"].detach().flatten())
+                if "action_agreement" in aux:
+                    agreement_tensors.append(aux["action_agreement"].detach().flatten())
+                if "occupancy_ratio" in aux:
+                    occupancy_tensors.append(aux["occupancy_ratio"].detach().flatten())
                 if "bank_age" in aux:
                     age_tensors.append(aux["bank_age"].detach().flatten())
                 if "bank_usage" in aux:
@@ -360,6 +372,12 @@ class Trainer:
                 self.log.log_scalar("bpm/usage_mean", torch.cat(usage_tensors).mean().item(), it)
             if conf_tensors:
                 self.log.log_scalar("bpm/conf_mean", torch.cat(conf_tensors).mean().item(), it)
+            if entropy_tensors:
+                self.log.log_scalar("bpm/policy_entropy", torch.cat(entropy_tensors).mean().item(), it)
+            if agreement_tensors:
+                self.log.log_scalar("bpm/rule_learned_agreement", torch.cat(agreement_tensors).mean().item(), it)
+            if occupancy_tensors:
+                self.log.log_scalar("bpm/occupancy_ratio", torch.cat(occupancy_tensors).mean().item(), it)
         except Exception:
             pass
 

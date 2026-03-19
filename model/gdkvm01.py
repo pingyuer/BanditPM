@@ -487,6 +487,11 @@ class GDKVM(nn.Module):
         out                = {}
         num_objects        = [num.item() for num in data['info']['num_objects']]
         out['num_objects'] = num_objects
+        policy_meta = {
+            "current_iter": int(data.get("current_iter", 0)),
+            "current_epoch": int(data.get("current_epoch", 0)),
+            "training": bool(self.training),
+        }
         
         max_num_objects = max(num_objects)
 
@@ -569,6 +574,7 @@ class GDKVM(nn.Module):
                 value_BNCHW=value_BNCHW,
                 frame_feat_BCHW=bpm_frame_feat_BCHW,
                 mask_BNHW=first_frame_mask_BNHW,
+                policy_meta=policy_meta,
             )
             out[f'bpm_aux_{0}'] = bpm_aux
         else:
@@ -632,6 +638,7 @@ class GDKVM(nn.Module):
                     value_BNCHW=this_value_BNCHW,
                     frame_feat_BCHW=bpm_frame_feat_BCHW,
                     mask_BNHW=last_masks_BNHW,
+                    policy_meta=policy_meta,
                 )
                 out[f'bpm_aux_{i}'] = bpm_aux
             else:

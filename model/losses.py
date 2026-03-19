@@ -2,6 +2,7 @@ from typing import List, Dict, Tuple
 from omegaconf import DictConfig
 from collections import defaultdict
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.point_features import calculate_uncertainty, point_sample, get_uncertain_point_coords_with_randomness
@@ -23,8 +24,9 @@ def dice_loss(mask: torch.Tensor, soft_gt: torch.Tensor) -> torch.Tensor:
     return loss.sum(0).mean()
 
 
-class LossComputer:
+class LossComputer(nn.Module):
     def __init__(self, cfg: DictConfig, stage_cfg: DictConfig):
+        super().__init__()
         self.point_supervision = stage_cfg.point_supervision
         self.num_points = stage_cfg.train_num_points
         self.oversample_ratio = stage_cfg.oversample_ratio
@@ -33,8 +35,15 @@ class LossComputer:
         self.sensory_weight = cfg.model.aux_loss.sensory.weight
         self.query_weight = cfg.model.aux_loss.query.weight
         bpm_cfg = cfg.model.temporal_memory.get("bpm", {})
-        self.policy_loss_weight = float(bpm_cfg.get("POLICY_LOSS_WEIGHT", 0.0))
-        self.enable_policy_loss = bool(bpm_cfg.get("ENABLE_POLICY_LOSS", False))
+        self.enable_policy_ce_loss = bool(bpm_cfg.get("ENABLE_POLICY_CE_LOSS", bpm_cfg.get("ENABLE_POLICY_LOSS", False)))
+        self.enable_rl_loss = bool(bpm_cfg.get("ENABLE_RL_LOSS", False))
+        self.lambda_policy_ce = float(bpm_cfg.get("LAMBDA_POLICY_CE", bpm_cfg.get("POLICY_LOSS_WEIGHT", 0.0)))
+        self.lambda_rl = float(bpm_cfg.get("LAMBDA_RL", 0.0))
+        self.lambda_entropy = float(bpm_cfg.get("LAMBDA_ENTROPY", 0.0))
+        self.rl_on_supervised_only = bool(bpm_cfg.get("RL_ON_SUPERVISED_FRAMES_ONLY", True))
+        self.adv_clamp = float(bpm_cfg.get("ADV_CLAMP", 1.0))
+        self.rl_baseline_momentum = float(bpm_cfg.get("RL_BASELINE_MOMENTUM", 0.95))
+        self.register_buffer("action_reward_baseline", torch.zeros(4, dtype=torch.float32), persistent=True)
 
     def mask_loss(
         self, logits: torch.Tensor, soft_gt: torch.Tensor
@@ -54,6 +63,19 @@ class LossComputer:
         loss_dice = dice_loss(point_logits.softmax(dim=1), point_labels)
 
         return loss_ce, loss_dice
+
+    def frame_mask_loss(
+        self,
+        logits_TCHW: torch.Tensor,
+        soft_gt_TCHW: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        loss_ce_list = []
+        loss_dice_list = []
+        for t in range(logits_TCHW.shape[0]):
+            ce_t, dice_t = self.mask_loss(logits_TCHW[t:t+1], soft_gt_TCHW[t:t+1])
+            loss_ce_list.append(ce_t)
+            loss_dice_list.append(dice_t)
+        return torch.stack(loss_ce_list), torch.stack(loss_dice_list)
 
     def compute(self, data: Dict[str, torch.Tensor],
                 num_objects: List[int]) -> Dict[str, torch.Tensor]:
@@ -76,9 +98,12 @@ class LossComputer:
             cls_gt = data['cls_gt'][bi, t_range]
             soft_gt = cls_to_one_hot(cls_gt, curr_num_obj)
 
-            loss_ce, loss_dice = self.mask_loss(logits, soft_gt)
+            frame_ce, frame_dice = self.frame_mask_loss(logits, soft_gt)
+            loss_ce = frame_ce.mean()
+            loss_dice = frame_dice.mean()
             losses['loss_ce'] += loss_ce / batch_size
             losses['loss_dice'] += loss_dice / batch_size
+            losses['seg_quality'] += (-(frame_ce + frame_dice).mean()).detach() / batch_size
 
             aux_list = [data[f'aux_{ti}'] for ti in t_range]
             first_aux = aux_list[0]
@@ -104,15 +129,103 @@ class LossComputer:
                     losses[f'aux_query_ce_l{level_idx}'] += l_ce / batch_size * self.query_weight
                     losses[f'aux_query_dice_l{level_idx}'] += l_dice / batch_size * self.query_weight
 
-        losses['total_loss'] = sum(losses.values())
+            bpm_aux_list = [data.get(f'bpm_aux_{ti}') for ti in t_range]
+            rl_terms = self._compute_policy_and_rl_losses(
+                bpm_aux_list=bpm_aux_list,
+                frame_seg_loss=(frame_ce + frame_dice).detach(),
+                device=logits.device,
+            )
+            for k, v in rl_terms.items():
+                losses[k] += v / batch_size if torch.is_tensor(v) else v / batch_size
 
-        if self.enable_policy_loss and self.policy_loss_weight > 0:
+        total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
+        for key, value in losses.items():
+            if not (torch.is_tensor(value) or isinstance(value, (float, int))):
+                continue
+            if key.startswith("loss_") or key.startswith("aux_") or key in {"rl_loss", "entropy_reg"}:
+                total_loss = total_loss + value
+        losses['total_loss'] = total_loss
+
+        if self.enable_policy_ce_loss and self.lambda_policy_ce > 0:
             policy_loss = self._compute_policy_loss(data)
             if policy_loss is not None:
-                losses['policy_ce'] = policy_loss * self.policy_loss_weight
+                losses['policy_ce'] = policy_loss * self.lambda_policy_ce
                 losses['total_loss'] = losses['total_loss'] + losses['policy_ce']
 
         return losses
+
+    def _compute_policy_and_rl_losses(
+        self,
+        bpm_aux_list: List[Dict[str, torch.Tensor] | None],
+        frame_seg_loss: torch.Tensor,
+        device: torch.device,
+    ) -> Dict[str, torch.Tensor]:
+        if not bpm_aux_list:
+            return {}
+
+        rl_loss_terms = []
+        entropy_terms = []
+        reward_logs = defaultdict(list)
+
+        for frame_idx, aux in enumerate(bpm_aux_list):
+            if aux is None or "policy_actions" not in aux:
+                continue
+
+            action = aux["policy_actions"].flatten()
+            log_prob = aux.get("log_prob")
+            entropy = aux.get("entropy")
+            learned_mask = aux.get("policy_is_learned")
+            if log_prob is None or entropy is None or learned_mask is None:
+                continue
+
+            seg_quality = -frame_seg_loss[frame_idx].detach()
+            log_prob = log_prob.flatten()
+            entropy = entropy.flatten()
+            learned_mask = learned_mask.flatten().bool()
+            action_cost_vec = aux["action_cost"].to(device=device, dtype=seg_quality.dtype)
+
+            for sample_idx, action_id in enumerate(action.tolist()):
+                if not learned_mask[sample_idx]:
+                    continue
+                baseline = self.action_reward_baseline[action_id].detach().to(device=device)
+                action_cost = action_cost_vec[action_id]
+                centered_reward = seg_quality - baseline - action_cost
+                advantage = centered_reward.clamp(-self.adv_clamp, self.adv_clamp)
+                if self.enable_rl_loss and self.lambda_rl > 0:
+                    rl_loss_terms.append(-advantage * log_prob[sample_idx])
+                if self.lambda_entropy > 0:
+                    entropy_terms.append(entropy[sample_idx])
+
+                reward_logs[f"reward_{action_id}"].append(centered_reward.detach())
+                reward_logs[f"advantage_{action_id}"].append(advantage.detach())
+                reward_logs["entropy"].append(entropy[sample_idx].detach())
+                reward_logs["rule_agreement"].append(aux["action_agreement"].flatten()[sample_idx].detach())
+
+                with torch.no_grad():
+                    old = self.action_reward_baseline[action_id]
+                    self.action_reward_baseline[action_id] = (
+                        self.rl_baseline_momentum * old
+                        + (1.0 - self.rl_baseline_momentum) * seg_quality.float().cpu()
+                    )
+
+        out = {}
+        if rl_loss_terms:
+            out["rl_loss"] = torch.stack(rl_loss_terms).mean() * self.lambda_rl
+        if entropy_terms:
+            out["entropy_reg"] = -torch.stack(entropy_terms).mean() * self.lambda_entropy
+
+        action_names = ["keep", "refine", "replace", "spawn"]
+        for idx, name in enumerate(action_names):
+            if reward_logs[f"reward_{idx}"]:
+                out[f"reward_{name}"] = torch.stack(reward_logs[f"reward_{idx}"]).mean()
+            if reward_logs[f"advantage_{idx}"]:
+                out[f"advantage_{name}"] = torch.stack(reward_logs[f"advantage_{idx}"]).mean()
+            out[f"baseline_{name}"] = self.action_reward_baseline[idx].detach().to(device)
+        if reward_logs["entropy"]:
+            out["policy_entropy"] = torch.stack(reward_logs["entropy"]).mean()
+        if reward_logs["rule_agreement"]:
+            out["policy_rule_agreement"] = torch.stack(reward_logs["rule_agreement"]).mean()
+        return out
 
     def _compute_policy_loss(self, data: Dict[str, torch.Tensor]) -> torch.Tensor | None:
         supervised_indices = data.get('supervised_indices')

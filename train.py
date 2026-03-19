@@ -58,9 +58,11 @@ def train(cfg: DictConfig):
     if main_process:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
         cfg_dict_wandb = OmegaConf.to_container(cfg, resolve=True)
+        wandb_project = os.environ.get("WANDB_PROJECT", "GDKVM_2025")
+        wandb_entity = os.environ.get("WANDB_ENTITY", "team-wangrui")
         wandb.init(
-            project="GDKVM_2025",
-            entity="team-wangrui",
+            project=wandb_project,
+            entity=wandb_entity,
             name=f"run_{timestamp}",
             config=cfg_dict_wandb,
             reinit="finish_previous",

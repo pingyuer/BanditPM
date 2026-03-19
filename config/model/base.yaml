@@ -66,19 +66,39 @@ temporal_memory:
     ENABLE: false
     USE_RULE_BASED_POLICY: true
     USE_LEARNED_POLICY: false
+    EXEC_POLICY: "rule"   # rule / learned / mixed
     ENABLE_POLICY_LOSS: false
+    ENABLE_POLICY_CE_LOSS: false
+    ENABLE_RL_LOSS: false
+    RL_ON_SUPERVISED_FRAMES_ONLY: true
     TRAIN_POLICY_ONLY: false
     FREEZE_BACKBONE: false
 
     BANK_SIZE: 4
     PROTO_ALPHA: 0.1
+    REFINE_EMA_ALPHA: 0.1
     POLICY_LOSS_WEIGHT: 1.0
+    LAMBDA_POLICY_CE: 0.5
+    LAMBDA_RL: 0.05
+    LAMBDA_ENTROPY: 0.001
+    RL_BASELINE_MOMENTUM: 0.95
+    ADV_CLAMP: 1.0
     POLICY_HIDDEN_DIM: 256
+    POLICY_WARMUP_EPOCHS: 20
+    SAMPLE_ACTIONS_IN_TRAIN: true
+    EXEC_GREEDY_ON_EVAL: true
+    EPSILON_RULE_MIX_INIT: 1.0
+    EPSILON_RULE_MIX_FINAL: 0.1
+    EPSILON_RULE_MIX_EPOCHS: 30
     READOUT_TEMPERATURE: 1.0
     SIM_THRESHOLD_HIGH: 0.8
     SIM_THRESHOLD_LOW: 0.5
     DEFAULT_ACTION: 1
     SPAWN_REPLACE_WHEN_FULL: true
+    SPAWN_WITHOUT_EMPTY_SLOT: "replace_fallback"
+    VICTIM_WEIGHT_AGE: 1.0
+    VICTIM_WEIGHT_USAGE: 1.0
+    VICTIM_WEIGHT_CONF: 1.0
     PROTO_POOLING: "mask"
     FUSION_TYPE: "add"
     DEBUG_MODE: false
@@ -87,7 +107,7 @@ temporal_memory:
       keep: 0.0
       refine: 0.05
       replace: 0.1
-      spawn: 0.2
+      spawn: 0.12
 
 prototype_value:
   enable: false
