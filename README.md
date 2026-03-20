@@ -1,17 +1,19 @@
-# GDKVM 
+# BanditPM
 
 ## ICCV 2025
 
 <div align="center">
 
-**GDKVM: Echocardiography Video Segmentation via Spatiotemporal Key-Value Memory with Gated Delta Rule**
+**BanditPM: a research codebase built on top of the original GDKVM implementation**
 
 [![arXiv](https://img.shields.io/badge/arXiv-2512.10252-b31b1b.svg)](https://arxiv.org/abs/2512.10252)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 </div>
 
-Please refer to our **[Reproduction Process](https://wangrui2025.github.io/GDKVM/reprod/index.html)**.
+This repository keeps the original GDKVM training shell and model style, while preparing the temporal-memory path for future BanditPM replacement.
+
+Please refer to the original **[GDKVM reproduction process](https://wangrui2025.github.io/GDKVM/reprod/index.html)** for the published baseline.
 
 ## 🔗 Citation
 If you find this work helpful for your research, please cite our paper:

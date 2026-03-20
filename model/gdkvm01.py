@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from model.utils import resnet
 from model.aux_modules import AuxComputer
-from model.modules import PrototypeValueHead, BanditPrototypeManager
+from model.modules import MemoryCore
 from model.transformer.object_transformer import QueryTransformer
 from model.transformer.object_summarizer import ObjectSummarizer
 from utils.tensor_utils import aggregate
@@ -247,9 +247,12 @@ class GDKVM(nn.Module):
             use_first_frame_gt_init: bool = True,
             prototype_value_cfg=None,
             temporal_memory_cfg=None,
+            memory_core_cfg=None,
+            use_kpff: bool = True,
     ) -> None:
         super().__init__()
         self.use_first_frame_gt_init = use_first_frame_gt_init
+        self.use_kpff = use_kpff
         self.ms_dims = {
             'resnet50': [1024, 512, 256], 
             'resnet18': [256, 128, 64],
@@ -292,102 +295,42 @@ class GDKVM(nn.Module):
             self.value_dim, self.embed_dim, self.num_queries, add_pe=True)
 
         self.aux_computer = AuxComputer(self.sensory_dim, self.embed_dim)
-        self.prototype_value_cfg = prototype_value_cfg
-        self.temporal_memory_cfg = temporal_memory_cfg
-        self.prototype_value_head = None
-        if prototype_value_cfg is not None and bool(prototype_value_cfg.enable):
-            self.prototype_value_head = PrototypeValueHead(
-                prototype_value_cfg,
-                input_dim=self.value_dim,
-                value_dim=self.value_dim,
-            )
-        self.temporal_memory_type = "gdr"
-        self.prototype_manager = None
-        self.bpm_key_adapter = None
-        if temporal_memory_cfg is not None:
-            self.temporal_memory_type = str(temporal_memory_cfg.get("type", "gdr")).lower()
-            if self.temporal_memory_type == "bpm" and bool(temporal_memory_cfg.bpm.get("ENABLE", True)):
-                self.prototype_manager = BanditPrototypeManager(
-                    temporal_memory_cfg.bpm,
-                    value_dim=self.value_dim,
-                )
-                self.bpm_key_adapter = nn.Conv2d(self.key_dim, self.value_dim, kernel_size=1)
+        self.memory_core = MemoryCore(
+            value_dim=self.value_dim,
+            key_dim=self.key_dim,
+            prototype_value_cfg=prototype_value_cfg,
+            temporal_memory_cfg=temporal_memory_cfg,
+            memory_core_cfg=memory_core_cfg,
+        )
 
         self.register_buffer(
             "pixel_mean", torch.Tensor([0.5]).view(-1, 1, 1), False)
         self.register_buffer(
             "pixel_std", torch.Tensor([0.5]).view(-1, 1, 1), False)
-        
-        self.b_proj = nn.Linear(self.value_dim, self.num_heads, bias=False)
-        self.a_proj = nn.Linear(self.value_dim, self.num_heads, bias=False)
-        A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
-        A_log = torch.log(A)
-        self.A_log = nn.Parameter(A_log)
-        self.A_log._no_weight_decay = True
-        dt_min = 0.001
-        dt_max = 0.1
-        dt_init_floor = 1e-4
-        dt = torch.exp(
-            torch.rand(self.num_heads) * (math.log(dt_max) - math.log(dt_min))
-            + math.log(dt_min)
-        )
-        dt = torch.clamp(dt, min=dt_init_floor)
-        # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-        inv_dt = dt + torch.log(-torch.expm1(-dt))
-        self.dt_bias = nn.Parameter(inv_dt)
-        # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
-        # name.endswith("bias") in param_grouping.py
-        self.dt_bias._no_weight_decay = True
-        self._configure_temporal_path_trainability()
 
-    def _is_temporal_mode(self, mode: str) -> bool:
-        return self.temporal_memory_type == mode
+    @property
+    def A_log(self):
+        return self.memory_core.gdr_core.A_log
 
-    def _configure_temporal_path_trainability(self) -> None:
-        if self.temporal_memory_type != "gdr":
-            for param in [self.A_log, self.dt_bias, self.b_proj.weight, self.a_proj.weight]:
-                param.requires_grad = False
+    @property
+    def dt_bias(self):
+        return self.memory_core.gdr_core.dt_bias
 
-    def _get_bpm_frame_feature(
-        self,
-        pixfeat_BCHW: torch.Tensor,
-        key_BCHW: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.bpm_key_adapter is None:
-            return pixfeat_BCHW
-        return pixfeat_BCHW + self.bpm_key_adapter(key_BCHW)
-    
-    def _select_proto_feature(
-        self,
-        feature_source: str,
-        value_BNCHW: torch.Tensor,
-        pixfeat_BCHW: torch.Tensor,
-    ) -> torch.Tensor:
-        if feature_source in {"value", "value_mid"}:
-            return value_BNCHW
-        if feature_source in {"encoder", "shared"}:
-            return pixfeat_BCHW
-        raise ValueError(f"Unsupported prototype feature_source={feature_source!r}")
+    @property
+    def b_proj(self):
+        return self.memory_core.gdr_core.b_proj
 
-    def _maybe_apply_prototype_value(
-        self,
-        value_BNCHW: torch.Tensor,
-        pixfeat_BCHW: torch.Tensor,
-        out: Dict,
-        time_idx: int,
-    ) -> torch.Tensor:
-        if self.prototype_value_head is None:
-            return value_BNCHW
+    @property
+    def a_proj(self):
+        return self.memory_core.gdr_core.a_proj
 
-        feat_t = self._select_proto_feature(
-            self.prototype_value_head.feature_source,
-            value_BNCHW,
-            pixfeat_BCHW,
-        )
-        value_out, proto_aux = self.prototype_value_head(feat_t=feat_t, v_orig=value_BNCHW)
-        if proto_aux:
-            out[f'proto_aux_{time_idx}'] = proto_aux
-        return value_out
+    @property
+    def bpm_key_adapter(self):
+        return self.memory_core.bpm_key_adapter
+
+    @property
+    def prototype_manager(self):
+        return self.memory_core.prototype_manager
 
     def encode_image(
         self, image: torch.Tensor
@@ -497,14 +440,11 @@ class GDKVM(nn.Module):
 
         images_BTCHW = data['rgb']
         B, T         = images_BTCHW.shape[:2]
-        if self.prototype_value_head is not None and self.prototype_value_head.reset_per_video:
-            self.prototype_value_head.reset_state(batch_size=B, device=images_BTCHW.device)
-        if self.prototype_manager is not None:
-            self.prototype_manager.reset_state(
-                batch_size=B,
-                num_objects=max_num_objects,
-                device=images_BTCHW.device,
-            )
+        self.memory_core.reset_state(
+            batch_size=B,
+            num_objects=max_num_objects,
+            device=images_BTCHW.device,
+        )
         
         # Optimization: Use channels_last memory format for acceleration.
         images_DCHW  = images_BTCHW.reshape(B*T, *images_BTCHW.shape[2:]) 
@@ -522,7 +462,8 @@ class GDKVM(nn.Module):
 
         # 其他投影等
         key_DCHW  = self.key_projector(feat_DCHW)
-        key_DCHW = self.KPFF(key_DCHW, pixfeat_DCHW)
+        if self.use_kpff:
+            key_DCHW = self.KPFF(key_DCHW, pixfeat_DCHW)
         key_BTCHW = key_DCHW.view(B, T, *key_DCHW.shape[1:])
 
         # Extract 0-th frame image and mask.
@@ -544,12 +485,6 @@ class GDKVM(nn.Module):
             first_frame_image_BCHW, first_frame_pixfeat_BCHW,
             first_frame_mask_BNHW, sensory_BNCHW, deep_update=True
         )
-        value_BNCHW = self._maybe_apply_prototype_value(
-            value_BNCHW=value_BNCHW,
-            pixfeat_BCHW=first_frame_pixfeat_BCHW,
-            out=out,
-            time_idx=0,
-        )
 
         # Obtain initial object memory.
         object_memory_sum_BNQC = object_memory_BNQC.clone()
@@ -560,25 +495,20 @@ class GDKVM(nn.Module):
         this_pixfeat_BCHW = pixfeat_BTCHW[:, 0]
         # Optimization: Slice pre-processed features.
         this_ms_feats = [f[:, 0] for f in ms_feats_reshaped]
-        if self._is_temporal_mode("gdr"):
-            key_BCHW = key_BTCHW[:, 0]
-            key_max_B1HW = torch.max(key_BCHW, dim=1, keepdim=True).values
-            key_BCHW = (key_BCHW - key_max_B1HW).softmax(dim=1)
-            state_BNCC = torch.einsum('bkhw,bnvhw->bnkv', key_BCHW, value_BNCHW)
-            this_readout_BNCHW = torch.einsum(
-                'bkhw,bnkv->bnvhw', key_BCHW, state_BNCC).contiguous()
-        elif self._is_temporal_mode("bpm"):
-            this_key_BCHW = key_BTCHW[:, 0]
-            bpm_frame_feat_BCHW = self._get_bpm_frame_feature(this_pixfeat_BCHW, this_key_BCHW)
-            this_readout_BNCHW, bpm_aux = self.prototype_manager(
-                value_BNCHW=value_BNCHW,
-                frame_feat_BCHW=bpm_frame_feat_BCHW,
-                mask_BNHW=first_frame_mask_BNHW,
-                policy_meta=policy_meta,
-            )
-            out[f'bpm_aux_{0}'] = bpm_aux
-        else:
-            this_readout_BNCHW = value_BNCHW
+        this_key_BCHW = key_BTCHW[:, 0]
+        # The temporal/prototype "memory bottom" is now collected behind one call site.
+        this_readout_BNCHW, memory_aux = self.memory_core(
+            value_BNCHW=value_BNCHW,
+            key_BCHW=this_key_BCHW,
+            pixfeat_BCHW=this_pixfeat_BCHW,
+            mask_BNHW=first_frame_mask_BNHW,
+            policy_meta=policy_meta,
+        )
+        out[f'memory_aux_{0}'] = memory_aux
+        if 'proto_value_aux' in memory_aux:
+            out[f'proto_aux_{0}'] = memory_aux['proto_value_aux']
+        if memory_aux.get('memory_type') == 'bpm':
+            out[f'bpm_aux_{0}'] = memory_aux
 
         this_logits_BNHW, this_masks_BNHW, sensory_BNCHW, aux = self.segment(
                 this_ms_feats, 
@@ -601,48 +531,19 @@ class GDKVM(nn.Module):
                 this_image_BCHW, this_pixfeat_BCHW,
                 last_masks_BNHW,
                 sensory_BNCHW, deep_update=True)
-            this_value_BNCHW = self._maybe_apply_prototype_value(
+            this_key_BCHW = key_BTCHW[:, i]
+            this_readout_BNCHW, memory_aux = self.memory_core(
                 value_BNCHW=this_value_BNCHW,
+                key_BCHW=this_key_BCHW,
                 pixfeat_BCHW=this_pixfeat_BCHW,
-                out=out,
-                time_idx=i,
+                mask_BNHW=last_masks_BNHW,
+                policy_meta=policy_meta,
             )
-            if self._is_temporal_mode("gdr"):
-                state_t_1_BNCC = state_BNCC.clone()
-                this_key_BCHW = key_BTCHW[:, i]
-                this_key_max_B1HW = torch.max(this_key_BCHW, dim=1, keepdim=True).values
-                this_key_BCHW = (this_key_BCHW - this_key_max_B1HW).softmax(dim=1)
-
-                v_old = torch.einsum('bkhw,bnkv->bnvhw', this_key_BCHW, state_t_1_BNCC).contiguous()
-                v_k = torch.einsum('bkhw,bnvhw->bnkv', this_key_BCHW, v_old)
-
-                beta_t = self.b_proj(state_t_1_BNCC).sigmoid()
-                beta_t_expan_b = beta_t.repeat_interleave(256 // self.num_heads, dim=3)
-                eraser = torch.einsum('bnkv,bnkv->bnkv', beta_t_expan_b, v_k).contiguous()
-
-                vk_t = torch.einsum('bkhw,bnvhw->bnkv', this_key_BCHW, this_value_BNCHW).contiguous()
-                new = torch.einsum('bnkv,bnkv->bnkv', beta_t_expan_b, vk_t).contiguous()
-
-                old = state_t_1_BNCC - eraser
-                alpha = -self.A_log.float().exp() * F.softplus(self.a_proj(state_t_1_BNCC).float() + self.dt_bias)
-                alpha_expanded = alpha.repeat_interleave(256 // 8, dim=3)
-                old = torch.einsum('bnkv,bnkv->bnkv', alpha_expanded, old).contiguous()
-
-                state_BNCC = old + new
-                this_readout_BNCHW = torch.einsum(
-                    'bkhw,bnkv->bnvhw', this_key_BCHW, state_BNCC).contiguous()
-            elif self._is_temporal_mode("bpm"):
-                this_key_BCHW = key_BTCHW[:, i]
-                bpm_frame_feat_BCHW = self._get_bpm_frame_feature(this_pixfeat_BCHW, this_key_BCHW)
-                this_readout_BNCHW, bpm_aux = self.prototype_manager(
-                    value_BNCHW=this_value_BNCHW,
-                    frame_feat_BCHW=bpm_frame_feat_BCHW,
-                    mask_BNHW=last_masks_BNHW,
-                    policy_meta=policy_meta,
-                )
-                out[f'bpm_aux_{i}'] = bpm_aux
-            else:
-                this_readout_BNCHW = this_value_BNCHW
+            out[f'memory_aux_{i}'] = memory_aux
+            if 'proto_value_aux' in memory_aux:
+                out[f'proto_aux_{i}'] = memory_aux['proto_value_aux']
+            if memory_aux.get('memory_type') == 'bpm':
+                out[f'bpm_aux_{i}'] = memory_aux
 
             # Segment
             # Optimization: Slice directly.

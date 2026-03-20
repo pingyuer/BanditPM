@@ -28,6 +28,13 @@ from monai.metrics import (
 
 log = logging.getLogger(__name__)
 
+
+def _contains_policy_head(name: str) -> bool:
+    return (
+        "prototype_manager.policy_head" in name
+        or "memory_core.prototype_manager.policy_head" in name
+    )
+
 class Trainer:
     def __init__(
         self,
@@ -48,6 +55,7 @@ class Trainer:
         self.test_loader = test_loader
 
         self.exp_id = cfg["exp_id"]
+        self.model_name = str(cfg.get("model_name", cfg.model.get("name", "BanditPM")))
         self.stage = stage_cfg["name"]
         self.use_amp = stage_cfg.amp
         self.crop_size = stage_cfg["crop_size"]
@@ -64,6 +72,8 @@ class Trainer:
             use_first_frame_gt_init=bool(cfg.model.get("use_first_frame_gt_init", True)),
             prototype_value_cfg=cfg.model.get("prototype_value", None),
             temporal_memory_cfg=cfg.model.get("temporal_memory", None),
+            memory_core_cfg=cfg.model.get("memory_core", None),
+            use_kpff=bool(cfg.model.get("use_kpff", True)),
         ).to(self.device)
         model = model.to(memory_format=torch.channels_last)
         self._apply_training_freeze(model)
@@ -149,7 +159,7 @@ class Trainer:
             for _, param in model.named_parameters():
                 param.requires_grad = False
             for name, param in model.named_parameters():
-                if "prototype_manager.policy_head" in name:
+                if _contains_policy_head(name):
                     param.requires_grad = True
 
     def _init_scheduler(self, stage_cfg):
@@ -318,12 +328,12 @@ class Trainer:
     def _wandb_log(self, losses, total_loss, it):
         try:
             log_dict = {
-                "loss": total_loss,
-                "lr": self.scheduler.get_last_lr()[0],
+                "train/loss": total_loss,
+                "train/lr": self.scheduler.get_last_lr()[0],
             }
             for k, v in losses.items():
                 if isinstance(v, torch.Tensor):
-                    log_dict[k] = v.item()
+                    log_dict[f"train/{k}"] = v.item()
             wandb.log(log_dict, step=it)
         except Exception:
             pass
@@ -562,11 +572,19 @@ class Trainer:
         except Exception:
             pass
 
+    def save_weights(self, it: int):
+        if not self.main_process:
+            return
+        self.run_path.mkdir(parents=True, exist_ok=True)
+        weights_path = self.run_path / f"{self.model_name}_iter_{it}.pth"
+        torch.save(self.model_without_ddp.state_dict(), weights_path)
+        self.log.info(f"Saved weights: {weights_path}")
+
     def save_checkpoint(self, it: int):
         if not self.main_process:
             return
         self.run_path.mkdir(parents=True, exist_ok=True)
-        ckpt_path = self.run_path / f"{self.exp_id}_{self.stage}_ckpt_{it}.pth"
+        ckpt_path = self.run_path / f"{self.model_name}_{self.stage}_ckpt_{it}.pth"
 
         torch.save(
             {

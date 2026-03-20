@@ -1,0 +1,13 @@
+defaults:
+  - config_banditpm_baseline
+  - _self_
+
+exp_id: "banditpm_placeholder"
+
+wandb:
+  group: "banditpm_placeholder"
+  tags: ["placeholder", "banditpm"]
+
+model:
+  memory_core:
+    type: "banditpm_placeholder"

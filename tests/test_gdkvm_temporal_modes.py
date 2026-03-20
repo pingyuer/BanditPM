@@ -1,7 +1,7 @@
 import unittest
 from unittest import mock
 
-from omegaconf import OmegaConf
+from hydra import compose, initialize
 
 from model.gdkvm01 import GDKVM
 
@@ -25,17 +25,20 @@ class GDKVMTemporalModeTests(unittest.TestCase):
         mock_resnet50.return_value = DummyBackbone()
         mock_resnet18.return_value = DummyBackbone()
 
-        cfg = OmegaConf.load("config/config_gdkvm_bpm.yaml")
+        with initialize(version_base="1.3.2", config_path="../config"):
+            cfg = compose(config_name="config_gdkvm_bpm.yaml")
         model = GDKVM(
             use_first_frame_gt_init=bool(cfg.model.get("use_first_frame_gt_init", True)),
             prototype_value_cfg=cfg.model.get("prototype_value", None),
             temporal_memory_cfg=cfg.model.get("temporal_memory", None),
+            memory_core_cfg=cfg.model.get("memory_core", None),
+            use_kpff=bool(cfg.model.get("use_kpff", True)),
         )
 
-        self.assertFalse(model.A_log.requires_grad)
-        self.assertFalse(model.dt_bias.requires_grad)
-        self.assertFalse(model.b_proj.weight.requires_grad)
-        self.assertFalse(model.a_proj.weight.requires_grad)
+        self.assertFalse(model.memory_core.gdr_core.A_log.requires_grad)
+        self.assertFalse(model.memory_core.gdr_core.dt_bias.requires_grad)
+        self.assertFalse(model.memory_core.gdr_core.b_proj.weight.requires_grad)
+        self.assertFalse(model.memory_core.gdr_core.a_proj.weight.requires_grad)
         self.assertIsNotNone(model.bpm_key_adapter)
 
 

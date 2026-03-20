@@ -1,0 +1,23 @@
+defaults:
+  - config_gdkvm_01
+  - _self_
+
+exp_id: "banditpm_baseline"
+model_name: "BanditPM"
+output_root: "outputs/BanditPM"
+
+wandb:
+  project: "BanditPM"
+  group: "baseline"
+  name: ""
+  tags: ["baseline", "original_gdr"]
+
+model:
+  name: "BanditPM"
+  use_kpff: true
+  memory_core:
+    type: "original_gdr"
+
+hydra:
+  run:
+    dir: ${output_root}/${exp_id}/${now:%Y-%m-%d}/${now:%H-%M-%S}

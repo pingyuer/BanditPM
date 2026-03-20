@@ -27,6 +27,27 @@ from utils.logger import TensorboardLogger
 log = logging.getLogger(__name__)
 
 
+def resolve_model_name(cfg: DictConfig) -> str:
+    return str(cfg.get("model_name", cfg.model.get("name", "BanditPM")))
+
+
+def resolve_wandb_settings(cfg: DictConfig) -> dict:
+    wandb_cfg = cfg.get("wandb", {})
+    model_name = resolve_model_name(cfg)
+    dataset_name = str(cfg.get("dataset_name", "dataset"))
+    exp_name = str(cfg.get("exp_id", "experiment"))
+    seed = int(cfg.get("seed", 42))
+    default_name = f"{model_name}_{dataset_name}_{exp_name}_seed{seed}"
+    entity = os.environ.get("WANDB_ENTITY", str(wandb_cfg.get("entity", ""))).strip()
+    return {
+        "project": os.environ.get("WANDB_PROJECT", str(wandb_cfg.get("project", "BanditPM"))),
+        "entity": entity or None,
+        "group": str(wandb_cfg.get("group", exp_name)),
+        "name": str(wandb_cfg.get("name", "")) or default_name,
+        "tags": list(wandb_cfg.get("tags", [])),
+    }
+
+
 def resolve_dataset_class(cfg: DictConfig):
     dataset_name = str(cfg.get("dataset_name", "")).lower().strip()
     if not dataset_name:
@@ -45,7 +66,7 @@ def resolve_dataset_class(cfg: DictConfig):
     return dataset_name, dataset_map[dataset_name]
 
 
-@hydra.main(version_base="1.3.2", config_path="config", config_name="config_gdkvm_01.yaml")
+@hydra.main(version_base="1.3.2", config_path="config", config_name="config_banditpm_baseline.yaml")
 def train(cfg: DictConfig):
     os.environ.setdefault("WANDB_MODE", cfg.get("wandb_mode", "offline"))
     dataset_name, dataset_cls = resolve_dataset_class(cfg)
@@ -58,13 +79,15 @@ def train(cfg: DictConfig):
     if main_process:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
         cfg_dict_wandb = OmegaConf.to_container(cfg, resolve=True)
-        wandb_project = os.environ.get("WANDB_PROJECT", "GDKVM_2025")
-        wandb_entity = os.environ.get("WANDB_ENTITY", "team-wangrui")
+        wandb_settings = resolve_wandb_settings(cfg)
         wandb.init(
-            project=wandb_project,
-            entity=wandb_entity,
-            name=f"run_{timestamp}",
+            project=wandb_settings["project"],
+            entity=wandb_settings["entity"],
+            group=wandb_settings["group"],
+            name=f"{wandb_settings['name']}_{timestamp}",
+            tags=wandb_settings["tags"],
             config=cfg_dict_wandb,
+            dir=HydraConfig.get().run.dir,
             reinit="finish_previous",
         )
         wandb.config.update(cfg_dict_wandb, allow_val_change=True)

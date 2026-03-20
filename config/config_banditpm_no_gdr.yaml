@@ -1,0 +1,13 @@
+defaults:
+  - config_banditpm_baseline
+  - _self_
+
+exp_id: "banditpm_no_gdr"
+
+wandb:
+  group: "ablation_no_gdr"
+  tags: ["ablation", "no_gdr", "kpff"]
+
+model:
+  memory_core:
+    type: "none"

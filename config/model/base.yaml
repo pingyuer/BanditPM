@@ -1,3 +1,4 @@
+name: "BanditPM"
 pixel_mean: [0.485]
 pixel_std: [0.229]
 
@@ -58,6 +59,10 @@ mask_decoder:
   up_dims: [256, 128, 128]
 
 use_first_frame_gt_init: True
+use_kpff: True
+
+memory_core:
+  type: "original_gdr"  # original_gdr | none | bpm | static_proto | banditpm_placeholder
 
 temporal_memory:
   type: "gdr"  # gdr | none | bpm
