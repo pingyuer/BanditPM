@@ -1,0 +1,21 @@
+defaults:
+  - config_banditpm_baseline
+  - _self_
+
+exp_id: "echonet_ed2es_endpoint_oracle"
+dataset_name: "echonet"
+data_path: "/home/tahara/datasets/processed/echonet_png128_10f"
+
+data:
+  protocol_name: "echonet_ed2es_endpoint"
+
+phase_init:
+  train: "oracle_gt"
+  val: "oracle_gt"
+  test: "oracle_gt"
+
+evaluation:
+  frame_scope: "supervised_only"
+  init_mode: "oracle_gt"
+  metric_space: "original"
+

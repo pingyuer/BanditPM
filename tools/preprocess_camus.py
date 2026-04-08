@@ -33,6 +33,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
+        "--sampling_mode",
+        type=str,
+        default="short",
+        choices=["short", "full"],
+        help="short=ED->ES span, full=sample the full available sequence volume.",
+    )
+    parser.add_argument(
         "--lv_label",
         type=int,
         default=1,
@@ -188,6 +195,12 @@ def sample_frame_indices(start_idx: int, end_idx: int, num_frames: int) -> tuple
     return indices, len(set(indices)) < num_frames
 
 
+def resolve_output_dataset_name(args: argparse.Namespace) -> str:
+    if args.sampling_mode == "short":
+        return DATASET_NAME
+    return f"camus_{args.sampling_mode}_png256_{args.num_frames}f"
+
+
 def save_png(array: np.ndarray, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(array).save(path)
@@ -230,7 +243,7 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
     if not db_root.exists():
         raise FileNotFoundError(f"CAMUS root not found: {db_root}")
 
-    output_dir = (args.output_root / DATASET_NAME).expanduser()
+    output_dir = (args.output_root / resolve_output_dataset_name(args)).expanduser()
     if output_dir.exists() and args.overwrite:
         shutil.rmtree(output_dir)
     elif output_dir.exists() and any(output_dir.iterdir()):
@@ -270,8 +283,14 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                 )
 
             num_available = half_seq.shape[0]
-            start_idx = min(ed_idx, es_idx, num_available - 1)
-            end_idx = min(max(ed_idx, es_idx), num_available - 1)
+            if args.sampling_mode == "full":
+                start_idx = 0
+                end_idx = num_available - 1
+                protocol_name = "camus_full_dense"
+            else:
+                start_idx = min(ed_idx, es_idx, num_available - 1)
+                end_idx = min(max(ed_idx, es_idx), num_available - 1)
+                protocol_name = "camus_short_dense"
             indices, used_repeat = sample_frame_indices(start_idx, end_idx, args.num_frames)
             case_lv_label, lv_reason = choose_lv_label(half_seq_gt, configured_lv_label)
 
@@ -288,6 +307,23 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
 
                 save_png(img, img_dir / f"{out_idx:04d}.png")
                 save_png(mask, mask_dir / f"{out_idx:04d}.png")
+
+            sample_meta = {
+                "dataset": "camus",
+                "mode": args.sampling_mode,
+                "protocol_name": protocol_name,
+                "num_frames": args.num_frames,
+                "label_indices": list(range(args.num_frames)),
+                "source_frames": indices,
+                "original_size": list(half_seq.shape[1:3]),
+                "resized_size": [256, 256],
+                "patient_id": patient_id,
+            }
+            (output_dir / "metadata").mkdir(parents=True, exist_ok=True)
+            (output_dir / "metadata" / f"{patient_id}.json").write_text(
+                json.dumps(sample_meta, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
             processed_patients.add(patient_id)
             stats["processed"] += 1
@@ -344,6 +380,8 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
         "skipped": stats["skipped"],
         "skip_reason_counts": dict(skip_reasons),
         "split_counts": dict(stats["split_counts"]),
+        "sampling_mode": args.sampling_mode,
+        "protocol_name": "camus_full_dense" if args.sampling_mode == "full" else "camus_short_dense",
     }
     LOGGER.info("CAMUS preprocess summary:\n%s", json.dumps(report, indent=2, ensure_ascii=False))
     return output_dir

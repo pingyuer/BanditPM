@@ -11,6 +11,13 @@ from dataset.utils import sort_by_number
 
 log = logging.getLogger(__name__)
 
+
+def _infer_camus_protocol(filepath: str) -> str:
+    lower = filepath.lower()
+    if "camus_full" in lower:
+        return "camus_full_dense"
+    return "camus_short_dense"
+
 class TenCamusDataset(Dataset):
     def __init__(self, filepath: str, mode: str = 'train', seq_length=10, max_num_obj=1, size=256, merge_probability=0.0):
         super().__init__()
@@ -51,6 +58,7 @@ class TenCamusDataset(Dataset):
                 'img_dir': img_dir,
                 'mask_dir': mask_dir,
                 'img_list': img_list,
+                'meta_path': os.path.join(self.filepath, 'metadata', f'{pid}.json'),
             })
 
     def __len__(self):
@@ -69,6 +77,12 @@ class TenCamusDataset(Dataset):
             start_frame_idx = 0
             
         sampled_names = img_list[start_frame_idx : start_frame_idx + self.seq_length]
+
+        sample_meta = {}
+        meta_path = sample.get('meta_path')
+        if meta_path and os.path.isfile(meta_path):
+            with open(meta_path, 'r', encoding='utf-8') as handle:
+                sample_meta = json.load(handle)
 
         imgs_np = np.zeros((self.seq_length, self.size, self.size), dtype=np.uint8)
         masks_np = np.zeros((self.seq_length, self.size, self.size), dtype=np.uint8)
@@ -113,6 +127,15 @@ class TenCamusDataset(Dataset):
         first_frame_gt = torch.zeros((1, self.max_num_obj, self.size, self.size), dtype=torch.long)
         selector = torch.zeros(self.max_num_obj, dtype=torch.float32)
         label_valid = torch.ones(self.seq_length, dtype=torch.bool)
+        eval_valid = torch.ones(self.seq_length, dtype=torch.bool)
+
+        frame_indices = sample_meta.get('source_frames')
+        if not frame_indices:
+            frame_indices = list(range(start_frame_idx, start_frame_idx + self.seq_length))
+        original_size = sample_meta.get('original_size', [self.size, self.size])
+        protocol_name = sample_meta.get('protocol_name', _infer_camus_protocol(self.filepath))
+        original_sizes = torch.tensor([original_size] * self.seq_length, dtype=torch.long)
+        resized_sizes = torch.tensor([[self.size, self.size]] * self.seq_length, dtype=torch.long)
 
         if masks_t[0].max() > 0:
             selector[0] = 1.0
@@ -127,8 +150,13 @@ class TenCamusDataset(Dataset):
             'ff_gt': first_frame_gt,
             'cls_gt': cls_gt,
             'label_valid': label_valid,
+            'eval_valid': eval_valid,
             'selector': selector,
             'info': info,
+            'original_size': original_sizes,
+            'resized_size': resized_sizes,
+            'frame_indices': torch.tensor(frame_indices, dtype=torch.long),
+            'protocol_name': protocol_name,
         }
 
         return data

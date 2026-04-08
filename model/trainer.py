@@ -1,9 +1,12 @@
 import os
 import logging
+import csv
+import subprocess
 from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -57,11 +60,11 @@ class Trainer:
         self.exp_id = cfg["exp_id"]
         self.model_name = str(cfg.get("model_name", cfg.model.get("name", "BanditPM")))
         self.stage = stage_cfg["name"]
-        self.use_amp = stage_cfg.amp
         self.crop_size = stage_cfg["crop_size"]
 
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        self.device = torch.device(f"cuda:{self.local_rank}")
+        self.device = torch.device(f"cuda:{self.local_rank}") if torch.cuda.is_available() else torch.device("cpu")
+        self.use_amp = bool(stage_cfg.amp) and self.device.type == "cuda"
 
         self.is_distributed = dist.is_available() and dist.is_initialized()
         self.rank = dist.get_rank() if self.is_distributed else 0
@@ -115,7 +118,7 @@ class Trainer:
         )
         self.loss_computer = LossComputer(cfg, stage_cfg)
         self.scaler = torch.amp.GradScaler(
-            "cuda", init_scale=8192, enabled=self.use_amp
+            self.device.type, init_scale=8192, enabled=self.use_amp
         )
         self.clip_grad_norm = stage_cfg["clip_grad_norm"]
 
@@ -131,6 +134,7 @@ class Trainer:
         )
 
         self._init_metrics()
+        self.commit_hash = self._resolve_commit_hash()
 
     @property
     def model_without_ddp(self) -> nn.Module:
@@ -184,11 +188,6 @@ class Trainer:
             )
 
     def _init_metrics(self):
-        self.dice_metric = DiceMetric(include_background=False, reduction="mean")
-        self.iou_metric  = MeanIoU(include_background=False, reduction="mean")
-        self.hd_metric   = HausdorffDistanceMetric(include_background=False, percentile=95, reduction="mean")
-        self.assd_metric = SurfaceDistanceMetric(include_background=False, symmetric=True, reduction="mean")
-
         self.conf_metric_names = [
             "precision",
             "recall",
@@ -196,11 +195,136 @@ class Trainer:
             "specificity",
             "f1 score",
         ]
-        self.conf_metric = ConfusionMatrixMetric(
-            include_background=False, 
-            metric_name=self.conf_metric_names,
-            reduction="mean",
-        )
+        self.conf_metric = ConfusionMatrixMetric(include_background=False, metric_name=self.conf_metric_names, reduction="mean")
+
+    def _resolve_commit_hash(self) -> str:
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+            ).strip()
+        except Exception:
+            return "unknown"
+
+    def _resolve_phase_init(self, phase: str) -> str:
+        phase_cfg = self.cfg.get("phase_init", {})
+        default_mode = "oracle_gt" if bool(self.cfg.model.get("use_first_frame_gt_init", True)) else "pred_or_zero"
+        return str(phase_cfg.get(phase, self.cfg.get("evaluation", {}).get("init_mode", default_mode)))
+
+    def _resolve_eval_indices(self, data):
+        frame_scope = str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only"))
+        if frame_scope == "all_available":
+            eval_valid = data.get("eval_valid")
+            if eval_valid is not None:
+                source = eval_valid
+            else:
+                source = data.get("label_valid")
+        else:
+            source = data.get("label_valid")
+
+        if source is None:
+            T = data["rgb"].shape[1]
+            return torch.arange(T, device=self.device)
+
+        if source.dim() == 1:
+            frame_mask = source.to(device=self.device, dtype=torch.bool)
+        else:
+            source = source.to(device=self.device, dtype=torch.bool)
+            frame_mask = source[0]
+            if not torch.equal(source, frame_mask.unsqueeze(0).expand_as(source)):
+                raise ValueError("eval_valid/label_valid must be consistent across the batch")
+        indices = torch.nonzero(frame_mask, as_tuple=False).flatten()
+        if indices.numel() == 0:
+            return self._resolve_supervised_indices(data)
+        return indices
+
+    def _binary_overlap_metrics(self, pred: torch.Tensor, gt: torch.Tensor):
+        pred = pred.float()
+        gt = gt.float()
+        inter = float((pred * gt).sum().item())
+        pred_sum = float(pred.sum().item())
+        gt_sum = float(gt.sum().item())
+        union = pred_sum + gt_sum - inter
+        if pred_sum == 0.0 and gt_sum == 0.0:
+            return 1.0, 1.0
+        dice = (2.0 * inter) / max(pred_sum + gt_sum, 1e-6)
+        iou = inter / max(union, 1e-6)
+        return dice, iou
+
+    def _surface_metrics_single(self, pred: torch.Tensor, gt: torch.Tensor):
+        pred = pred.float()
+        gt = gt.float()
+        pred_sum = float(pred.sum().item())
+        gt_sum = float(gt.sum().item())
+        if pred_sum == 0.0 and gt_sum == 0.0:
+            return 0.0, 0.0
+        if pred_sum == 0.0 or gt_sum == 0.0:
+            max_dim = float(max(pred.shape[-2], pred.shape[-1], gt.shape[-2], gt.shape[-1]))
+            return max_dim, max_dim
+
+        hd_metric = HausdorffDistanceMetric(include_background=False, percentile=95, reduction="mean")
+        assd_metric = SurfaceDistanceMetric(include_background=False, symmetric=True, reduction="mean")
+        hd_metric(y_pred=pred, y=gt)
+        assd_metric(y_pred=pred, y=gt)
+        hd95 = hd_metric.aggregate()
+        assd = assd_metric.aggregate()
+        hd95 = hd95.item() if isinstance(hd95, torch.Tensor) else float(hd95)
+        assd = assd.item() if isinstance(assd, torch.Tensor) else float(assd)
+        if not np.isfinite(hd95):
+            hd95 = float(max(pred.shape[-2], pred.shape[-1]))
+        if not np.isfinite(assd):
+            assd = float(max(pred.shape[-2], pred.shape[-1]))
+        return hd95, assd
+
+    def _resize_to_original(self, pred: torch.Tensor, gt: torch.Tensor, original_hw):
+        target_h = int(original_hw[0])
+        target_w = int(original_hw[1])
+        if pred.shape[-2:] == (target_h, target_w) and gt.shape[-2:] == (target_h, target_w):
+            return pred, gt
+        pred_up = F.interpolate(pred.float(), size=(target_h, target_w), mode="nearest")
+        gt_up = F.interpolate(gt.float(), size=(target_h, target_w), mode="nearest")
+        return pred_up, gt_up
+
+    def _build_summary_row(self, mode: str, metrics: dict, epoch: int, it: int):
+        metric_space = str(self.cfg.get("evaluation", {}).get("metric_space", "original"))
+        init_mode = self._resolve_phase_init(mode)
+        return {
+            "mode": mode,
+            "iteration": it,
+            "epoch": epoch,
+            "experiment_name": self.exp_id,
+            "dataset": str(self.cfg.get("dataset_name", "")),
+            "protocol_name": str(self.cfg.get("data", {}).get("protocol_name", "unknown")),
+            "init_mode": init_mode,
+            "frame_scope": str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only")),
+            "metric_space": metric_space,
+            "dice_frame_mean": metrics.get("dice_frame_mean", 0.0),
+            "dice_video_mean": metrics.get("dice_video_mean", 0.0),
+            "iou_frame_mean": metrics.get("iou_frame_mean", 0.0),
+            "iou_video_mean": metrics.get("iou_video_mean", 0.0),
+            "hd95_resized": metrics.get("hd95_resized", 0.0),
+            "hd95_original": metrics.get("hd95_original", 0.0),
+            "assd_resized": metrics.get("assd_resized", 0.0),
+            "assd_original": metrics.get("assd_original", 0.0),
+            "temporal_drift": metrics.get("temporal_drift", 0.0),
+            "best_ckpt_rule": str(self.cfg.get("evaluation", {}).get("best_ckpt_rule", "max_eval_dice_observed_no_reload")),
+            "seed": int(self.cfg.get("seed", 42)),
+            "commit_hash": self.commit_hash,
+        }
+
+    def _append_summary_row(self, row: dict):
+        if not self.main_process or not bool(self.cfg.get("evaluation", {}).get("save_summary", True)):
+            return
+        summary_path = self.run_path / "summary.csv"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = list(row.keys())
+        write_header = not summary_path.exists()
+        with summary_path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
 
     def _move_to_device(self, batch):
         for key, value in batch.items():
@@ -262,11 +386,12 @@ class Trainer:
     def do_pass(self, data, it=0):
         torch.set_grad_enabled(self._is_train)
         self._move_to_device(data)
+        data["init_mode"] = self._resolve_phase_init("train")
         data["current_iter"] = it
         data["current_epoch"] = it // max(len(self.train_loader), 1)
         data["iters_per_epoch"] = max(len(self.train_loader), 1)
 
-        with torch.amp.autocast("cuda", enabled=self.use_amp):
+        with torch.amp.autocast(self.device.type, enabled=self.use_amp):
             out = self.model(data)
             out = self._ensure_finite_outputs(out)
 
@@ -400,10 +525,6 @@ class Trainer:
         return self._run_evaluation(test_loader, "test", epoch, run_path, it)
 
     def _reset_metrics(self):
-        self.dice_metric.reset()
-        self.iou_metric.reset()
-        self.hd_metric.reset()
-        self.assd_metric.reset()
         self.conf_metric.reset()
 
     def _run_evaluation(self, data_loader, mode, epoch, run_path, it):
@@ -425,44 +546,143 @@ class Trainer:
         with torch.no_grad():
             for batch_idx, batch_data in enumerate(data_loader):
                 self._move_to_device(batch_data)
+                batch_data["init_mode"] = self._resolve_phase_init(mode)
 
-                with torch.amp.autocast("cuda", enabled=self.use_amp):
+                with torch.amp.autocast(self.device.type, enabled=self.use_amp):
                     out = self.model(batch_data)
                     out = self._ensure_finite_outputs(out)
 
                 supervised_indices = self._resolve_supervised_indices(batch_data)
-                mask_keys = [f"masks_{ti}" for ti in supervised_indices.tolist()]
+                eval_indices = self._resolve_eval_indices(batch_data)
+                mask_keys = [f"masks_{ti}" for ti in eval_indices.tolist()]
+
+                if batch_idx == 0 and self.main_process:
+                    self.log.info(
+                        f"[{mode.capitalize()}] init_mode={batch_data['init_mode']} | "
+                        f"metric_space={str(self.cfg.get('evaluation', {}).get('metric_space', 'original'))} | "
+                        f"supervised_indices={supervised_indices.tolist()} | "
+                        f"eval_indices={eval_indices.tolist()}"
+                    )
 
                 if not all(k in out for k in mask_keys):
                     continue
-
-                pred_frames = []
-                for key in mask_keys:
-                    pred = out[key]
-                    if pred.shape[1] > 1:
-                        pred = pred[:, 1:2, ...]
-                    pred_frames.append(pred)
 
                 gt = batch_data["cls_gt"]
                 if gt.dim() == 5:
                     gt = gt.squeeze(2)
 
-                gt_selected = torch.index_select(gt, 1, supervised_indices)
+                batch_size = gt.shape[0]
+                if batch_idx == 0:
+                    metric_totals = {
+                        "dice_frame_sum": 0.0,
+                        "dice_frame_count": 0.0,
+                        "iou_frame_sum": 0.0,
+                        "iou_frame_count": 0.0,
+                        "dice_video_sum": 0.0,
+                        "dice_video_count": 0.0,
+                        "iou_video_sum": 0.0,
+                        "iou_video_count": 0.0,
+                        "hd95_resized_sum": 0.0,
+                        "hd95_resized_count": 0.0,
+                        "hd95_original_sum": 0.0,
+                        "hd95_original_count": 0.0,
+                        "assd_resized_sum": 0.0,
+                        "assd_resized_count": 0.0,
+                        "assd_original_sum": 0.0,
+                        "assd_original_count": 0.0,
+                        "precision_sum": 0.0,
+                        "recall_sum": 0.0,
+                        "acc_sum": 0.0,
+                        "sp_sum": 0.0,
+                        "F1_sum": 0.0,
+                        "conf_count": 0.0,
+                        "temporal_drift_sum": 0.0,
+                        "temporal_drift_count": 0.0,
+                    }
 
-                preds_concat = torch.cat(pred_frames, dim=0)
-                gts_concat = torch.cat(
-                    [gt_selected[:, ti, ...].unsqueeze(1) for ti in range(gt_selected.shape[1])],
-                    dim=0,
-                )
+                conf_pred_frames = []
+                conf_gt_frames = []
 
-                preds_bin = (preds_concat > 0.5).float()
-                gts_bin = (gts_concat > 0.5).float()
+                for bi in range(batch_size):
+                    sample_dice = []
+                    sample_iou = []
+                    drift_values = []
+                    original_sizes = batch_data.get("original_size")
+                    for ti in eval_indices.tolist():
+                        pred = out[f"masks_{ti}"][bi:bi + 1]
+                        if pred.shape[1] > 1:
+                            pred = pred[:, 1:2, ...]
+                        pred_bin = (pred > 0.5).float()
+                        gt_frame = gt[bi, ti, ...].unsqueeze(0).unsqueeze(0).float()
 
-                self.dice_metric(y_pred=preds_bin, y=gts_bin)
-                self.iou_metric(y_pred=preds_bin, y=gts_bin)
-                self.hd_metric(y_pred=preds_bin, y=gts_bin)
-                self.assd_metric(y_pred=preds_bin, y=gts_bin)
-                self.conf_metric(y_pred=preds_bin, y=gts_bin)
+                        dice_t, iou_t = self._binary_overlap_metrics(pred_bin, gt_frame)
+                        metric_totals["dice_frame_sum"] += dice_t
+                        metric_totals["dice_frame_count"] += 1.0
+                        metric_totals["iou_frame_sum"] += iou_t
+                        metric_totals["iou_frame_count"] += 1.0
+                        sample_dice.append(dice_t)
+                        sample_iou.append(iou_t)
+
+                        hd95_resized, assd_resized = self._surface_metrics_single(pred_bin, gt_frame)
+                        metric_totals["hd95_resized_sum"] += hd95_resized
+                        metric_totals["hd95_resized_count"] += 1.0
+                        metric_totals["assd_resized_sum"] += assd_resized
+                        metric_totals["assd_resized_count"] += 1.0
+
+                        original_hw = [pred.shape[-2], pred.shape[-1]]
+                        if original_sizes is not None:
+                            if original_sizes.dim() == 3:
+                                original_hw = original_sizes[bi, ti].tolist()
+                            else:
+                                original_hw = original_sizes[bi].tolist()
+                        pred_orig, gt_orig = self._resize_to_original(pred_bin, gt_frame, original_hw)
+                        hd95_original, assd_original = self._surface_metrics_single(pred_orig, gt_orig)
+                        metric_totals["hd95_original_sum"] += hd95_original
+                        metric_totals["hd95_original_count"] += 1.0
+                        metric_totals["assd_original_sum"] += assd_original
+                        metric_totals["assd_original_count"] += 1.0
+
+                        conf_pred_frames.append(pred_bin)
+                        conf_gt_frames.append(gt_frame)
+
+                    all_mask_keys = sorted(
+                        (key for key in out.keys() if key.startswith("masks_")),
+                        key=lambda key: int(key.split("_")[-1]),
+                    )
+                    prev_pred = None
+                    for key in all_mask_keys:
+                        pred_any = out[key][bi:bi + 1]
+                        if pred_any.shape[1] > 1:
+                            pred_any = pred_any[:, 1:2, ...]
+                        pred_any = (pred_any > 0.5).float()
+                        if prev_pred is not None:
+                            _, iou_prev = self._binary_overlap_metrics(pred_any, prev_pred)
+                            drift_values.append(1.0 - iou_prev)
+                        prev_pred = pred_any
+
+                    if sample_dice:
+                        metric_totals["dice_video_sum"] += float(np.mean(sample_dice))
+                        metric_totals["dice_video_count"] += 1.0
+                    if sample_iou:
+                        metric_totals["iou_video_sum"] += float(np.mean(sample_iou))
+                        metric_totals["iou_video_count"] += 1.0
+                    if drift_values:
+                        metric_totals["temporal_drift_sum"] += float(np.mean(drift_values))
+                        metric_totals["temporal_drift_count"] += 1.0
+
+                if conf_pred_frames:
+                    preds_concat = torch.cat(conf_pred_frames, dim=0)
+                    gts_concat = torch.cat(conf_gt_frames, dim=0)
+                    self.conf_metric(y_pred=preds_concat, y=gts_concat)
+                    try:
+                        conf_res = self.conf_metric.aggregate()
+                        conf_names = ["precision", "recall", "acc", "sp", "F1"]
+                        for idx, name in enumerate(conf_names):
+                            metric_totals[f"{name}_sum"] += float(conf_res[idx].item())
+                        metric_totals["conf_count"] += 1.0
+                    except Exception:
+                        pass
+                    self.conf_metric.reset()
 
                 vis_limit = self.cfg.get("eval_stage", {}).get("num_vis", 0)
                 if vis_limit == 0:
@@ -471,35 +691,39 @@ class Trainer:
                 if self.main_process and batch_idx < vis_limit:
                     self._visualize_batch(batch_data, out, batch_idx, it, epoch, mode)
 
-        local_counts = len(self.dice_metric.get_buffer())
+        if "metric_totals" not in locals():
+            metric_totals = {
+                "dice_frame_sum": 0.0,
+                "dice_frame_count": 0.0,
+                "iou_frame_sum": 0.0,
+                "iou_frame_count": 0.0,
+                "dice_video_sum": 0.0,
+                "dice_video_count": 0.0,
+                "iou_video_sum": 0.0,
+                "iou_video_count": 0.0,
+                "hd95_resized_sum": 0.0,
+                "hd95_resized_count": 0.0,
+                "hd95_original_sum": 0.0,
+                "hd95_original_count": 0.0,
+                "assd_resized_sum": 0.0,
+                "assd_resized_count": 0.0,
+                "assd_original_sum": 0.0,
+                "assd_original_count": 0.0,
+                "precision_sum": 0.0,
+                "recall_sum": 0.0,
+                "acc_sum": 0.0,
+                "sp_sum": 0.0,
+                "F1_sum": 0.0,
+                "conf_count": 0.0,
+                "temporal_drift_sum": 0.0,
+                "temporal_drift_count": 0.0,
+            }
 
-        metrics_map = {
-            "dice": self.dice_metric,
-            "iou": self.iou_metric,
-            "hd95": self.hd_metric,
-            "assd": self.assd_metric,
-        }
+        global_metrics = self._reduce_metric_totals(metric_totals)
 
-        local_results = {}
-        for name, metric in metrics_map.items():
-            try:
-                res = metric.aggregate()
-                if isinstance(res, torch.Tensor):
-                    res = res.item()
-                local_results[name] = res if np.isfinite(res) else 0.0
-            except Exception:
-                local_results[name] = 0.0
-
-        try:
-            conf_res = self.conf_metric.aggregate()
-            conf_names = ["precision", "recall", "acc", "sp", "F1"]
-            for i, name in enumerate(conf_names):
-                val = conf_res[i].item()
-                local_results[name] = val if np.isfinite(val) else 0.0
-        except Exception:
-            pass
-
-        global_metrics = self._reduce_metrics_weighted(local_results, local_counts)
+        if self.main_process:
+            summary_row = self._build_summary_row(mode, global_metrics, epoch, it)
+            self._append_summary_row(summary_row)
 
         if self.main_process:
             self._log_final_metrics(global_metrics, mode, it, epoch)
@@ -533,29 +757,38 @@ class Trainer:
         except Exception as e:
             self.log.warning(f"Vis failed: {e}")
 
-    def _reduce_metrics_weighted(self, local_metrics: dict, local_count: int):
-        if not self.is_distributed:
-            return local_metrics
+    def _reduce_metric_totals(self, totals: dict):
+        keys = list(totals.keys())
+        vec = torch.tensor([float(totals[k]) for k in keys], device=self.device, dtype=torch.float64)
+        if self.is_distributed:
+            dist.all_reduce(vec, op=dist.ReduceOp.SUM)
+        reduced = {k: vec[idx].item() for idx, k in enumerate(keys)}
 
-        keys = list(local_metrics.keys())
-        local_vec = [float(local_count)]
-        for k in keys:
-            local_vec.append(local_metrics[k] * local_count)
+        def mean(sum_key: str, count_key: str):
+            count = reduced[count_key]
+            return reduced[sum_key] / count if count > 0 else 0.0
 
-        tensor_vec = torch.tensor(local_vec, device=self.device, dtype=torch.float64)
-        dist.all_reduce(tensor_vec, op=dist.ReduceOp.SUM)
-
-        total_count = tensor_vec[0].item()
-        global_metrics = {}
-
-        if total_count > 0:
-            for i, k in enumerate(keys):
-                global_metrics[k] = tensor_vec[i + 1].item() / total_count
-        else:
-            for k in keys:
-                global_metrics[k] = 0.0
-
-        return global_metrics
+        metric_space = str(self.cfg.get("evaluation", {}).get("metric_space", "original"))
+        return {
+            "dice_frame_mean": mean("dice_frame_sum", "dice_frame_count"),
+            "dice_video_mean": mean("dice_video_sum", "dice_video_count"),
+            "iou_frame_mean": mean("iou_frame_sum", "iou_frame_count"),
+            "iou_video_mean": mean("iou_video_sum", "iou_video_count"),
+            "hd95_resized": mean("hd95_resized_sum", "hd95_resized_count"),
+            "hd95_original": mean("hd95_original_sum", "hd95_original_count"),
+            "assd_resized": mean("assd_resized_sum", "assd_resized_count"),
+            "assd_original": mean("assd_original_sum", "assd_original_count"),
+            "precision": mean("precision_sum", "conf_count"),
+            "recall": mean("recall_sum", "conf_count"),
+            "acc": mean("acc_sum", "conf_count"),
+            "sp": mean("sp_sum", "conf_count"),
+            "F1": mean("F1_sum", "conf_count"),
+            "temporal_drift": mean("temporal_drift_sum", "temporal_drift_count"),
+            "dice": mean("dice_frame_sum", "dice_frame_count"),
+            "iou": mean("iou_frame_sum", "iou_frame_count"),
+            "hd95": mean("hd95_original_sum", "hd95_original_count") if metric_space == "original" else mean("hd95_resized_sum", "hd95_resized_count"),
+            "assd": mean("assd_original_sum", "assd_original_count") if metric_space == "original" else mean("assd_resized_sum", "assd_resized_count"),
+        }
 
     def _log_final_metrics(self, metrics, mode, it, epoch):
         log_items = []

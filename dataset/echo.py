@@ -1,10 +1,20 @@
 import os
+import json
 import cv2
 import torch
 import numpy as np
 from torch.utils.data import Dataset
 
+
+def _infer_protocol_name(filepath: str) -> str:
+    lower = filepath.lower()
+    if "full_cycle" in lower:
+        return "echonet_fullcycle_sparse"
+    return "echonet_ed2es_endpoint"
+
 class EchoDataset(Dataset):
+    """EchoNet-style sparse video dataset with keyframe supervision."""
+
     def __init__(self, filepath: str, mode: str = 'train', seq_length=10, max_num_obj=1, size=128, merge_probability=0.0):
         super().__init__()
         self.filepath = filepath
@@ -30,13 +40,14 @@ class EchoDataset(Dataset):
                     img_files = sorted(os.listdir(img_folder))
                     label_files = sorted(os.listdir(label_folder))
 
-                    if len(img_files) == 10 and len(label_files) == 2:
+                    if len(img_files) == self.seq_length and len(label_files) == 2:
                         self.samples.append({
                             'subfolder': subfolder,
                             'img_folder': img_folder,
                             'label_folder': label_folder,
                             'img_files': img_files,
                             'label_files': label_files,
+                            'meta_path': os.path.join(filepath, mode, 'metadata', f'{subfolder}.json'),
                         })
         
     def __len__(self):
@@ -48,9 +59,20 @@ class EchoDataset(Dataset):
         label_folder = sample['label_folder']
         img_files = sample['img_files']
         label_files = sample['label_files']
+        sample_meta = {}
+        meta_path = sample.get('meta_path')
+        if meta_path and os.path.isfile(meta_path):
+            with open(meta_path, 'r', encoding='utf-8') as handle:
+                sample_meta = json.load(handle)
 
         imgs_np = np.zeros((self.seq_length, self.size, self.size), dtype=np.uint8)
         masks_np = np.zeros((self.seq_length, self.size, self.size), dtype=np.uint8)
+
+        label_map = {}
+        for label_name in label_files:
+            stem = os.path.splitext(label_name)[0]
+            if stem.isdigit():
+                label_map[int(stem)] = label_name
 
         for i in range(self.seq_length):
             img_path = os.path.join(img_folder, img_files[i])
@@ -62,10 +84,8 @@ class EchoDataset(Dataset):
                 imgs_np[i] = img
             
             mask_path = None
-            if i == 0:
-                mask_path = os.path.join(label_folder, label_files[0])
-            elif i == self.seq_length - 1:
-                mask_path = os.path.join(label_folder, label_files[1])
+            if i in label_map:
+                mask_path = os.path.join(label_folder, label_map[i])
 
             if mask_path:
                 mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -87,6 +107,13 @@ class EchoDataset(Dataset):
         first_frame_gt = torch.zeros((1, self.max_num_obj, self.size, self.size), dtype=torch.long)
         selector = torch.zeros(self.max_num_obj, dtype=torch.float32)
         label_valid = torch.zeros(self.seq_length, dtype=torch.bool)
+        eval_valid = torch.zeros(self.seq_length, dtype=torch.bool)
+
+        frame_indices = sample_meta.get('source_frames', list(range(self.seq_length)))
+        original_size = sample_meta.get('original_size', [self.size, self.size])
+        protocol_name = sample_meta.get('protocol_name', _infer_protocol_name(self.filepath))
+        original_sizes = torch.tensor([original_size] * self.seq_length, dtype=torch.long)
+        resized_sizes = torch.tensor([[self.size, self.size]] * self.seq_length, dtype=torch.long)
 
         if masks_t[0].max() > 0:
             info['num_objects'] = 1
@@ -94,16 +121,23 @@ class EchoDataset(Dataset):
             
             cls_gt = masks_t.clone()
             first_frame_gt[0, 0] = masks_t[0, 0]
-            label_valid[0] = True
-            label_valid[self.seq_length - 1] = True
+            for idx in label_map:
+                if 0 <= idx < self.seq_length:
+                    label_valid[idx] = True
+                    eval_valid[idx] = True
 
         data = {
             'rgb': frames_t,
             'ff_gt': first_frame_gt,
             'cls_gt': cls_gt,
             'label_valid': label_valid,
+            'eval_valid': eval_valid,
             'selector': selector,
             'info': info,
+            'original_size': original_sizes,
+            'resized_size': resized_sizes,
+            'frame_indices': torch.tensor(frame_indices, dtype=torch.long),
+            'protocol_name': protocol_name,
         }
 
         return data

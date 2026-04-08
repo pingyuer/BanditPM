@@ -13,6 +13,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 from tqdm import tqdm
 
+try:
+    from tools.echonet_sampling import build_sample_plan
+except ModuleNotFoundError:
+    from echonet_sampling import build_sample_plan
 
 LOGGER = logging.getLogger("preprocess_echonet")
 DATASET_NAME = "echonet_png128_10f"
@@ -31,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_frames", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_visualizations", type=int, default=16)
+    parser.add_argument(
+        "--sampling_mode",
+        type=str,
+        default="ed_to_es",
+        choices=["ed_to_es", "full_cycle"],
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -150,14 +160,6 @@ def deduplicate_points(points: list[tuple[float, float]]) -> list[tuple[float, f
     if len(deduped) > 1 and deduped[0] == deduped[-1]:
         deduped.pop()
     return deduped
-
-
-def sample_frame_indices(start_idx: int, end_idx: int, num_frames: int) -> tuple[list[int], bool]:
-    if end_idx < start_idx:
-        start_idx, end_idx = end_idx, start_idx
-    indices = np.linspace(start_idx, end_idx, num_frames)
-    indices = np.clip(np.round(indices).astype(int), start_idx, end_idx).tolist()
-    return indices, len(set(indices)) < num_frames
 
 
 def rasterize_polygon(points: list[tuple[float, float]], width: int, height: int) -> np.ndarray:
@@ -347,6 +349,19 @@ def read_selected_frames(cv2, video_path: Path, target_indices: list[int]) -> di
     return results
 
 
+def resolve_output_dataset_name(args: argparse.Namespace) -> str:
+    """Return the processed dataset directory name for the current EchoNet task protocol."""
+    if args.sampling_mode == "ed_to_es":
+        return DATASET_NAME
+    return f"echonet_{args.sampling_mode}_png128_{args.num_frames}f"
+
+
+def resolve_protocol_name(sampling_mode: str) -> str:
+    if sampling_mode == "full_cycle":
+        return "echonet_fullcycle_sparse"
+    return "echonet_ed2es_endpoint"
+
+
 def preprocess_dataset(args: argparse.Namespace) -> Path:
     cv2 = ensure_cv2()
 
@@ -357,7 +372,7 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
     if not (filelist_path.exists() and tracing_path.exists() and videos_dir.exists()):
         raise FileNotFoundError(f"EchoNet-Dynamic structure is incomplete under {echonet_root}")
 
-    output_dir = (args.output_root / DATASET_NAME).expanduser()
+    output_dir = (args.output_root / resolve_output_dataset_name(args)).expanduser()
     if output_dir.exists() and args.overwrite:
         shutil.rmtree(output_dir)
     elif output_dir.exists() and any(output_dir.iterdir()):
@@ -403,9 +418,15 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                 raise ValueError(f"expected 2 traced frames, found {len(frame_map)}")
 
             annotated_frames = sorted(frame_map)
-            sampled_indices, used_repeat = sample_frame_indices(
-                annotated_frames[0], annotated_frames[1], args.num_frames
+            frame_count = int(float(row["NumberOfFrames"]))
+            sample_plan = build_sample_plan(
+                annotated_frames,
+                frame_count=frame_count,
+                num_frames=args.num_frames,
+                mode=args.sampling_mode,
             )
+            sampled_indices = sample_plan.indices
+            used_repeat = sample_plan.used_repeat
             selected_frames = read_selected_frames(cv2, video_path, sampled_indices)
 
             frame_width = int(float(row["FrameWidth"]))
@@ -454,21 +475,44 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                 img = resize_image(selected_frames[src_idx], 128)
                 save_png(img, case_img_dir / f"{out_idx:04d}.png")
 
-            save_png(label_first, case_label_dir / "0000.png")
-            save_png(label_last, case_label_dir / "0009.png")
+            save_png(label_first, case_label_dir / f"{sample_plan.label_indices[0]:04d}.png")
+            save_png(label_last, case_label_dir / f"{sample_plan.label_indices[-1]:04d}.png")
+
+            sample_meta = {
+                "dataset": "echonet",
+                "mode": args.sampling_mode,
+                "protocol_name": resolve_protocol_name(args.sampling_mode),
+                "num_frames": args.num_frames,
+                "label_indices": sample_plan.label_indices,
+                "source_frames": sampled_indices,
+                "window_start": sample_plan.window_start,
+                "window_end": sample_plan.window_end,
+                "original_size": [frame_height, frame_width],
+                "resized_size": [128, 128],
+                "case_name": case_name,
+                "split": split,
+            }
+            meta_dir = output_dir / split / "metadata"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            (meta_dir / f"{case_name}.json").write_text(
+                json.dumps(sample_meta, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
             if visualized_cases < args.num_visualizations:
+                first_sampled_frame = sampled_indices[sample_plan.label_indices[0]]
+                last_sampled_frame = sampled_indices[sample_plan.label_indices[-1]]
                 save_overlay_visualization(
-                    selected_frames[annotated_frames[0]],
+                    selected_frames[first_sampled_frame],
                     polygon_first,
                     label_first_raw,
-                    output_dir / "qa_overlays" / split / f"{case_name}_0000_overlay.png",
+                    output_dir / "qa_overlays" / split / f"{case_name}_{sample_plan.label_indices[0]:04d}_overlay.png",
                 )
                 save_overlay_visualization(
-                    selected_frames[annotated_frames[1]],
+                    selected_frames[last_sampled_frame],
                     polygon_last,
                     label_last_raw,
-                    output_dir / "qa_overlays" / split / f"{case_name}_0009_overlay.png",
+                    output_dir / "qa_overlays" / split / f"{case_name}_{sample_plan.label_indices[-1]:04d}_overlay.png",
                 )
                 visualized_cases += 1
 
@@ -507,7 +551,13 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
         "split_counts": dict(stats["split_counts"]),
         "qa_warning_counts": dict(qa_warning_counts),
         "qa_overlay_dir": str(output_dir / "qa_overlays"),
-        "task_contract": "Endpoint-only weak supervision: 10 frames with labels only at 0000.png and 0009.png.",
+        "sampling_mode": args.sampling_mode,
+        "protocol_name": resolve_protocol_name(args.sampling_mode),
+        "task_contract": (
+            "Endpoint-only weak supervision: 10 frames with labels at traced keyframes."
+            if args.sampling_mode == "full_cycle"
+            else "Endpoint-only weak supervision: 10 frames with labels only at 0000.png and 0009.png."
+        ),
     }
     LOGGER.info("EchoNet preprocess summary:\n%s", json.dumps(report, indent=2, ensure_ascii=False))
     return output_dir

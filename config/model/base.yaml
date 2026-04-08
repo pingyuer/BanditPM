@@ -58,7 +58,7 @@ mask_decoder:
   # first value must equal embed_dim
   up_dims: [256, 128, 128]
 
-use_first_frame_gt_init: True
+use_first_frame_gt_init: True  # legacy training default; eval-time behavior is controlled by phase_init / evaluation.init_mode
 use_kpff: True
 
 memory_core:

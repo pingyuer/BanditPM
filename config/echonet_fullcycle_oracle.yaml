@@ -1,0 +1,21 @@
+defaults:
+  - config_banditpm_baseline
+  - _self_
+
+exp_id: "echonet_fullcycle_oracle"
+dataset_name: "echonet"
+data_path: "/home/tahara/datasets/processed/echonet_full_cycle_png128_10f"
+
+data:
+  protocol_name: "echonet_fullcycle_sparse"
+
+phase_init:
+  train: "oracle_gt"
+  val: "oracle_gt"
+  test: "oracle_gt"
+
+evaluation:
+  frame_scope: "all_available"
+  init_mode: "oracle_gt"
+  metric_space: "original"
+

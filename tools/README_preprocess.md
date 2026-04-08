@@ -9,6 +9,7 @@ This document describes how to convert local `CAMUS_public` and `EchoNet-Dynamic
 ```text
 camus_png256_10f/
 ├── camus_public_datasplit_20250706.json
+├── metadata/<patient_id>.json
 ├── img/<patient_id>/0000.png ... 0009.png
 └── gt_lv/<patient_id>/0000.png ... 0009.png
 ```
@@ -18,6 +19,7 @@ camus_png256_10f/
 ```text
 echonet_png128_10f/
 ├── train/img/<case>/0000.png ... 0009.png
+├── train/metadata/<case>.json
 ├── train/label/<case>/0000.png and 0009.png
 ├── val/img/<case>/...
 ├── val/label/<case>/...
@@ -26,7 +28,7 @@ echonet_png128_10f/
 ```
 
 Masks must stay binary `{0,1}` because the loaders explicitly test `mask == 1`.
-For EchoNet, this is an endpoint-only weak-supervision contract, not dense sequence supervision.
+For EchoNet, this is a sparse-label contract. `ed_to_es` remains endpoint-only, while `full_cycle` keeps sparse labels but expands the temporal span.
 
 ## Source structure recognized locally
 
@@ -65,6 +67,7 @@ Behavior used by `preprocess_camus.py`:
 - `Info_4CH.cfg` provides `ED`, `ES`, and `NbFrame`.
 - `*_4CH_half_sequence.nii.gz` provides the image sequence.
 - `*_4CH_half_sequence_gt.nii.gz` provides the segmentation sequence.
+- `sampling_mode=short` samples `ED->ES`, while `sampling_mode=full` samples the full available half-sequence.
 - Official split files are preserved when available.
 - LV label defaults to `1`, which matches the public CAMUS convention. If a case contains only one positive label, the script falls back to that label automatically.
 
@@ -90,7 +93,8 @@ Behavior used by `preprocess_echonet.py`:
 - Each frame has contour point pairs `(X1, Y1)` and `(X2, Y2)`.
 - The script rasterizes a polygon by concatenating the left contour with the reversed right contour.
 - The output sequence always starts at the earlier traced frame and ends at the later traced frame.
-- The script saves only `0000.png` and `0009.png` labels because the current GDKVM EchoNet path trains and evaluates on endpoints only.
+- The script writes per-case metadata containing dataset, protocol name, label indices, source frames, and original/resized sizes.
+- The script saves only two labels per clip; `ed_to_es` uses `0000/0009`, while `full_cycle` anchors the second label at the middle position.
 - The script writes QA overlays to `qa_overlays/` and logs polygon warnings for suspicious contour geometry.
 - Cases with missing tracing, missing video, empty mask, or invalid frame index are skipped and written to `echonet_bad_cases.json`.
 

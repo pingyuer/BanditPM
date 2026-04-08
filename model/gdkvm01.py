@@ -470,8 +470,10 @@ class GDKVM(nn.Module):
         first_frame_image_BCHW    = images_BTCHW[:, 0]
         first_frame_pixfeat_BCHW  = pixfeat_BTCHW[:, 0]
 
+        init_mode = str(data.get("init_mode", "oracle_gt"))
         first_frame_mask_B1MHW = data['ff_gt']
-        if not self.use_first_frame_gt_init:
+        use_oracle_init = init_mode == "oracle_gt" and self.use_first_frame_gt_init
+        if not use_oracle_init:
             first_frame_mask_B1MHW = torch.zeros_like(first_frame_mask_B1MHW)
         first_frame_mask_BNHW  = first_frame_mask_B1MHW[:, 0, :max_num_objects]
 

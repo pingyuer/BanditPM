@@ -20,6 +20,23 @@ save_checkpoint_interval: 200 # Checkpoint saving interval (iterations)
 # =======================
 # Data & Distributed
 # =======================
+data:
+  protocol_name: "echonet_ed2es_endpoint"
+
+phase_init:
+  train: "oracle_gt"
+  val: "oracle_gt"
+  test: "oracle_gt"
+
+evaluation:
+  frame_scope: "supervised_only"   # supervised_only | all_available
+  init_mode: "oracle_gt"           # oracle_gt | pred_or_zero
+  metric_space: "original"         # original | resized
+  report_video_mean: true
+  report_frame_mean: true
+  save_summary: true
+  best_ckpt_rule: "max_eval_dice_observed_no_reload"
+
 # data_path: "/home/tahara/datasets/processed/camus_png256_10f"
 data_path: "/home/tahara/datasets/processed/echonet_png128_10f"
 

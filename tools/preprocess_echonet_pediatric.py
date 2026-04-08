@@ -15,6 +15,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 from tqdm import tqdm
 
+try:
+    from tools.echonet_sampling import build_sample_plan
+except ModuleNotFoundError:
+    from echonet_sampling import build_sample_plan
 
 LOGGER = logging.getLogger("preprocess_echonet_pediatric")
 
@@ -37,6 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_frames", type=int, default=10)
     parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--num_visualizations", type=int, default=16)
+    parser.add_argument(
+        "--sampling_mode",
+        type=str,
+        default="ed_to_es",
+        choices=["ed_to_es", "full_cycle"],
+    )
     parser.add_argument("--train_folds", type=str, default="0,1,2,3,4,5,6,7")
     parser.add_argument("--val_folds", type=str, default="8")
     parser.add_argument("--test_folds", type=str, default="9")
@@ -150,14 +160,6 @@ def tracing_to_mask(
     return mask, polygon, warnings
 
 
-def sample_frame_indices(start_idx: int, end_idx: int, num_frames: int) -> tuple[list[int], bool]:
-    if end_idx < start_idx:
-        start_idx, end_idx = end_idx, start_idx
-    indices = np.linspace(start_idx, end_idx, num_frames)
-    indices = np.clip(np.round(indices).astype(int), start_idx, end_idx).tolist()
-    return indices, len(set(indices)) < num_frames
-
-
 def resize_image(image: np.ndarray, size: int) -> np.ndarray:
     return np.asarray(Image.fromarray(image).resize((size, size), resample=Image.Resampling.BILINEAR), dtype=np.uint8)
 
@@ -236,6 +238,20 @@ def read_tracings(tracing_path: Path) -> dict[str, dict[int, list[tuple[float, f
     return tracings
 
 
+def resolve_output_dataset_name(args: argparse.Namespace) -> str:
+    """Return the processed dataset directory name for the pediatric task protocol."""
+    suffix = f"echonet_pediatric_{args.view.lower()}"
+    if args.sampling_mode == "full_cycle":
+        suffix = f"{suffix}_{args.sampling_mode}"
+    return f"{suffix}_png{args.image_size}_{args.num_frames}f"
+
+
+def resolve_protocol_name(args: argparse.Namespace) -> str:
+    if args.sampling_mode == "full_cycle":
+        return "echonet_pediatric_fullcycle_sparse"
+    return f"echonet_pediatric_{args.view.lower()}_endpoint"
+
+
 def preprocess_dataset(args: argparse.Namespace) -> Path:
     cv2 = ensure_cv2()
     train_folds = parse_fold_spec(args.train_folds)
@@ -246,7 +262,7 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
     tracing_path = view_root / "VolumeTracings.csv"
     videos_dir = view_root / "Videos"
 
-    dataset_name = f"echonet_pediatric_{args.view.lower()}_png{args.image_size}_{args.num_frames}f"
+    dataset_name = resolve_output_dataset_name(args)
     output_dir = (args.output_root / dataset_name).expanduser()
     if output_dir.exists() and args.overwrite:
         shutil.rmtree(output_dir)
@@ -294,9 +310,19 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                 raise ValueError(f"expected 2 traced frames, found {len(frame_map)}")
 
             annotated_frames = sorted(frame_map)
-            sampled_indices, used_repeat = sample_frame_indices(
-                annotated_frames[0], annotated_frames[1], args.num_frames
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                raise ValueError("failed to open video")
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            sample_plan = build_sample_plan(
+                annotated_frames,
+                frame_count=frame_count,
+                num_frames=args.num_frames,
+                mode=args.sampling_mode,
             )
+            sampled_indices = sample_plan.indices
+            used_repeat = sample_plan.used_repeat
             selected_frames = read_selected_frames(cv2, video_path, sampled_indices)
             sample_frame = selected_frames[sampled_indices[0]]
             frame_height, frame_width = sample_frame.shape
@@ -324,21 +350,45 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
 
             for out_idx, src_idx in enumerate(sampled_indices):
                 save_png(resize_image(selected_frames[src_idx], args.image_size), case_img_dir / f"{out_idx:04d}.png")
-            save_png(label_first, case_label_dir / "0000.png")
-            save_png(label_last, case_label_dir / f"{args.num_frames - 1:04d}.png")
+            save_png(label_first, case_label_dir / f"{sample_plan.label_indices[0]:04d}.png")
+            save_png(label_last, case_label_dir / f"{sample_plan.label_indices[-1]:04d}.png")
+
+            sample_meta = {
+                "dataset": "echonet_pediatric",
+                "mode": args.sampling_mode,
+                "protocol_name": resolve_protocol_name(args),
+                "num_frames": args.num_frames,
+                "label_indices": sample_plan.label_indices,
+                "source_frames": sampled_indices,
+                "window_start": sample_plan.window_start,
+                "window_end": sample_plan.window_end,
+                "original_size": [frame_height, frame_width],
+                "resized_size": [args.image_size, args.image_size],
+                "case_name": case_name,
+                "split": split,
+                "view": args.view,
+            }
+            meta_dir = output_dir / split / "metadata"
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            (meta_dir / f"{case_name}.json").write_text(
+                json.dumps(sample_meta, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
             if visualized_cases < args.num_visualizations:
+                first_sampled_frame = sampled_indices[sample_plan.label_indices[0]]
+                last_sampled_frame = sampled_indices[sample_plan.label_indices[-1]]
                 save_overlay_visualization(
-                    selected_frames[annotated_frames[0]],
+                    selected_frames[first_sampled_frame],
                     polygon_first,
                     label_first_raw,
-                    output_dir / "qa_overlays" / split / f"{case_name}_0000_overlay.png",
+                    output_dir / "qa_overlays" / split / f"{case_name}_{sample_plan.label_indices[0]:04d}_overlay.png",
                 )
                 save_overlay_visualization(
-                    selected_frames[annotated_frames[1]],
+                    selected_frames[last_sampled_frame],
                     polygon_last,
                     label_last_raw,
-                    output_dir / "qa_overlays" / split / f"{case_name}_{args.num_frames - 1:04d}_overlay.png",
+                    output_dir / "qa_overlays" / split / f"{case_name}_{sample_plan.label_indices[-1]:04d}_overlay.png",
                 )
                 visualized_cases += 1
 
@@ -367,7 +417,13 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
         "skipped": stats["skipped"],
         "split_counts": dict(stats["split_counts"]),
         "skip_reason_counts": dict(skip_reasons),
-        "task_contract": "Endpoint-only weak supervision: 10 frames with labels at 0000.png and 0009.png.",
+        "sampling_mode": args.sampling_mode,
+        "protocol_name": resolve_protocol_name(args),
+        "task_contract": (
+            "Endpoint-only weak supervision: 10 frames with labels at traced keyframes."
+            if args.sampling_mode == "full_cycle"
+            else "Endpoint-only weak supervision: 10 frames with labels at 0000.png and 0009.png."
+        ),
     }
     LOGGER.info("Pediatric preprocess summary:\n%s", json.dumps(report, indent=2, ensure_ascii=False))
     return output_dir

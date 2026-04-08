@@ -1,0 +1,14 @@
+defaults:
+  - echonet_fullcycle_oracle
+  - _self_
+
+exp_id: "echonet_fullcycle_predinit"
+
+phase_init:
+  train: "oracle_gt"
+  val: "pred_or_zero"
+  test: "pred_or_zero"
+
+evaluation:
+  init_mode: "pred_or_zero"
+

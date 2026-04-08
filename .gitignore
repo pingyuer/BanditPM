@@ -20,6 +20,8 @@ htmlcov/
 .venv/
 venv/
 env/
+.direnv/
+.envrc.local
 
 # Training outputs and experiment logs
 outputs/

@@ -70,13 +70,15 @@ def resolve_dataset_class(cfg: DictConfig):
 def train(cfg: DictConfig):
     os.environ.setdefault("WANDB_MODE", cfg.get("wandb_mode", "offline"))
     dataset_name, dataset_cls = resolve_dataset_class(cfg)
+    wandb_mode = str(cfg.get("wandb_mode", os.environ.get("WANDB_MODE", "offline"))).lower()
 
     # -------- DDP Initialization --------
     local_rank, world_size = distributed_setup(backend="nccl")
     main_process = is_main_process()
 
     # Initialize wandb only on the main process
-    if main_process:
+    wandb_enabled = main_process and wandb_mode == "online"
+    if wandb_enabled:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
         cfg_dict_wandb = OmegaConf.to_container(cfg, resolve=True)
         wandb_settings = resolve_wandb_settings(cfg)
@@ -120,6 +122,9 @@ def train(cfg: DictConfig):
 
         info_if_rank_zero(f"num_workers={stage_cfg.num_workers}")
         stage_cfg.num_workers = max(stage_cfg.num_workers // world_size, 1)
+        if world_size == 1:
+            # Sandbox and local single-process runs are more stable without multiprocessing workers.
+            stage_cfg.num_workers = 0
         info_if_rank_zero(f"num_workers(per-GPU)={stage_cfg.num_workers}")
 
         # -------- Logging: Only main process writes to TensorBoard --------
@@ -292,7 +297,7 @@ def train(cfg: DictConfig):
     finally:
         # Synchronize all processes before closing resources
         barrier()
-        if main_process:
+        if wandb_enabled:
             try:
                 wandb.finish()
             except Exception:

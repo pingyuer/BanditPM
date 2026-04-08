@@ -1,0 +1,14 @@
+defaults:
+  - echonet_ed2es_endpoint_oracle
+  - _self_
+
+exp_id: "echonet_ed2es_endpoint_predinit"
+
+phase_init:
+  train: "oracle_gt"
+  val: "pred_or_zero"
+  test: "pred_or_zero"
+
+evaluation:
+  init_mode: "pred_or_zero"
+

@@ -1,0 +1,21 @@
+defaults:
+  - config_banditpm_baseline
+  - _self_
+
+exp_id: "camus_full_dense_oracle"
+dataset_name: "camus"
+data_path: "/home/tahara/datasets/processed/camus_full_png256_10f"
+
+data:
+  protocol_name: "camus_full_dense"
+
+phase_init:
+  train: "oracle_gt"
+  val: "oracle_gt"
+  test: "oracle_gt"
+
+evaluation:
+  frame_scope: "all_available"
+  init_mode: "oracle_gt"
+  metric_space: "original"
+

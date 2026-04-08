@@ -1,0 +1,14 @@
+defaults:
+  - camus_short_dense_oracle
+  - _self_
+
+exp_id: "camus_short_dense_predinit"
+
+phase_init:
+  train: "oracle_gt"
+  val: "pred_or_zero"
+  test: "pred_or_zero"
+
+evaluation:
+  init_mode: "pred_or_zero"
+
