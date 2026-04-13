@@ -1,6 +1,6 @@
 # GDKVM Dataset Preprocessing
 
-This document describes how to convert local `CAMUS_public` and `EchoNet-Dynamic` sources into the directory layouts expected by the current GDKVM dataset loaders in [dataset/vos_dataset.py](/home/tahara/GDKVM/dataset/vos_dataset.py) and [dataset/echo.py](/home/tahara/GDKVM/dataset/echo.py).
+This document describes how to convert local `CAMUS_public`, `EchoNet-Dynamic`, and `CardiacUDA` sources into the directory layouts expected by the current GDKVM dataset loaders in [dataset/vos_dataset.py](/home/tahara/GDKVM/dataset/vos_dataset.py) and [dataset/echo.py](/home/tahara/GDKVM/dataset/echo.py).
 
 ## What GDKVM expects
 
@@ -28,7 +28,7 @@ echonet_png128_10f/
 ```
 
 Masks must stay binary `{0,1}` because the loaders explicitly test `mask == 1`.
-For EchoNet, this is a sparse-label contract. `ed_to_es` remains endpoint-only, while `full_cycle` keeps sparse labels but expands the temporal span.
+For EchoNet and CardiacUDA, this is a sparse-label contract. `ed_to_es` remains endpoint-only, while `full_cycle` keeps sparse labels but expands the temporal span.
 
 ## Source structure recognized locally
 
@@ -98,6 +98,30 @@ Behavior used by `preprocess_echonet.py`:
 - The script writes QA overlays to `qa_overlays/` and logs polygon warnings for suspicious contour geometry.
 - Cases with missing tracing, missing video, empty mask, or invalid frame index are skipped and written to `echonet_bad_cases.json`.
 
+### CardiacUDA
+
+The local CardiacUDA tree is recognized as:
+
+```text
+~/datasets/CardiacUDA/full_extracted/cardiacUDC_dataset/
+├── Site_G_100/
+├── Site_G_20/
+├── Site_G_29/
+├── Site_R_126/
+├── Site_R_52/
+├── Site_R_73/
+└── label_all_frame/
+```
+
+Behavior used by `preprocess_cardiacuda.py`:
+
+- The current integration targets `A4C` single-object segmentation and defaults to `target_label=1 (LV)`.
+- Sparse `Site_*` labels are preserved exactly by forcing every annotated source frame into the sampled 10-frame clip.
+- The first sampled frame is anchored to the first annotated frame so the current GDKVM first-frame initialization contract remains valid.
+- Output sample names are prefixed with the source site, for example `site_g_20__patient-1-4`, to avoid cross-site filename collisions.
+- `Site_R_73` is skipped because the released package contains images but no labels there.
+- `label_all_frame` is skipped by default because some cases use a different label encoding than the stable `Site_*` folders.
+
 ## Dependencies
 
 Python 3.10+ is assumed.
@@ -124,7 +148,7 @@ pip install SimpleITK
 
 ## Run preprocessing
 
-Run both datasets:
+Run all three datasets:
 
 ```bash
 python ~/GDKVM/tools/preprocess_all.py --input_root ~/datasets --output_root ~/datasets/processed --num_frames 10 --seed 42
@@ -142,6 +166,12 @@ Run EchoNet only:
 python ~/GDKVM/tools/preprocess_echonet.py --input_root ~/datasets --output_root ~/datasets/processed --num_frames 10 --seed 42
 ```
 
+Run CardiacUDA only:
+
+```bash
+python ~/GDKVM/tools/preprocess_cardiacuda.py --input_root ~/datasets --output_root ~/datasets/processed --num_frames 10 --target_label 1 --overwrite
+```
+
 Overwrite existing processed folders:
 
 ```bash
@@ -155,6 +185,7 @@ After preprocessing, verify both outputs:
 ```bash
 python ~/GDKVM/tools/verify_gdkvm_dataset.py --dataset camus --root ~/datasets/processed/camus_png256_10f
 python ~/GDKVM/tools/verify_gdkvm_dataset.py --dataset echonet --root ~/datasets/processed/echonet_png128_10f
+python ~/GDKVM/tools/verify_gdkvm_dataset.py --dataset cardiacuda --root ~/datasets/processed/cardiacuda_a4c_lv_png128_10f
 ```
 
 `verify_gdkvm_dataset.py` validates layout and binary masks, but it does not guarantee that the sampled sequence preserves the original tracing semantics.

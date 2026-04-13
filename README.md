@@ -70,6 +70,20 @@ Processed root for the full-cycle task:
 
 - `/home/tahara/datasets/processed/echonet_full_cycle_png128_10f`
 
+Use it with:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name echonet_ed2es_endpoint_oracle
+```
+
+Full-cycle:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name echonet_fullcycle_oracle
+```
+
 ### EchoNet Pediatric A4C
 
 Processed root for the original short-range task:
@@ -86,13 +100,92 @@ Pediatric split mapping:
 - `val = 8`
 - `test = 9`
 
+Use it with:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name config_banditpm_baseline \
+  exp_id=echonet_pediatric_a4c_ed2es_gdkvm \
+  dataset_name=echonet \
+  data_path=/home/tahara/datasets/processed/echonet_pediatric_a4c_png128_10f \
+  data.protocol_name=echonet_pediatric_a4c_endpoint
+```
+
+Full-cycle:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name config_banditpm_baseline \
+  exp_id=echonet_pediatric_a4c_full_cycle_gdkvm \
+  dataset_name=echonet \
+  data_path=/home/tahara/datasets/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
+  data.protocol_name=echonet_pediatric_fullcycle_sparse
+```
+
 ### CAMUS
 
-Processed root:
+Processed root for the short dense task:
 
 - `/home/tahara/datasets/processed/camus_png256_10f`
 
+Processed root for the full dense task:
+
+- `/home/tahara/datasets/processed/camus_full_png256_10f`
+
+Use it with:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name camus_short_dense_oracle
+```
+
+Full dense:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name camus_full_dense_oracle
+```
+
 At the moment, CAMUS is mainly kept as a supporting experiment rather than the main BanditPM stress test.
+
+### CardiacUDA
+
+Processed root for the current GDKVM integration:
+
+- `/home/tahara/datasets/processed/cardiacuda_a4c_lv_png128_10f`
+
+Current contract:
+
+- view: `A4C`
+- target: `LV` only
+- supervision: sparse labels preserved from the annotated CardiacUDA frames
+- default split mapping:
+  `train = Site_G_100 + Site_R_126`
+  `val = Site_G_20 + Site_R_52`
+  `test = Site_G_29`
+- skipped by default:
+  `Site_R_73` because labels are absent in the released package
+  `label_all_frame` because some cases use a different label encoding than the stable `Site_*` folders
+
+Real local preprocessing result on `2026-04-12`:
+
+- processed samples: `283`
+- skipped samples: `1`
+- split counts: `train=181`, `val=73`, `test=29`
+
+Use it with:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name cardiacuda_a4c_lv_oracle
+```
+
+Pred-init:
+
+```bash
+./.venv/bin/python train.py \
+  --config-name cardiacuda_a4c_lv_predinit
+```
 
 ## Repository Entry Points
 
@@ -124,6 +217,16 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ## Preprocessing
 
+### EchoNet-Dynamic ED->ES 10f
+
+```bash
+./.venv/bin/python tools/preprocess_echonet.py \
+  --input_root /home/tahara/datasets \
+  --output_root /home/tahara/datasets/processed \
+  --sampling_mode ed_to_es \
+  --overwrite
+```
+
 ### EchoNet-Dynamic Full-cycle 10f
 
 ```bash
@@ -131,6 +234,17 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
   --input_root /home/tahara/datasets \
   --output_root /home/tahara/datasets/processed \
   --sampling_mode full_cycle \
+  --overwrite
+```
+
+### EchoNet Pediatric A4C ED->ES 10f
+
+```bash
+./.venv/bin/python tools/preprocess_echonet_pediatric.py \
+  --input_root /home/tahara/datasets/echonetpediatric \
+  --output_root /home/tahara/datasets/processed \
+  --view A4C \
+  --sampling_mode ed_to_es \
   --overwrite
 ```
 
@@ -144,6 +258,45 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
   --sampling_mode full_cycle \
   --overwrite
 ```
+
+### CAMUS Short Dense 10f
+
+```bash
+./.venv/bin/python tools/preprocess_camus.py \
+  --input_root /home/tahara/datasets \
+  --output_root /home/tahara/datasets/processed \
+  --sampling_mode short \
+  --overwrite
+```
+
+### CAMUS Full Dense 10f
+
+```bash
+./.venv/bin/python tools/preprocess_camus.py \
+  --input_root /home/tahara/datasets \
+  --output_root /home/tahara/datasets/processed \
+  --sampling_mode full \
+  --overwrite
+```
+
+### CardiacUDA A4C LV 10f
+
+```bash
+./.venv/bin/python tools/preprocess_cardiacuda.py \
+  --input_root /home/tahara/datasets \
+  --output_root /home/tahara/datasets/processed \
+  --target_label 1 \
+  --overwrite
+```
+
+Optional label mapping for CardiacUDA A4C:
+
+- `1=LV`
+- `2=LA`
+- `3=RA`
+- `4=RV`
+
+The current checked-in config files target `A4C + LV`.
 
 ## How To Run
 
@@ -260,6 +413,7 @@ The current regression tests that matter for this workflow are:
 
 - `tests/test_echonet_sampling.py`
 - `tests/test_echo_dataset_sparse_labels.py`
+- `tests/test_cardiacuda_preprocess.py`
 - `tests/test_supervision_indices.py`
 - `tests/test_gdkvm_temporal_modes.py`
 - `tests/test_prototype_manager.py`
@@ -270,6 +424,7 @@ Run them with:
 PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q \
   tests/test_echonet_sampling.py \
   tests/test_echo_dataset_sparse_labels.py \
+  tests/test_cardiacuda_preprocess.py \
   tests/test_supervision_indices.py \
   tests/test_gdkvm_temporal_modes.py \
   tests/test_prototype_manager.py

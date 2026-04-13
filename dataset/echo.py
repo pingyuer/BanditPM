@@ -8,6 +8,8 @@ from torch.utils.data import Dataset
 
 def _infer_protocol_name(filepath: str) -> str:
     lower = filepath.lower()
+    if "cardiacuda" in lower:
+        return "cardiacuda_a4c_lv_sparse"
     if "full_cycle" in lower:
         return "echonet_fullcycle_sparse"
     return "echonet_ed2es_endpoint"
@@ -40,7 +42,7 @@ class EchoDataset(Dataset):
                     img_files = sorted(os.listdir(img_folder))
                     label_files = sorted(os.listdir(label_folder))
 
-                    if len(img_files) == self.seq_length and len(label_files) == 2:
+                    if len(img_files) == self.seq_length and 1 <= len(label_files) <= self.seq_length:
                         self.samples.append({
                             'subfolder': subfolder,
                             'img_folder': img_folder,

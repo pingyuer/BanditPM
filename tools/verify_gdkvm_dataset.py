@@ -12,7 +12,7 @@ from PIL import Image
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify GDKVM-ready dataset folders.")
-    parser.add_argument("--dataset", choices=["camus", "echonet"], required=True)
+    parser.add_argument("--dataset", choices=["camus", "echonet", "cardiacuda"], required=True)
     parser.add_argument("--root", type=Path, required=True)
     return parser.parse_args()
 
@@ -123,14 +123,70 @@ def verify_echonet(root: Path) -> tuple[list[str], list[str]]:
     return errors, notes
 
 
+def verify_sparse_video_dataset(root: Path, *, image_size: int, dataset_name: str) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    notes = [
+        f"{dataset_name} verification checks layout, metadata, and binary masks.",
+        "Sparse labels may exist at any sampled frame indices as long as metadata agrees with the saved label files.",
+    ]
+    for split in ["train", "val", "test"]:
+        img_root = root / split / "img"
+        label_root = root / split / "label"
+        meta_root = root / split / "metadata"
+        if not img_root.is_dir():
+            errors.append(f"missing split image dir: {img_root}")
+            continue
+        if not label_root.is_dir():
+            errors.append(f"missing split label dir: {label_root}")
+            continue
+        if not meta_root.is_dir():
+            errors.append(f"missing split metadata dir: {meta_root}")
+            continue
+
+        for case_dir in sorted(p for p in img_root.iterdir() if p.is_dir()):
+            label_dir = label_root / case_dir.name
+            meta_path = meta_root / f"{case_dir.name}.json"
+            if not label_dir.is_dir():
+                errors.append(f"missing label dir for case: {case_dir.name}")
+                continue
+            if not meta_path.is_file():
+                errors.append(f"missing metadata for case: {meta_path}")
+                continue
+
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            img_files = sorted(case_dir.glob("*.png"))
+            label_files = sorted(label_dir.glob("*.png"))
+            if len(img_files) != 10:
+                errors.append(f"{split}/{case_dir.name} image count != 10: {len(img_files)}")
+            expected_label_names = [f"{int(idx):04d}.png" for idx in meta.get("label_indices", [])]
+            actual_label_names = [path.name for path in label_files]
+            if actual_label_names != expected_label_names:
+                errors.append(
+                    f"{split}/{case_dir.name} label files do not match metadata: "
+                    f"{actual_label_names} != {expected_label_names}"
+                )
+
+            for path in img_files:
+                if load_image(path).shape[:2] != (image_size, image_size):
+                    errors.append(f"invalid image size for {path}")
+            for path in label_files:
+                if load_image(path).shape[:2] != (image_size, image_size):
+                    errors.append(f"invalid label size for {path}")
+                check_binary_mask(path, errors)
+
+    return errors, notes
+
+
 def main() -> None:
     args = parse_args()
     root = args.root.expanduser()
     notes: list[str] = []
     if args.dataset == "camus":
         errors = verify_camus(root)
-    else:
+    elif args.dataset == "echonet":
         errors, notes = verify_echonet(root)
+    else:
+        errors, notes = verify_sparse_video_dataset(root, image_size=128, dataset_name="CardiacUDA")
     if errors:
         print("Verification failed:")
         for error in errors:

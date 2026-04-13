@@ -34,6 +34,8 @@ class ProtocolSpec:
     data_path: str
     frame_scope: str
     group: str
+    batch_size: int
+    num_workers: int
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class ExperimentSpec:
     data_path: str
     run_dir: Path
     method_overrides: tuple[str, ...]
+    batch_size: int
+    num_workers: int
     unavailable_reason: str | None = None
 
     def command(self) -> list[str]:
@@ -64,8 +68,10 @@ class ExperimentSpec:
             str(TRAIN_PY),
             f"--config-name={self.config_name}",
             f"hydra.run.dir={self.run_dir.as_posix()}",
-            "main_training.batch_size=1",
+            f"main_training.batch_size={self.batch_size}",
+            f"main_training.num_workers={self.num_workers}",
             "main_training.num_iterations=1000",
+            "main_training.lr_schedule_steps=[333,667]",
             "eval_stage.eval_interval=200",
             "save=0",
             "wandb_mode=offline",
@@ -121,6 +127,8 @@ PROTOCOLS = (
         data_path="/home/tahara/datasets/processed/echonet_full_cycle_png128_10f",
         frame_scope="all_available",
         group="main",
+        batch_size=12,
+        num_workers=8,
     ),
     ProtocolSpec(
         key="echonet_ed2es_endpoint",
@@ -130,6 +138,8 @@ PROTOCOLS = (
         data_path="/home/tahara/datasets/processed/echonet_png128_10f",
         frame_scope="supervised_only",
         group="appendix",
+        batch_size=12,
+        num_workers=8,
     ),
     ProtocolSpec(
         key="camus_short_dense",
@@ -139,6 +149,8 @@ PROTOCOLS = (
         data_path="/home/tahara/datasets/processed/camus_png256_10f",
         frame_scope="all_available",
         group="main",
+        batch_size=8,
+        num_workers=8,
     ),
     ProtocolSpec(
         key="camus_full_dense",
@@ -148,6 +160,8 @@ PROTOCOLS = (
         data_path="/home/tahara/datasets/processed/camus_full_png256_10f",
         frame_scope="all_available",
         group="appendix",
+        batch_size=8,
+        num_workers=8,
     ),
 )
 
@@ -171,6 +185,7 @@ def build_registry() -> list[ExperimentSpec]:
                     f"dataset_name={protocol.dataset}",
                     f"data_path={protocol.data_path}",
                     f"data.protocol_name={protocol.protocol_name}",
+                    f"phase_init.train={init.init_mode}",
                     f"phase_init.val={init.init_mode}",
                     f"phase_init.test={init.init_mode}",
                     f"evaluation.init_mode={init.init_mode}",
@@ -190,6 +205,8 @@ def build_registry() -> list[ExperimentSpec]:
                         data_path=protocol.data_path,
                         run_dir=OUTPUT_ROOT / protocol.dataset / exp_name,
                         method_overrides=method_overrides,
+                        batch_size=protocol.batch_size,
+                        num_workers=protocol.num_workers,
                         unavailable_reason=unavailable_reason,
                     )
                 )

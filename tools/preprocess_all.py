@@ -5,12 +5,13 @@ import argparse
 from pathlib import Path
 
 from preprocess_camus import preprocess_dataset as preprocess_camus_dataset
+from preprocess_cardiacuda import preprocess_dataset as preprocess_cardiacuda_dataset
 from preprocess_echonet import preprocess_dataset as preprocess_echonet_dataset
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run CAMUS and EchoNet-Dynamic preprocessing for GDKVM."
+        description="Run CAMUS, EchoNet-Dynamic, and CardiacUDA preprocessing for GDKVM."
     )
     parser.add_argument("--input_root", type=Path, default=Path("~/datasets").expanduser())
     parser.add_argument(
@@ -29,6 +30,7 @@ def main() -> None:
     args = parse_args()
     preprocess_camus_dataset(args)
     preprocess_echonet_dataset(args)
+    preprocess_cardiacuda_dataset(args)
 
 
 if __name__ == "__main__":

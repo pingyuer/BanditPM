@@ -1,0 +1,10 @@
+defaults:
+  - cardiacuda_a4c_lv_oracle
+  - _self_
+
+exp_id: "cardiacuda_a4c_lv_predinit"
+
+phase_init:
+  train: "pred"
+  val: "pred"
+  test: "pred"

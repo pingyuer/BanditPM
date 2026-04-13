@@ -1,0 +1,20 @@
+defaults:
+  - config_banditpm_baseline
+  - _self_
+
+exp_id: "cardiacuda_a4c_lv_oracle"
+dataset_name: "cardiacuda"
+data_path: "/home/tahara/datasets/processed/cardiacuda_a4c_lv_png128_10f"
+
+data:
+  protocol_name: "cardiacuda_a4c_lv_sparse"
+
+phase_init:
+  train: "oracle_gt"
+  val: "oracle_gt"
+  test: "oracle_gt"
+
+evaluation:
+  frame_scope: "supervised_only"
+  init_mode: "oracle_gt"
+  metric_space: "original"

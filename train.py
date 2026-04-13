@@ -52,7 +52,9 @@ def resolve_dataset_class(cfg: DictConfig):
     dataset_name = str(cfg.get("dataset_name", "")).lower().strip()
     if not dataset_name:
         data_path = str(cfg.data_path).lower()
-        if "echonet" in data_path:
+        if "cardiacuda" in data_path:
+            dataset_name = "cardiacuda"
+        elif "echonet" in data_path:
             dataset_name = "echonet"
         else:
             dataset_name = "camus"
@@ -60,6 +62,7 @@ def resolve_dataset_class(cfg: DictConfig):
     dataset_map = {
         "camus": TenCamusDataset,
         "echonet": EchoDataset,
+        "cardiacuda": EchoDataset,
     }
     if dataset_name not in dataset_map:
         raise ValueError(f"Unsupported dataset_name={dataset_name!r}")
@@ -122,9 +125,6 @@ def train(cfg: DictConfig):
 
         info_if_rank_zero(f"num_workers={stage_cfg.num_workers}")
         stage_cfg.num_workers = max(stage_cfg.num_workers // world_size, 1)
-        if world_size == 1:
-            # Sandbox and local single-process runs are more stable without multiprocessing workers.
-            stage_cfg.num_workers = 0
         info_if_rank_zero(f"num_workers(per-GPU)={stage_cfg.num_workers}")
 
         # -------- Logging: Only main process writes to TensorBoard --------
