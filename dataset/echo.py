@@ -9,6 +9,8 @@ from torch.utils.data import Dataset
 def _infer_protocol_name(filepath: str) -> str:
     lower = filepath.lower()
     if "cardiacuda" in lower:
+        if "dense" in lower:
+            return "cardiacuda_a4c_lv_dense"
         return "cardiacuda_a4c_lv_sparse"
     if "full_cycle" in lower:
         return "echonet_fullcycle_sparse"

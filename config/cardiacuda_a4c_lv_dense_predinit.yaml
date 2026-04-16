@@ -1,8 +1,8 @@
 defaults:
-  - cardiacuda_a4c_lv_oracle
+  - cardiacuda_a4c_lv_dense_oracle
   - _self_
 
-exp_id: "cardiacuda_a4c_lv_predinit"
+exp_id: "cardiacuda_a4c_lv_dense_predinit"
 
 phase_init:
   train: "pred_or_zero"

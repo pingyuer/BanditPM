@@ -45,6 +45,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--target_label", type=int, default=1, choices=[1, 2, 3, 4])
     parser.add_argument(
+        "--supervision_mode",
+        type=str,
+        default="sparse",
+        choices=["sparse", "dense"],
+        help="sparse=use Site_* sparse labels, dense=use label_all_frame dense labels.",
+    )
+    parser.add_argument(
         "--train_sites",
         type=str,
         default="Site_G_100,Site_R_126",
@@ -62,6 +69,9 @@ def parse_args() -> argparse.Namespace:
         default="Site_G_29",
         help="Comma-separated CardiacUDA site folders used for test.",
     )
+    parser.add_argument("--dense_seed", type=int, default=42)
+    parser.add_argument("--dense_val_count", type=int, default=2)
+    parser.add_argument("--dense_test_count", type=int, default=2)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -92,7 +102,10 @@ def resolve_cardiacuda_root(input_root: Path) -> Path:
         input_root,
     ]
     for candidate in candidates:
-        if candidate.is_dir() and any((candidate / site).exists() for site in SITE_LABEL_MAP):
+        if candidate.is_dir() and (
+            any((candidate / site).exists() for site in SITE_LABEL_MAP)
+            or (candidate / "label_all_frame").is_dir()
+        ):
             return candidate
     raise FileNotFoundError(f"Could not locate CardiacUDA root under {input_root}")
 
@@ -109,7 +122,7 @@ def scan_cardiacuda_structure(root: Path) -> dict[str, object]:
         "notes": [
             "This pipeline currently targets A4C single-object segmentation only.",
             "Site_* folders contain sparse labels on a subset of frames.",
-            "label_all_frame is skipped because some cases use a different label encoding than Site_*.",
+            "label_all_frame can be used for dense supervision, but some non-target labels may use a different encoding than Site_*.",
         ],
     }
 
@@ -200,16 +213,25 @@ def build_sample_plan(label_frames: list[int], frame_count: int, num_frames: int
     return sampled_indices, label_positions
 
 
-def resolve_protocol_name(target_label: int) -> str:
+def build_dense_sample_plan(frame_count: int, num_frames: int) -> list[int]:
+    if frame_count < num_frames:
+        raise ValueError(f"frame_count={frame_count} is smaller than num_frames={num_frames}")
+    indices = np.linspace(0, frame_count - 1, num_frames)
+    return np.clip(np.round(indices).astype(int), 0, frame_count - 1).tolist()
+
+
+def resolve_protocol_name(target_label: int, supervision_mode: str = "sparse") -> str:
     target_name = TARGET_LABEL_NAMES[target_label]
-    return f"cardiacuda_a4c_{target_name}_sparse"
+    return f"cardiacuda_a4c_{target_name}_{supervision_mode}"
 
 
 def resolve_output_dataset_name(args: argparse.Namespace) -> str:
     target_label = int(getattr(args, "target_label", 1))
     image_size = int(getattr(args, "image_size", 128))
     target_name = TARGET_LABEL_NAMES[target_label]
-    return f"cardiacuda_a4c_{target_name}_png{image_size}_{args.num_frames}f"
+    supervision_mode = str(getattr(args, "supervision_mode", "sparse"))
+    suffix = "" if supervision_mode == "sparse" else f"_{supervision_mode}"
+    return f"cardiacuda_a4c_{target_name}{suffix}_png{image_size}_{args.num_frames}f"
 
 
 def ensure_simpleitk():
@@ -220,11 +242,30 @@ def ensure_simpleitk():
     return sitk
 
 
+def build_dense_split(case_names: list[str], seed: int, val_count: int, test_count: int) -> dict[str, list[str]]:
+    import random
+
+    if val_count < 0 or test_count < 0:
+        raise ValueError("dense_val_count and dense_test_count must be non-negative")
+    if len(case_names) <= val_count + test_count:
+        raise ValueError(
+            f"dense split requires train cases; got total={len(case_names)} val={val_count} test={test_count}"
+        )
+
+    shuffled = list(case_names)
+    random.Random(seed).shuffle(shuffled)
+    test_cases = sorted(shuffled[:test_count])
+    val_cases = sorted(shuffled[test_count : test_count + val_count])
+    train_cases = sorted(shuffled[test_count + val_count :])
+    return {"train": train_cases, "val": val_cases, "test": test_cases}
+
+
 def preprocess_dataset(args: argparse.Namespace) -> Path:
     sitk = ensure_simpleitk()
     root = resolve_cardiacuda_root(args.input_root)
     image_size = int(getattr(args, "image_size", 128))
     target_label = int(getattr(args, "target_label", 1))
+    supervision_mode = str(getattr(args, "supervision_mode", "sparse"))
     train_sites = getattr(args, "train_sites", "Site_G_100,Site_R_126")
     val_sites = getattr(args, "val_sites", "Site_G_20,Site_R_52")
     test_sites = getattr(args, "test_sites", "Site_G_29")
@@ -243,11 +284,28 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
     summary = scan_cardiacuda_structure(root)
     LOGGER.info("CardiacUDA directory summary:\n%s", json.dumps(summary, indent=2, ensure_ascii=False))
 
-    split_map: dict[str, list[str]] = {
-        "train": parse_site_spec(train_sites),
-        "val": parse_site_spec(val_sites),
-        "test": parse_site_spec(test_sites),
-    }
+    split_map: dict[str, list[str]]
+    dense_case_split: dict[str, list[str]] | None = None
+    if supervision_mode == "sparse":
+        split_map = {
+            "train": parse_site_spec(train_sites),
+            "val": parse_site_spec(val_sites),
+            "test": parse_site_spec(test_sites),
+        }
+    else:
+        dense_root = root / "label_all_frame"
+        if not dense_root.is_dir():
+            raise FileNotFoundError(f"dense label root not found: {dense_root}")
+        dense_case_names = sorted(
+            path.stem.replace("_image.nii", "") for path in dense_root.glob("*_image.nii.gz")
+        )
+        dense_case_split = build_dense_split(
+            dense_case_names,
+            seed=int(getattr(args, "dense_seed", 42)),
+            val_count=int(getattr(args, "dense_val_count", 2)),
+            test_count=int(getattr(args, "dense_test_count", 2)),
+        )
+        split_map = {"train": ["label_all_frame"], "val": ["label_all_frame"], "test": ["label_all_frame"]}
 
     stats = {
         "processed": 0,
@@ -270,8 +328,14 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                 raw_case_name = image_path.stem.replace("_image.nii", "")
                 case_name = f"{site.lower()}__{raw_case_name}"
                 try:
+                    if supervision_mode == "dense":
+                        if dense_case_split is None:
+                            raise ValueError("dense split not initialized")
+                        if raw_case_name not in dense_case_split[split]:
+                            continue
+
                     if not label_path.exists():
-                        raise ValueError("missing sparse label")
+                        raise ValueError(f"missing {supervision_mode} label")
 
                     image_volume = sitk.GetArrayFromImage(sitk.ReadImage(str(image_path)))
                     label_volume = sitk.GetArrayFromImage(sitk.ReadImage(str(label_path)))
@@ -282,16 +346,23 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                     if image_volume.ndim != 3:
                         raise ValueError(f"expected 3D volume, found shape={image_volume.shape}")
 
-                    sparse_mask = label_volume == target_label
-                    labelled_frames = np.where(sparse_mask.reshape(sparse_mask.shape[0], -1).any(axis=1))[0].tolist()
+                    target_mask = label_volume == target_label
+                    labelled_frames = np.where(target_mask.reshape(target_mask.shape[0], -1).any(axis=1))[0].tolist()
                     if not labelled_frames:
                         raise ValueError(f"target label {target_label} is absent")
 
-                    sampled_indices, label_positions = build_sample_plan(
-                        labelled_frames,
-                        frame_count=int(image_volume.shape[0]),
-                        num_frames=args.num_frames,
-                    )
+                    if supervision_mode == "sparse":
+                        sampled_indices, label_positions = build_sample_plan(
+                            labelled_frames,
+                            frame_count=int(image_volume.shape[0]),
+                            num_frames=args.num_frames,
+                        )
+                    else:
+                        sampled_indices = build_dense_sample_plan(
+                            frame_count=int(image_volume.shape[0]),
+                            num_frames=args.num_frames,
+                        )
+                        label_positions = list(range(args.num_frames))
 
                     image_u8 = normalize_to_uint8(image_volume)
                     case_img_dir = output_dir / split / "img" / case_name
@@ -305,9 +376,10 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                             case_img_dir / f"{out_idx:04d}.png",
                         )
 
-                    for out_idx, src_idx in zip(label_positions, labelled_frames, strict=True):
+                    label_source_frames = labelled_frames if supervision_mode == "sparse" else sampled_indices
+                    for out_idx, src_idx in zip(label_positions, label_source_frames, strict=True):
                         binary_mask = resize_mask(
-                            prepare_binary_mask(sparse_mask[src_idx].astype(np.uint8)),
+                            prepare_binary_mask(target_mask[src_idx].astype(np.uint8)),
                             image_size,
                         )
                         if binary_mask.max() == 0:
@@ -316,11 +388,12 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
 
                     sample_meta = {
                         "dataset": "cardiacuda",
-                        "protocol_name": resolve_protocol_name(target_label),
+                        "protocol_name": resolve_protocol_name(target_label, supervision_mode),
                         "num_frames": args.num_frames,
                         "label_indices": label_positions,
                         "source_frames": sampled_indices,
-                        "sparse_source_frames": labelled_frames,
+                        "sparse_source_frames": labelled_frames if supervision_mode == "sparse" else [],
+                        "dense_source_frames": sampled_indices if supervision_mode == "dense" else [],
                         "target_label": target_label,
                         "target_name": TARGET_LABEL_NAMES[target_label],
                         "view": "A4C",
@@ -330,6 +403,7 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                         "source_case_name": raw_case_name,
                         "original_size": list(image_volume.shape[1:3]),
                         "resized_size": [image_size, image_size],
+                        "supervision_mode": supervision_mode,
                     }
                     meta_dir = output_dir / split / "metadata"
                     meta_dir.mkdir(parents=True, exist_ok=True)
@@ -362,11 +436,17 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
         "split_counts": dict(stats["split_counts"]),
         "site_counts": dict(stats["site_counts"]),
         "skip_reason_counts": dict(skip_reasons),
-        "protocol_name": resolve_protocol_name(target_label),
+        "protocol_name": resolve_protocol_name(target_label, supervision_mode),
         "target_label": target_label,
         "target_name": TARGET_LABEL_NAMES[target_label],
-        "ignored_inputs": ["Site_R_73", "label_all_frame"],
-        "task_contract": "10 frames sampled from full clip with sparse supervision preserved at all annotated source frames.",
+        "ignored_inputs": ["Site_R_73"] if supervision_mode == "sparse" else ["Site_* sparse folders"],
+        "task_contract": (
+            "10 frames sampled from full clip with sparse supervision preserved at all annotated source frames."
+            if supervision_mode == "sparse"
+            else "10 frames sampled from full clip with dense supervision at every sampled frame."
+        ),
+        "supervision_mode": supervision_mode,
+        "dense_case_split": dense_case_split,
     }
     (output_dir / "cardiacuda_bad_cases.json").write_text(
         json.dumps(bad_cases, indent=2, ensure_ascii=False),

@@ -31,6 +31,19 @@ class CardiacUDAPreprocessTests(unittest.TestCase):
         self._write_volume(site_dir / f"{case_name}_image.nii.gz", image)
         self._write_volume(site_dir / f"{case_name}_label.nii.gz", label)
 
+    def _build_dense_case(self, site_dir: Path, case_name: str) -> None:
+        frames, height, width = 20, 24, 32
+        image = np.stack(
+            [np.full((height, width), fill_value=frame_idx * 5, dtype=np.uint8) for frame_idx in range(frames)],
+            axis=0,
+        )
+        label = np.zeros((frames, height, width), dtype=np.uint8)
+        for frame_idx in range(frames):
+            label[frame_idx, 5:13, 8:18] = 1
+
+        self._write_volume(site_dir / f"{case_name}_image.nii.gz", image)
+        self._write_volume(site_dir / f"{case_name}_label.nii.gz", label)
+
     def test_preprocess_generates_sparse_gdkvm_layout(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -75,6 +88,61 @@ class CardiacUDAPreprocessTests(unittest.TestCase):
         dataset_name, dataset_cls = resolve_dataset_class(cfg)
         self.assertEqual(dataset_name, "cardiacuda")
         self.assertIs(dataset_cls, EchoDataset)
+
+    def test_preprocess_generates_dense_gdkvm_layout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            dense_root = tmp_path / "CardiacUDA" / "full_extracted" / "cardiacUDC_dataset" / "label_all_frame"
+            dense_root.mkdir(parents=True, exist_ok=True)
+
+            for case_name in [
+                "normal-1-4",
+                "normal-2-4",
+                "normal-3-4",
+                "normal-4-4",
+                "patient-5-4",
+            ]:
+                self._build_dense_case(dense_root, case_name)
+
+            args = Namespace(
+                input_root=tmp_path,
+                output_root=tmp_path / "processed",
+                num_frames=10,
+                image_size=32,
+                target_label=1,
+                supervision_mode="dense",
+                train_sites="Site_G_100",
+                val_sites="Site_G_20",
+                test_sites="Site_G_29",
+                dense_seed=7,
+                dense_val_count=1,
+                dense_test_count=1,
+                overwrite=False,
+            )
+            output_dir = preprocess_dataset(args)
+
+            train_dataset = EchoDataset(str(output_dir), mode="train", seq_length=10, size=32)
+            self.assertEqual(len(train_dataset), 3)
+            sample = train_dataset[0]
+            self.assertEqual(sample["protocol_name"], "cardiacuda_a4c_lv_dense")
+            self.assertEqual(sample["label_valid"].sum().item(), 10)
+            self.assertEqual(sample["eval_valid"].sum().item(), 10)
+
+            train_meta = sorted((output_dir / "train" / "metadata").glob("*.json"))
+            val_meta = sorted((output_dir / "val" / "metadata").glob("*.json"))
+            test_meta = sorted((output_dir / "test" / "metadata").glob("*.json"))
+            self.assertEqual(len(train_meta), 3)
+            self.assertEqual(len(val_meta), 1)
+            self.assertEqual(len(test_meta), 1)
+
+            meta = json.loads(train_meta[0].read_text(encoding="utf-8"))
+            self.assertEqual(meta["supervision_mode"], "dense")
+            self.assertEqual(meta["protocol_name"], "cardiacuda_a4c_lv_dense")
+            self.assertEqual(len(meta["label_indices"]), 10)
+            self.assertEqual(len(meta["dense_source_frames"]), 10)
+
+            bad_cases = json.loads((output_dir / "cardiacuda_bad_cases.json").read_text(encoding="utf-8"))
+            self.assertEqual(bad_cases, [])
 
 
 if __name__ == "__main__":

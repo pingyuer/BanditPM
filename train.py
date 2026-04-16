@@ -2,7 +2,6 @@ import os
 import math
 import datetime
 import logging
-import random
 import numpy as np
 
 import torch
@@ -23,9 +22,13 @@ from dataset.echo import EchoDataset
 from dataset.vos_dataset import TenCamusDataset
 from model.trainer import Trainer
 from utils.logger import TensorboardLogger
+from utils.training_setup import (
+    scale_stage_for_world_size,
+    seed_dataloader_worker,
+    seed_everything,
+)
 
 log = logging.getLogger(__name__)
-
 
 def resolve_model_name(cfg: DictConfig) -> str:
     return str(cfg.get("model_name", cfg.model.get("name", "BanditPM")))
@@ -113,18 +116,16 @@ def train(cfg: DictConfig):
         # -------- Random Seed (Offset by rank to avoid identical augmentations) --------
         base_seed = int(cfg.seed)
         rank = dist.get_rank() if dist.is_initialized() else 0
-        torch.manual_seed(base_seed + rank)
-        np.random.seed(base_seed + rank)
-        random.seed(base_seed + rank)
+        seed_everything(base_seed, rank)
 
         # -------- Adjust per-GPU batch size and workers based on world_size --------
         stage_cfg = cfg.main_training
         info_if_rank_zero(f"batch_size={stage_cfg.batch_size}")
-        stage_cfg.batch_size = max(stage_cfg.batch_size // world_size, 1)
+        original_num_workers = int(stage_cfg.num_workers)
+        scale_stage_for_world_size(stage_cfg, world_size)
         info_if_rank_zero(f"batch_size(per-GPU)={stage_cfg.batch_size}")
 
-        info_if_rank_zero(f"num_workers={stage_cfg.num_workers}")
-        stage_cfg.num_workers = max(stage_cfg.num_workers // world_size, 1)
+        info_if_rank_zero(f"num_workers={original_num_workers}")
         info_if_rank_zero(f"num_workers(per-GPU)={stage_cfg.num_workers}")
 
         # -------- Logging: Only main process writes to TensorBoard --------
@@ -150,7 +151,7 @@ def train(cfg: DictConfig):
                     persistent_workers=(num_workers > 0),
                     shuffle=False,
                     drop_last=drop_last,
-                    worker_init_fn=lambda wid: np.random.seed(torch.initial_seed() % (2**32)),
+                    worker_init_fn=seed_dataloader_worker,
                 )
             except Exception as e:
                 if main_process:

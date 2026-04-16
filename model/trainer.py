@@ -20,10 +20,13 @@ from model.gdkvm01 import GDKVM
 from model.utils.parameter_groups import get_parameter_groups
 from model.losses import LossComputer
 from vis.vis_0730 import visualize_sequence
+from utils.frame_validity import (
+    mask_to_frame_ids,
+    normalize_frame_validity_mask,
+    summarize_frame_mask,
+)
 
 from monai.metrics import (
-    DiceMetric,
-    MeanIoU,
     HausdorffDistanceMetric,
     SurfaceDistanceMetric,
     ConfusionMatrixMetric,
@@ -213,6 +216,7 @@ class Trainer:
         return str(phase_cfg.get(phase, self.cfg.get("evaluation", {}).get("init_mode", default_mode)))
 
     def _resolve_eval_indices(self, data):
+        T = data["rgb"].shape[1]
         frame_scope = str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only"))
         if frame_scope == "all_available":
             eval_valid = data.get("eval_valid")
@@ -224,20 +228,12 @@ class Trainer:
             source = data.get("label_valid")
 
         if source is None:
-            T = data["rgb"].shape[1]
-            return torch.arange(T, device=self.device)
+            return torch.ones((data["rgb"].shape[0], T), device=self.device, dtype=torch.bool)
 
-        if source.dim() == 1:
-            frame_mask = source.to(device=self.device, dtype=torch.bool)
-        else:
-            source = source.to(device=self.device, dtype=torch.bool)
-            frame_mask = source[0]
-            if not torch.equal(source, frame_mask.unsqueeze(0).expand_as(source)):
-                raise ValueError("eval_valid/label_valid must be consistent across the batch")
-        indices = torch.nonzero(frame_mask, as_tuple=False).flatten()
-        if indices.numel() == 0:
+        frame_mask = self._resolve_frame_valid_mask(source, batch_size=data["rgb"].shape[0], total_frames=T)
+        if not frame_mask.any():
             return self._resolve_supervised_indices(data)
-        return indices
+        return frame_mask
 
     def _binary_overlap_metrics(self, pred: torch.Tensor, gt: torch.Tensor):
         pred = pred.float()
@@ -354,24 +350,30 @@ class Trainer:
                     )
         return outputs
 
+    def _resolve_frame_valid_mask(self, source, batch_size: int, total_frames: int):
+        return normalize_frame_validity_mask(
+            source,
+            batch_size=batch_size,
+            total_frames=total_frames,
+            device=self.device,
+        )
+
+    def _format_frame_mask(self, frame_mask: torch.Tensor, max_samples: int = 3):
+        return summarize_frame_mask(frame_mask, max_samples=max_samples)
+
+    def _mask_to_frame_ids(self, frame_mask: torch.Tensor) -> list[int]:
+        return mask_to_frame_ids(frame_mask)
+
     def _resolve_supervised_indices(self, data):
         T = data["rgb"].shape[1]
-        label_valid = data.get("label_valid")
-        if label_valid is None:
-            return torch.tensor([0, T - 1], device=self.device)
-
-        if label_valid.dim() == 1:
-            frame_mask = label_valid.to(device=self.device, dtype=torch.bool)
-        else:
-            label_valid = label_valid.to(device=self.device, dtype=torch.bool)
-            frame_mask = label_valid[0]
-            if not torch.equal(label_valid, frame_mask.unsqueeze(0).expand_as(label_valid)):
-                raise ValueError("label_valid must be consistent across the batch")
-
-        indices = torch.nonzero(frame_mask, as_tuple=False).flatten()
-        if indices.numel() == 0:
-            raise ValueError("label_valid selects no supervised frames")
-        return indices
+        frame_mask = self._resolve_frame_valid_mask(
+            data.get("label_valid"),
+            batch_size=data["rgb"].shape[0],
+            total_frames=T,
+        )
+        if not frame_mask.any(dim=1).all():
+            raise ValueError("label_valid selects no supervised frames for at least one sample")
+        return frame_mask
 
     def train(self):
         self._is_train = True
@@ -399,19 +401,14 @@ class Trainer:
             data.update(out)
 
             supervised_indices = self._resolve_supervised_indices(data)
-
-            all_logits_keys = [f"logits_{ti}" for ti in supervised_indices.tolist()]
+            required_frame_ids = sorted(torch.nonzero(supervised_indices.any(dim=0), as_tuple=False).flatten().tolist())
+            all_logits_keys = [f"logits_{ti}" for ti in required_frame_ids]
             if not all(k in data for k in all_logits_keys):
                 raise KeyError(
                     f"Missing logits keys. Expected {all_logits_keys}, found {list(data.keys())}"
                 )
-
-            new_pred = torch.stack([data[k] for k in all_logits_keys], dim=1)
-            new_gt = torch.index_select(data["cls_gt"], 1, supervised_indices)
             data.update(
                 {
-                    "logits": new_pred,
-                    "masks": new_gt,
                     "supervised_indices": supervised_indices,
                 }
             )
@@ -554,14 +551,15 @@ class Trainer:
 
                 supervised_indices = self._resolve_supervised_indices(batch_data)
                 eval_indices = self._resolve_eval_indices(batch_data)
-                mask_keys = [f"masks_{ti}" for ti in eval_indices.tolist()]
+                required_eval_ids = sorted(torch.nonzero(eval_indices.any(dim=0), as_tuple=False).flatten().tolist())
+                mask_keys = [f"masks_{ti}" for ti in required_eval_ids]
 
                 if batch_idx == 0 and self.main_process:
                     self.log.info(
                         f"[{mode.capitalize()}] init_mode={batch_data['init_mode']} | "
                         f"metric_space={str(self.cfg.get('evaluation', {}).get('metric_space', 'original'))} | "
-                        f"supervised_indices={supervised_indices.tolist()} | "
-                        f"eval_indices={eval_indices.tolist()}"
+                        f"supervised_indices={self._format_frame_mask(supervised_indices)} | "
+                        f"eval_indices={self._format_frame_mask(eval_indices)}"
                     )
 
                 if not all(k in out for k in mask_keys):
@@ -608,7 +606,8 @@ class Trainer:
                     sample_iou = []
                     drift_values = []
                     original_sizes = batch_data.get("original_size")
-                    for ti in eval_indices.tolist():
+                    sample_eval_indices = torch.nonzero(eval_indices[bi], as_tuple=False).flatten().tolist()
+                    for ti in sample_eval_indices:
                         pred = out[f"masks_{ti}"][bi:bi + 1]
                         if pred.shape[1] > 1:
                             pred = pred[:, 1:2, ...]

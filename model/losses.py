@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 from utils.point_features import calculate_uncertainty, point_sample, get_uncertain_point_coords_with_randomness
 from utils.tensor_utils import cls_to_one_hot
+from utils.frame_validity import build_default_endpoint_mask, mask_to_frame_ids, normalize_frame_validity_mask
 
 @torch.jit.script
 def ce_loss(logits: torch.Tensor, soft_gt: torch.Tensor) -> torch.Tensor:
@@ -45,6 +46,33 @@ class LossComputer(nn.Module):
         self.rl_baseline_momentum = float(bpm_cfg.get("RL_BASELINE_MOMENTUM", 0.95))
         self.register_buffer("action_reward_baseline", torch.zeros(4, dtype=torch.float32), persistent=True)
 
+    def _default_supervision_mask(
+        self,
+        batch_size: int,
+        num_frames: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        return build_default_endpoint_mask(batch_size, num_frames, device=device)
+
+    def _resolve_supervision_mask(
+        self,
+        supervised_indices: torch.Tensor | None,
+        batch_size: int,
+        num_frames: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if supervised_indices is None:
+            return self._default_supervision_mask(batch_size, num_frames, device)
+        return normalize_frame_validity_mask(
+            supervised_indices,
+            batch_size=batch_size,
+            total_frames=num_frames,
+            device=device,
+        )
+
+    def _frame_ids_for_sample(self, supervised_mask: torch.Tensor, sample_idx: int) -> list[int]:
+        return mask_to_frame_ids(supervised_mask[sample_idx])
+
     def mask_loss(
         self, logits: torch.Tensor, soft_gt: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -81,13 +109,17 @@ class LossComputer(nn.Module):
                 num_objects: List[int]) -> Dict[str, torch.Tensor]:
         batch_size, num_frames = data['rgb'].shape[:2]
         losses = defaultdict(float)
-        supervised_indices = data.get('supervised_indices')
-        if supervised_indices is None:
-            t_range = [0, num_frames - 1] if num_frames > 1 else [0]
-        else:
-            t_range = supervised_indices.tolist()
+        supervised_mask = self._resolve_supervision_mask(
+            data.get('supervised_indices'),
+            batch_size=batch_size,
+            num_frames=num_frames,
+            device=data['rgb'].device,
+        )
 
         for bi in range(batch_size):
+            t_range = self._frame_ids_for_sample(supervised_mask, bi)
+            if not t_range:
+                raise ValueError(f"Sample {bi} has no supervised frames")
             curr_num_obj = num_objects[bi]
             valid_slice = slice(None, curr_num_obj + 1)
 
@@ -129,7 +161,7 @@ class LossComputer(nn.Module):
                     losses[f'aux_query_ce_l{level_idx}'] += l_ce / batch_size * self.query_weight
                     losses[f'aux_query_dice_l{level_idx}'] += l_dice / batch_size * self.query_weight
 
-            bpm_aux_list = [data.get(f'bpm_aux_{ti}') for ti in t_range]
+            bpm_aux_list = [self._slice_aux_for_sample(data.get(f'bpm_aux_{ti}'), bi, batch_size) for ti in t_range]
             rl_terms = self._compute_policy_and_rl_losses(
                 bpm_aux_list=bpm_aux_list,
                 frame_seg_loss=(frame_ce + frame_dice).detach(),
@@ -153,6 +185,23 @@ class LossComputer(nn.Module):
                 losses['total_loss'] = losses['total_loss'] + losses['policy_ce']
 
         return losses
+
+    def _slice_aux_for_sample(
+        self,
+        aux: Dict[str, torch.Tensor] | None,
+        sample_idx: int,
+        batch_size: int,
+    ) -> Dict[str, torch.Tensor] | None:
+        if aux is None:
+            return None
+
+        sliced = {}
+        for key, value in aux.items():
+            if torch.is_tensor(value) and value.dim() > 0 and value.shape[0] == batch_size:
+                sliced[key] = value[sample_idx:sample_idx + 1]
+            else:
+                sliced[key] = value
+        return sliced
 
     def _compute_policy_and_rl_losses(
         self,
@@ -229,26 +278,33 @@ class LossComputer(nn.Module):
 
     def _compute_policy_loss(self, data: Dict[str, torch.Tensor]) -> torch.Tensor | None:
         supervised_indices = data.get('supervised_indices')
-        if supervised_indices is None:
-            frame_ids = [k for k in data.keys() if k.startswith('bpm_aux_')]
-            if not frame_ids:
-                return None
-            t_range = sorted(int(k.split('_')[-1]) for k in frame_ids)
-        else:
-            t_range = supervised_indices.tolist()
-
+        batch_size = data['rgb'].shape[0]
         logits_list = []
         labels_list = []
-        for ti in t_range:
-            aux = data.get(f'bpm_aux_{ti}')
-            if aux is None:
-                continue
-            if 'policy_logits' not in aux or 'policy_labels' not in aux:
-                continue
-            logits = aux['policy_logits'].flatten(start_dim=0, end_dim=1)
-            labels = aux['policy_labels'].flatten()
-            logits_list.append(logits)
-            labels_list.append(labels)
+        supervised_mask = None
+        if supervised_indices is not None:
+            supervised_mask = self._resolve_supervision_mask(
+                supervised_indices,
+                batch_size=batch_size,
+                num_frames=data['rgb'].shape[1],
+                device=data['rgb'].device,
+            )
+        for bi in range(batch_size):
+            if supervised_mask is None:
+                frame_ids = sorted(int(k.split('_')[-1]) for k in data.keys() if k.startswith('bpm_aux_'))
+            else:
+                frame_ids = self._frame_ids_for_sample(supervised_mask, bi)
+
+            for ti in frame_ids:
+                aux = self._slice_aux_for_sample(data.get(f'bpm_aux_{ti}'), bi, batch_size)
+                if aux is None:
+                    continue
+                if 'policy_logits' not in aux or 'policy_labels' not in aux:
+                    continue
+                logits = aux['policy_logits'].flatten(start_dim=0, end_dim=1)
+                labels = aux['policy_labels'].flatten()
+                logits_list.append(logits)
+                labels_list.append(labels)
 
         if not logits_list:
             return None
