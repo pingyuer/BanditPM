@@ -1,4 +1,5 @@
 from model.modules.banditpm_core import BanditPMCore
+from model.modules.dynakey import DynaKeyMemoryCore, DynaKeyQMaintainer, ODEKeyDictionary
 from model.modules.gdr_core import GDRCore
 from model.modules.memory_core import MemoryCore
 from model.modules.prototype_temporal_state import PrototypeTemporalState
@@ -10,8 +11,11 @@ from model.modules.prototype_manager import BanditPrototypeManager
 __all__ = [
     "BanditPMCore",
     "BanditPrototypeManager",
+    "DynaKeyMemoryCore",
+    "DynaKeyQMaintainer",
     "GDRCore",
     "MemoryCore",
+    "ODEKeyDictionary",
     "PrototypeTemporalState",
     "PrototypeValueBank",
     "PrototypeValueFuser",

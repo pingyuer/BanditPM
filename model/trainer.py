@@ -444,6 +444,7 @@ class Trainer:
                 if it != 0:
                     self.log.log_scalar("lr", self.scheduler.get_last_lr()[0], it)
                 self._log_bpm_stats(data, it)
+                self._log_dynakey_stats(data, it)
 
         return loss.detach()
 
@@ -510,6 +511,44 @@ class Trainer:
                 self.log.log_scalar("bpm/rule_learned_agreement", torch.cat(agreement_tensors).mean().item(), it)
             if occupancy_tensors:
                 self.log.log_scalar("bpm/occupancy_ratio", torch.cat(occupancy_tensors).mean().item(), it)
+        except Exception:
+            pass
+
+    def _log_dynakey_stats(self, data, it: int) -> None:
+        memory_keys = sorted(k for k in data.keys() if k.startswith("memory_aux_"))
+        if not memory_keys:
+            return
+
+        try:
+            occupancy_tensors = []
+            entropy_tensors = []
+            fallback_tensors = []
+            action_hist_tensors = []
+            for key in memory_keys:
+                aux = data[key]
+                dynakey_aux = aux.get("dynakey_aux") if isinstance(aux, dict) else None
+                if not dynakey_aux:
+                    continue
+                if "occupancy_ratio" in dynakey_aux:
+                    occupancy_tensors.append(dynakey_aux["occupancy_ratio"].detach().flatten())
+                if "retrieval_entropy" in dynakey_aux:
+                    entropy_tensors.append(dynakey_aux["retrieval_entropy"].detach().flatten())
+                if "used_identity_fallback" in dynakey_aux:
+                    fallback_tensors.append(dynakey_aux["used_identity_fallback"].float().detach().flatten())
+                if "action_hist" in dynakey_aux:
+                    action_hist_tensors.append(dynakey_aux["action_hist"].detach())
+
+            if occupancy_tensors:
+                self.log.log_scalar("dynakey/occupancy_ratio", torch.cat(occupancy_tensors).mean().item(), it)
+            if entropy_tensors:
+                self.log.log_scalar("dynakey/retrieval_entropy", torch.cat(entropy_tensors).mean().item(), it)
+            if fallback_tensors:
+                self.log.log_scalar("dynakey/identity_fallback", torch.cat(fallback_tensors).mean().item(), it)
+            if action_hist_tensors:
+                hist = torch.stack(action_hist_tensors, dim=0).mean(dim=0)
+                names = ["keep", "update", "spawn", "split", "delete"]
+                for idx, name in enumerate(names):
+                    self.log.log_scalar(f"dynakey/action_{name}", hist[idx].item(), it)
         except Exception:
             pass
 
