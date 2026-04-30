@@ -45,6 +45,11 @@ class LossComputer(nn.Module):
         self.adv_clamp = float(bpm_cfg.get("ADV_CLAMP", 1.0))
         self.rl_baseline_momentum = float(bpm_cfg.get("RL_BASELINE_MOMENTUM", 0.95))
         self.register_buffer("action_reward_baseline", torch.zeros(4, dtype=torch.float32), persistent=True)
+        dynakey_cfg = cfg.model.get("memory_core", {}).get("dynakey", {})
+        self.enable_dynakey_q_loss = bool(dynakey_cfg.get("ENABLE_Q_LOSS", False))
+        self.lambda_dynakey_q_ce = float(dynakey_cfg.get("LAMBDA_Q_CE", 1.0))
+        self.lambda_dynakey_q_adv = float(dynakey_cfg.get("LAMBDA_Q_ADV", 0.0))
+        self.dynakey_advantage_clamp = float(dynakey_cfg.get("ADVANTAGE_CLAMP", 5.0))
 
     def _default_supervision_mask(
         self,
@@ -170,11 +175,15 @@ class LossComputer(nn.Module):
             for k, v in rl_terms.items():
                 losses[k] += v / batch_size if torch.is_tensor(v) else v / batch_size
 
+        dynakey_q_terms = self._compute_dynakey_q_loss(data)
+        for k, v in dynakey_q_terms.items():
+            losses[k] += v
+
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
         for key, value in losses.items():
             if not (torch.is_tensor(value) or isinstance(value, (float, int))):
                 continue
-            if key.startswith("loss_") or key.startswith("aux_") or key in {"rl_loss", "entropy_reg"}:
+            if key.startswith("loss_") or key.startswith("aux_") or key == "dynakey_q_total" or key in {"rl_loss", "entropy_reg"}:
                 total_loss = total_loss + value
         losses['total_loss'] = total_loss
 
@@ -185,6 +194,67 @@ class LossComputer(nn.Module):
                 losses['total_loss'] = losses['total_loss'] + losses['policy_ce']
 
         return losses
+
+    def _compute_dynakey_q_loss(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        if not self.enable_dynakey_q_loss:
+            return {}
+
+        q_values_list = []
+        labels_list = []
+        advantage_list = []
+        mask_list = []
+
+        for key in sorted(data.keys()):
+            if not key.startswith("memory_aux_"):
+                continue
+            memory_aux = data.get(key)
+            if not isinstance(memory_aux, dict):
+                continue
+            aux = memory_aux.get("dynakey_aux")
+            if not isinstance(aux, dict):
+                continue
+            q_values = aux.get("q_values")
+            target = aux.get("q_target_action")
+            advantage = aux.get("advantage_returns")
+            action_mask = aux.get("action_mask")
+            if q_values is None or target is None or advantage is None:
+                continue
+            if not torch.is_tensor(q_values) or not q_values.requires_grad:
+                continue
+            q_values_list.append(q_values.flatten(0, 1))
+            labels_list.append(target.flatten().long())
+            advantage_list.append(advantage.to(device=q_values.device, dtype=q_values.dtype).flatten(0, 1))
+            if action_mask is None:
+                mask_list.append(torch.ones_like(q_values, dtype=torch.bool).flatten(0, 1))
+            else:
+                mask_list.append(action_mask.to(device=q_values.device).bool().flatten(0, 1))
+
+        if not q_values_list:
+            return {}
+
+        q_values = torch.cat(q_values_list, dim=0)
+        labels = torch.cat(labels_list, dim=0)
+        advantages = torch.cat(advantage_list, dim=0).clamp(
+            -self.dynakey_advantage_clamp,
+            self.dynakey_advantage_clamp,
+        )
+        action_mask = torch.cat(mask_list, dim=0)
+        q_values_masked = q_values.masked_fill(~action_mask, -1.0e4)
+
+        out: Dict[str, torch.Tensor] = {}
+        total = torch.zeros((), device=q_values.device, dtype=q_values.dtype)
+        if self.lambda_dynakey_q_ce > 0:
+            ce = F.cross_entropy(q_values_masked, labels)
+            out["dynakey_q_ce"] = ce * self.lambda_dynakey_q_ce
+            total = total + out["dynakey_q_ce"]
+        if self.lambda_dynakey_q_adv > 0:
+            adv_target = advantages.masked_fill(~action_mask, 0.0)
+            valid_count = action_mask.float().sum().clamp_min(1.0)
+            adv_loss = (((q_values - adv_target) ** 2) * action_mask.float()).sum() / valid_count
+            out["dynakey_q_adv"] = adv_loss * self.lambda_dynakey_q_adv
+            total = total + out["dynakey_q_adv"]
+        out["dynakey_q_total"] = total
+        return out
 
     def _slice_aux_for_sample(
         self,

@@ -1,0 +1,37 @@
+defaults:
+  - config_banditpm_baseline
+  - _self_
+
+exp_id: "dynakey_baseline"
+
+wandb:
+  group: "dynakey"
+  tags: ["dynakey", "kpff", "ode_memory", "q_loss"]
+
+model:
+  memory_core:
+    type: "dynakey"
+    dynakey:
+      BANK_SIZE: 4
+      DT: 1.0
+      EMA_ALPHA: 0.2
+      RETRIEVAL_TEMPERATURE: 1.0
+      MIN_SCALE: 1.0e-3
+      HIDDEN_DIM: 256
+      GATE_INIT: 1.0
+      POLICY_MODE: "q_greedy"  # no_update | forced | fixed_residual | q_greedy
+      FORCED_ACTION: "spawn"
+      RESIDUAL_SPAWN_THRESHOLD: 0.05
+      SPLIT_EPS: 0.01
+      SPLIT_SCALE_FACTOR: 0.7
+
+      # Aggressive Q scaffold training.
+      # This trains the Q head against one-step counterfactual advantage targets.
+      ENABLE_Q_LOSS: true
+      LAMBDA_Q_CE: 0.5
+      LAMBDA_Q_ADV: 0.05
+      ADVANTAGE_CLAMP: 2.0
+      DETACH_Q_STATE: true
+
+  temporal_memory:
+    type: "dynakey"

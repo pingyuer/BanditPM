@@ -8,6 +8,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def safe_invalid_value(dtype: torch.dtype) -> float:
+    if dtype in (torch.float16, torch.bfloat16):
+        return -1.0e4
+    return -1.0e9
+
+
 @dataclass
 class ODEKeyDictionaryState:
     center: torch.Tensor
@@ -102,6 +108,18 @@ class ODEKeyDictionary(nn.Module):
         index = slot_idx.expand(*tensor.shape[:2], 1, *tensor.shape[3:])
         tensor.scatter_(2, index, value.unsqueeze(2))
 
+    def _scatter_slot_masked(
+        self,
+        tensor: torch.Tensor,
+        slot_idx: torch.Tensor,
+        value: torch.Tensor,
+        enabled: torch.Tensor,
+    ) -> None:
+        current = self._gather_slot(tensor, slot_idx)
+        while enabled.dim() < value.dim():
+            enabled = enabled.unsqueeze(-1)
+        self._scatter_slot(tensor, slot_idx, torch.where(enabled, value, current))
+
     def _clamp_velocity(self, velocity: torch.Tensor) -> torch.Tensor:
         norm = velocity.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         scale = (self.max_velocity_norm / norm).clamp(max=1.0)
@@ -110,13 +128,19 @@ class ODEKeyDictionary(nn.Module):
     def retrieve(self, z_BNC: torch.Tensor) -> tuple[torch.Tensor, dict]:
         self._ensure_state_for(z_BNC)
         state = self.state
+        center = state.center.to(dtype=z_BNC.dtype, device=z_BNC.device)
+        scale = state.scale.to(dtype=z_BNC.dtype, device=z_BNC.device).clamp_min(self.min_scale)
         z_norm = F.normalize(z_BNC, dim=-1).unsqueeze(2)
-        center_norm = F.normalize(state.center, dim=-1)
+        center_norm = F.normalize(center, dim=-1)
         distance = torch.linalg.vector_norm(z_norm - center_norm, dim=-1)
-        logits = -distance / max(self.retrieval_temperature, 1e-6)
-        logits = logits.masked_fill(~state.valid, -1.0e9)
+        scaled_distance = distance / scale
+        logits = -scaled_distance / max(self.retrieval_temperature, 1e-6)
+        logits = logits.masked_fill(~state.valid, safe_invalid_value(logits.dtype))
         has_match = state.valid.any(dim=-1)
         weights = torch.softmax(logits, dim=-1)
+        weights = torch.where(has_match.unsqueeze(-1), weights, torch.zeros_like(weights))
+        weights = weights.masked_fill(~state.valid, 0.0)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         weights = torch.where(has_match.unsqueeze(-1), weights, torch.zeros_like(weights))
         nearest_idx = torch.where(
             has_match,
@@ -127,10 +151,12 @@ class ODEKeyDictionary(nn.Module):
         nearest_distance = torch.where(has_match, nearest_distance, torch.zeros_like(nearest_distance))
         return weights, {
             "distance": distance,
+            "scaled_distance": scaled_distance,
             "has_match": has_match,
             "nearest_idx": nearest_idx,
             "nearest_distance": nearest_distance,
             "occupancy_ratio": state.valid.float().mean(dim=-1),
+            "weights": weights,
         }
 
     def predict(
@@ -144,7 +170,7 @@ class ODEKeyDictionary(nn.Module):
         else:
             retrieval_aux = {}
         state = self.state
-        slot_pred = z_BNC.unsqueeze(2) + self.dt * state.velocity
+        slot_pred = z_BNC.unsqueeze(2) + self.dt * state.velocity.to(dtype=z_BNC.dtype, device=z_BNC.device)
         pred = (slot_pred * weights_BNK.unsqueeze(-1)).sum(dim=2)
         has_match = state.valid.any(dim=-1)
         pred = torch.where(has_match.unsqueeze(-1), pred, z_BNC)
@@ -169,7 +195,7 @@ class ODEKeyDictionary(nn.Module):
         velocity = self._clamp_velocity(velocity.detach())
         self._scatter_slot(state.center, slot_idx, z_BNC.detach())
         self._scatter_slot(state.velocity, slot_idx, velocity)
-        self._scatter_slot(state.scale, slot_idx, torch.ones_like(slot_idx, dtype=z_BNC.dtype))
+        self._scatter_slot(state.scale, slot_idx, torch.ones_like(slot_idx, dtype=state.scale.dtype, device=z_BNC.device))
         self._scatter_slot(state.age, slot_idx, torch.zeros_like(slot_idx, dtype=z_BNC.dtype))
         self._scatter_slot(state.usage, slot_idx, torch.ones_like(slot_idx, dtype=z_BNC.dtype))
         self._scatter_slot(state.error_ema, slot_idx, torch.zeros_like(slot_idx, dtype=z_BNC.dtype))
@@ -216,19 +242,38 @@ class ODEKeyDictionary(nn.Module):
             err = torch.mean((pred - target_next_BNC.detach()) ** 2, dim=-1)
             old_err = self._gather_slot(state.error_ema.unsqueeze(-1), slot_idx).squeeze(-1)
             self._scatter_slot(state.error_ema, slot_idx, (1.0 - alpha_tensor) * old_err + alpha_tensor * err)
+            old_scale = self._gather_slot(state.scale.unsqueeze(-1), slot_idx).squeeze(-1)
+            target_scale = target_velocity.norm(dim=-1).clamp_min(self.min_scale)
+            self._scatter_slot(state.scale, slot_idx, (1.0 - alpha_tensor) * old_scale + alpha_tensor * target_scale)
 
         old_usage = self._gather_slot(state.usage.unsqueeze(-1), slot_idx).squeeze(-1)
         self._scatter_slot(state.usage, slot_idx, old_usage + 1.0)
         self._scatter_slot(state.valid, slot_idx, torch.ones_like(slot_idx, dtype=torch.bool))
 
-    def split(self, slot_idx: torch.Tensor, perturb_scale: float = 0.01) -> torch.Tensor:
+    def split(
+        self,
+        slot_idx: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+        perturb_scale: float = 0.01,
+        split_eps: Optional[float] = None,
+        split_scale_factor: float = 0.7,
+    ) -> torch.Tensor:
         state = self.state
+        eps = float(perturb_scale if split_eps is None else split_eps)
         dst_idx = self._first_empty_slot()
         self.clone_slot(slot_idx.long(), dst_idx)
         center = self._gather_slot(state.center, dst_idx)
-        basis = torch.zeros_like(center)
-        basis[..., 0] = float(perturb_scale)
-        self._scatter_slot(state.center, dst_idx, center + basis)
+        old_velocity = self._gather_slot(state.velocity, dst_idx)
+        if residual is None:
+            direction = torch.randn_like(center)
+        else:
+            direction = residual.detach().to(device=center.device, dtype=center.dtype)
+        direction = F.normalize(direction, dim=-1)
+        self._scatter_slot(state.center, dst_idx, center + eps * direction)
+        residual_velocity = direction if residual is None else residual.detach().to(device=center.device, dtype=center.dtype) / max(self.dt, 1e-6)
+        self._scatter_slot(state.velocity, dst_idx, self._clamp_velocity(old_velocity + residual_velocity))
+        old_scale = self._gather_slot(state.scale.unsqueeze(-1), dst_idx).squeeze(-1)
+        self._scatter_slot(state.scale, dst_idx, (old_scale * float(split_scale_factor)).clamp_min(self.min_scale))
         self._scatter_slot(state.age, dst_idx, torch.zeros_like(dst_idx, dtype=state.age.dtype))
         self._scatter_slot(state.usage, dst_idx, torch.ones_like(dst_idx, dtype=state.usage.dtype))
         return dst_idx
@@ -236,13 +281,17 @@ class ODEKeyDictionary(nn.Module):
     def delete(self, slot_idx: torch.Tensor) -> None:
         state = self.state
         slot_idx = slot_idx.long()
-        self._scatter_slot(state.center, slot_idx, torch.zeros(*slot_idx.shape, self.value_dim, device=state.center.device))
-        self._scatter_slot(state.velocity, slot_idx, torch.zeros(*slot_idx.shape, self.value_dim, device=state.velocity.device))
-        self._scatter_slot(state.scale, slot_idx, torch.zeros_like(slot_idx, dtype=state.scale.dtype))
-        self._scatter_slot(state.age, slot_idx, torch.zeros_like(slot_idx, dtype=state.age.dtype))
-        self._scatter_slot(state.usage, slot_idx, torch.zeros_like(slot_idx, dtype=state.usage.dtype))
-        self._scatter_slot(state.error_ema, slot_idx, torch.zeros_like(slot_idx, dtype=state.error_ema.dtype))
-        self._scatter_slot(state.valid, slot_idx, torch.zeros_like(slot_idx, dtype=torch.bool))
+        can_delete = self.active_key_count() > 1
+        self._scatter_slot_masked(state.center, slot_idx, torch.zeros(*slot_idx.shape, self.value_dim, device=state.center.device), can_delete)
+        self._scatter_slot_masked(state.velocity, slot_idx, torch.zeros(*slot_idx.shape, self.value_dim, device=state.velocity.device), can_delete)
+        self._scatter_slot_masked(state.scale, slot_idx, torch.zeros_like(slot_idx, dtype=state.scale.dtype), can_delete)
+        self._scatter_slot_masked(state.age, slot_idx, torch.zeros_like(slot_idx, dtype=state.age.dtype), can_delete)
+        self._scatter_slot_masked(state.usage, slot_idx, torch.zeros_like(slot_idx, dtype=state.usage.dtype), can_delete)
+        self._scatter_slot_masked(state.error_ema, slot_idx, torch.zeros_like(slot_idx, dtype=state.error_ema.dtype), can_delete)
+        self._scatter_slot_masked(state.valid, slot_idx, torch.zeros_like(slot_idx, dtype=torch.bool), can_delete)
+
+    def active_key_count(self) -> torch.Tensor:
+        return self.state.valid.sum(dim=-1)
 
     def tick_age(self) -> None:
         state = self.state
@@ -254,6 +303,7 @@ class ODEKeyDictionary(nn.Module):
         denom = valid_float.sum().clamp_min(1.0)
         return {
             "occupancy_ratio": valid_float.mean(dim=-1),
+            "active_key_count": self.active_key_count(),
             "age_mean": (state.age * valid_float).sum() / denom,
             "usage_mean": (state.usage * valid_float).sum() / denom,
             "error_ema_mean": (state.error_ema * valid_float).sum() / denom,

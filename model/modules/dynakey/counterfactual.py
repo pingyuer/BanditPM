@@ -53,7 +53,7 @@ def compute_counterfactual_returns(
         costs_t = torch.tensor(costs, device=z_t_BNC.device, dtype=z_t_BNC.dtype)
 
     live_state = dictionary.clone_state()
-    returns = []
+    raw_returns = []
     errors = []
 
     for action in range(5):
@@ -72,7 +72,7 @@ def compute_counterfactual_returns(
             valid_any = trial.state.valid.any(dim=-1)
             empty_any = (~trial.state.valid).any(dim=-1)
             if (valid_any & empty_any).any():
-                trial.split(nearest)
+                trial.split(nearest, residual=z_tp1_BNC - z_t_BNC)
                 weights_after, aux_after = trial.retrieve(z_t_BNC)
                 trial.update(z_t_BNC, z_tp1_BNC, aux_after["nearest_idx"])
         elif action == DynaKeyQMaintainer.ACTION_DELETE:
@@ -83,14 +83,21 @@ def compute_counterfactual_returns(
         pred, _ = trial.predict(z_t_BNC, weights_after)
         err = torch.mean((pred - z_tp1_BNC) ** 2, dim=-1)
         reward = -err - costs_t[action]
-        returns.append(reward)
+        raw_returns.append(reward)
         errors.append(err)
 
-    returns_BNA = torch.stack(returns, dim=-1)
+    raw_returns_BNA = torch.stack(raw_returns, dim=-1)
     errors_BNA = torch.stack(errors, dim=-1)
-    return returns_BNA, {
+    keep_error = errors_BNA[..., DynaKeyQMaintainer.ACTION_KEEP]
+    cost_delta = costs_t - costs_t[DynaKeyQMaintainer.ACTION_KEEP]
+    advantage_returns = keep_error.unsqueeze(-1) - errors_BNA - cost_delta
+    return raw_returns_BNA, {
+        "raw_returns": raw_returns_BNA,
+        "advantage_returns": advantage_returns,
+        "action_errors": errors_BNA,
+        "keep_error": keep_error,
         "prediction_error": errors_BNA,
         "action_cost": costs_t,
-        "best_action": returns_BNA.argmax(dim=-1),
-        "finite_mask": torch.isfinite(returns_BNA),
+        "best_action": advantage_returns.argmax(dim=-1),
+        "finite_mask": torch.isfinite(raw_returns_BNA) & torch.isfinite(advantage_returns),
     }

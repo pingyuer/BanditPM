@@ -521,8 +521,11 @@ class Trainer:
 
         try:
             occupancy_tensors = []
+            active_count_tensors = []
             entropy_tensors = []
             fallback_tensors = []
+            prediction_error_tensors = []
+            residual_tensors = []
             action_hist_tensors = []
             for key in memory_keys:
                 aux = data[key]
@@ -531,19 +534,31 @@ class Trainer:
                     continue
                 if "occupancy_ratio" in dynakey_aux:
                     occupancy_tensors.append(dynakey_aux["occupancy_ratio"].detach().flatten())
+                if "active_key_count" in dynakey_aux:
+                    active_count_tensors.append(dynakey_aux["active_key_count"].float().detach().flatten())
                 if "retrieval_entropy" in dynakey_aux:
                     entropy_tensors.append(dynakey_aux["retrieval_entropy"].detach().flatten())
                 if "used_identity_fallback" in dynakey_aux:
                     fallback_tensors.append(dynakey_aux["used_identity_fallback"].float().detach().flatten())
+                if "prediction_error" in dynakey_aux:
+                    prediction_error_tensors.append(dynakey_aux["prediction_error"].detach().flatten())
+                if "residual_norm" in dynakey_aux:
+                    residual_tensors.append(dynakey_aux["residual_norm"].detach().flatten())
                 if "action_hist" in dynakey_aux:
                     action_hist_tensors.append(dynakey_aux["action_hist"].detach())
 
             if occupancy_tensors:
                 self.log.log_scalar("dynakey/occupancy_ratio", torch.cat(occupancy_tensors).mean().item(), it)
+            if active_count_tensors:
+                self.log.log_scalar("dynakey/active_key_count", torch.cat(active_count_tensors).mean().item(), it)
             if entropy_tensors:
                 self.log.log_scalar("dynakey/retrieval_entropy", torch.cat(entropy_tensors).mean().item(), it)
             if fallback_tensors:
                 self.log.log_scalar("dynakey/identity_fallback", torch.cat(fallback_tensors).mean().item(), it)
+            if prediction_error_tensors:
+                self.log.log_scalar("dynakey/prediction_error", torch.cat(prediction_error_tensors).mean().item(), it)
+            if residual_tensors:
+                self.log.log_scalar("dynakey/residual_norm", torch.cat(residual_tensors).mean().item(), it)
             if action_hist_tensors:
                 hist = torch.stack(action_hist_tensors, dim=0).mean(dim=0)
                 names = ["keep", "update", "spawn", "split", "delete"]

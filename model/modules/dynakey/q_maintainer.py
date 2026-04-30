@@ -67,7 +67,12 @@ class DynaKeyQMaintainer(nn.Module):
         retrieval_aux: dict,
     ) -> torch.Tensor:
         delta_pred = z_next_pred_BNC - z_BNC
-        if target_next_BNC is None:
+        residual_norm = retrieval_aux.get("residual_norm")
+        if residual_norm is not None:
+            l2_error = residual_norm.to(device=z_BNC.device, dtype=z_BNC.dtype)
+            cosine_error = torch.zeros_like(l2_error)
+            has_target = torch.ones_like(l2_error)
+        elif target_next_BNC is None:
             l2_error = torch.zeros(z_BNC.shape[:2], device=z_BNC.device, dtype=z_BNC.dtype)
             cosine_error = torch.zeros_like(l2_error)
             has_target = torch.zeros_like(l2_error)
@@ -126,14 +131,15 @@ class DynaKeyQMaintainer(nn.Module):
         return torch.nan_to_num(q_state, nan=0.0, posinf=1e6, neginf=-1e6)
 
     def action_mask(self, dictionary_state: ODEKeyDictionaryState, retrieval_aux: dict) -> torch.Tensor:
-        valid_any = dictionary_state.valid.any(dim=-1)
+        valid_count = dictionary_state.valid.sum(dim=-1)
+        valid_any = valid_count > 0
         empty_any = (~dictionary_state.valid).any(dim=-1)
         mask = torch.zeros(*dictionary_state.valid.shape[:2], self.num_actions, device=dictionary_state.valid.device, dtype=torch.bool)
         mask[..., self.ACTION_KEEP] = True
         mask[..., self.ACTION_UPDATE] = valid_any
         mask[..., self.ACTION_SPAWN] = empty_any
         mask[..., self.ACTION_SPLIT] = valid_any & empty_any
-        mask[..., self.ACTION_DELETE] = valid_any
+        mask[..., self.ACTION_DELETE] = valid_count > 1
         return mask
 
     def forward(self, q_state: torch.Tensor, action_mask: torch.Tensor | None = None) -> torch.Tensor:
