@@ -14,7 +14,7 @@ save: 0
 save_weights_interval: 200
 save_checkpoint_interval: 200
 
-data_path: "/home/tahara/datasets/processed/echonet_png128_10f"
+data_path: "${processed_root}/echonet_png128_10f"
 
 main_training:
   name: "main_training"

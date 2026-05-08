@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/tahara/GDKVM
+PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
+
+cd "${PROJECT_DIR}"
 mkdir -p logs
 export PYTHONPATH=.
 

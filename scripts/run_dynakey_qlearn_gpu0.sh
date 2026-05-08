@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
 UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
 
 cd "${PROJECT_DIR}"
 export PYTHONPATH=.
@@ -34,7 +35,7 @@ run_exp echonet_dynakey_qlearn \
   exp_id=echonet_dynakey_qlearn \
   wandb_mode=online \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/echonet_png128_10f \
   main_training.batch_size=20 \
   main_training.num_workers=12 \
   eval_stage.eval_interval=200 \
@@ -50,7 +51,7 @@ run_exp echonet_full_cycle_dynakey_qlearn \
   exp_id=echonet_full_cycle_dynakey_qlearn \
   wandb_mode=online \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_full_cycle_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/echonet_full_cycle_png128_10f \
   main_training.batch_size=20 \
   main_training.num_workers=12 \
   eval_stage.eval_interval=200 \
@@ -66,7 +67,7 @@ run_exp cardiacuda_a4c_lv_sparse_oracle_dynakey_qlearn \
   exp_id=cardiacuda_a4c_lv_sparse_oracle_dynakey_qlearn \
   wandb_mode=online \
   dataset_name=cardiacuda \
-  data_path=/home/tahara/datasets/processed/cardiacuda_a4c_lv_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_png128_10f \
   main_training.batch_size=16 \
   main_training.num_workers=8 \
   eval_stage.eval_interval=200 \

@@ -4,7 +4,7 @@ defaults:
 
 exp_id: "echonet_ed2es_endpoint_oracle"
 dataset_name: "echonet"
-data_path: "/home/tahara/datasets/processed/echonet_png128_10f"
+data_path: "${processed_root}/echonet_png128_10f"
 
 data:
   protocol_name: "echonet_ed2es_endpoint"

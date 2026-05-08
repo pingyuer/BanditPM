@@ -4,7 +4,7 @@ defaults:
 
 exp_id: "cardiacuda_a4c_lv_dense_oracle"
 dataset_name: "cardiacuda"
-data_path: "/home/tahara/datasets/processed/cardiacuda_a4c_lv_dense_png128_10f"
+data_path: "${processed_root}/cardiacuda_a4c_lv_dense_png128_10f"
 
 data:
   protocol_name: "cardiacuda_a4c_lv_dense"

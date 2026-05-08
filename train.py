@@ -54,7 +54,7 @@ def resolve_wandb_settings(cfg: DictConfig) -> dict:
 def resolve_dataset_class(cfg: DictConfig):
     dataset_name = str(cfg.get("dataset_name", "")).lower().strip()
     if not dataset_name:
-        data_path = str(cfg.data_path).lower()
+        data_path = os.path.expanduser(str(cfg.data_path)).lower()
         if "cardiacuda" in data_path:
             dataset_name = "cardiacuda"
         elif "echonet" in data_path:
@@ -170,7 +170,7 @@ def train(cfg: DictConfig):
 
         def build_loader(mode, *, shuffle, drop_last):
             dataset = dataset_cls(
-                filepath=cfg.data_path,
+                filepath=os.path.expanduser(str(cfg.data_path)),
                 mode=mode,
                 seq_length=stage_cfg.seq_length,
                 max_num_obj=stage_cfg.num_objects,

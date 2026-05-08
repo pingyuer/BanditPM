@@ -18,3 +18,7 @@ evaluation:
 wandb:
   group: "dynakey_v2_no_leak"
   tags: ["dynakey", "kpff", "ode_memory", "v2_no_leak", "predinit", "exclude_init_frame"]
+
+model:
+  allow_oracle_init_when_requested: false
+  use_first_frame_gt_init: false

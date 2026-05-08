@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import shlex
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATASETS_ROOT = Path(os.environ.get("DATASETS_ROOT", Path.home() / "datasets")).expanduser()
 TRAIN_PY = PROJECT_ROOT / "train.py"
 PYTHON_BIN = PROJECT_ROOT / ".venv" / "bin" / "python"
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "proto_ablation"
@@ -124,7 +126,7 @@ PROTOCOLS = (
         dataset="echonet",
         protocol_name="echonet_fullcycle_sparse",
         config_name="echonet_fullcycle_predinit.yaml",
-        data_path="/home/tahara/datasets/processed/echonet_full_cycle_png128_10f",
+        data_path=str(DATASETS_ROOT / "processed" / "echonet_full_cycle_png128_10f"),
         frame_scope="all_available",
         group="main",
         batch_size=12,
@@ -135,7 +137,7 @@ PROTOCOLS = (
         dataset="echonet",
         protocol_name="echonet_ed2es_endpoint",
         config_name="echonet_ed2es_endpoint_predinit.yaml",
-        data_path="/home/tahara/datasets/processed/echonet_png128_10f",
+        data_path=str(DATASETS_ROOT / "processed" / "echonet_png128_10f"),
         frame_scope="supervised_only",
         group="appendix",
         batch_size=12,
@@ -146,7 +148,7 @@ PROTOCOLS = (
         dataset="camus",
         protocol_name="camus_short_dense",
         config_name="camus_short_dense_predinit.yaml",
-        data_path="/home/tahara/datasets/processed/camus_png256_10f",
+        data_path=str(DATASETS_ROOT / "processed" / "camus_png256_10f"),
         frame_scope="all_available",
         group="main",
         batch_size=8,
@@ -157,7 +159,7 @@ PROTOCOLS = (
         dataset="camus",
         protocol_name="camus_full_dense",
         config_name="camus_full_dense_predinit.yaml",
-        data_path="/home/tahara/datasets/processed/camus_full_png256_10f",
+        data_path=str(DATASETS_ROOT / "processed" / "camus_full_png256_10f"),
         frame_scope="all_available",
         group="appendix",
         batch_size=8,

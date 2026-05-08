@@ -23,6 +23,9 @@ save_checkpoint_interval: 200 # Checkpoint saving interval (iterations)
 data:
   protocol_name: "echonet_ed2es_endpoint"
 
+data_root: ${oc.env:DATASETS_ROOT,${oc.env:HOME}/datasets}
+processed_root: ${data_root}/processed
+
 phase_init:
   train: "oracle_gt"
   val: "oracle_gt"
@@ -40,8 +43,8 @@ evaluation:
   save_summary: true
   best_ckpt_rule: "max_eval_dice_observed_no_reload"
 
-# data_path: "/home/tahara/datasets/processed/camus_png256_10f"
-data_path: "/home/tahara/datasets/processed/echonet_png128_10f"
+# data_path: "${processed_root}/camus_png256_10f"
+data_path: "${processed_root}/echonet_png128_10f"
 
 # =======================
 # Training Configuration

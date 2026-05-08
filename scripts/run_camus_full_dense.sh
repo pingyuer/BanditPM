@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
+PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
 
-cd /home/tahara/GDKVM
+cd "${PROJECT_DIR}"
 mkdir -p logs outputs/proto_ablation/camus
 
 run_one() {
@@ -11,7 +13,7 @@ run_one() {
 
   ./.venv/bin/python train.py \
     --config-name="${config_name}" \
-    hydra.run.dir="/home/tahara/GDKVM/outputs/proto_ablation/camus/${exp_name}" \
+    hydra.run.dir="${PROJECT_DIR}/outputs/proto_ablation/camus/${exp_name}" \
     main_training.batch_size=8 \
     main_training.num_workers=8 \
     main_training.num_iterations=1000 \
@@ -21,7 +23,7 @@ run_one() {
     wandb_mode=offline \
     exp_id="${exp_name}" \
     dataset_name=camus \
-    data_path=/home/tahara/datasets/processed/camus_full_png256_10f \
+    data_path=${DATASETS_ROOT}/processed/camus_full_png256_10f \
     data.protocol_name=camus_full_dense \
     "$@" \
     2>&1 | tee "logs/${exp_name}.log"

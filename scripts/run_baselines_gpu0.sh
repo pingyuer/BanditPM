@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/tahara/GDKVM
+PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
+UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
+
+cd "${PROJECT_DIR}"
 export PYTHONPATH=.
 export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES=0
 
-UV_BIN=/home/tahara/miniconda3/bin/uv
 LOG_DIR=outputs/BanditPM/tmux_logs
 mkdir -p "${LOG_DIR}"
 
@@ -23,7 +26,7 @@ run_exp echonet_gdkvm \
   exp_id=echonet_gdkvm \
   wandb_mode=online \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/echonet_png128_10f \
   main_training.batch_size=24 \
   main_training.num_workers=12 \
   eval_stage.eval_interval=200 \
@@ -38,7 +41,7 @@ run_exp echonet_bpm_rule \
   exp_id=echonet_bpm_rule \
   wandb_mode=online \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/echonet_png128_10f \
   main_training.batch_size=20 \
   main_training.num_workers=12 \
   eval_stage.eval_interval=200 \
@@ -62,7 +65,7 @@ run_exp camus_kpff \
   exp_id=camus_kpff \
   wandb_mode=online \
   dataset_name=camus \
-  data_path=/home/tahara/datasets/processed/camus_png256_10f \
+  data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
   main_training.batch_size=10 \
   main_training.num_workers=8 \
   eval_stage.eval_interval=200 \
@@ -79,7 +82,7 @@ run_exp camus_bpm_rl \
   exp_id=camus_bpm_rl \
   wandb_mode=online \
   dataset_name=camus \
-  data_path=/home/tahara/datasets/processed/camus_png256_10f \
+  data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
   main_training.batch_size=8 \
   main_training.num_workers=8 \
   eval_stage.eval_interval=200 \

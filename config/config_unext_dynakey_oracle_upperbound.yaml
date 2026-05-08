@@ -1,0 +1,25 @@
+defaults:
+  - config_unext_dynakey
+  - _self_
+
+exp_id: "unext_dynakey_oracle_upperbound"
+model_name: "UNeXtDynaKeyOracleUpperbound"
+
+phase_init:
+  train: "oracle_gt"
+  val: "oracle_gt"
+  test: "oracle_gt"
+
+evaluation:
+  init_mode: "oracle_gt"
+  exclude_init_frame: true
+  protocol_version: "oracle_upperbound_not_main_result"
+
+wandb:
+  project: "BanditPM"
+  group: "unext_dynakey_ablation_oracle"
+  tags: ["unext", "dynakey", "oracle_gt", "upperbound", "exclude_init_frame"]
+
+model:
+  allow_oracle_init_when_requested: true
+  use_first_frame_gt_init: true

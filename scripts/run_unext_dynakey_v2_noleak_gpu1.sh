@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
 UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
 
 cd "${PROJECT_DIR}"
 export PYTHONPATH=.
@@ -44,7 +45,7 @@ run_exp camus_unext_dynakey_v2_noleak \
   exp_id=camus_unext_dynakey_v2_noleak \
   dataset_name=camus \
   data.protocol_name=camus_short_dense \
-  data_path=/home/tahara/datasets/processed/camus_png256_10f \
+  data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
   main_training.batch_size=10 \
   main_training.num_workers=8 \
   wandb.group=unext_dynakey_v2_no_leak \
@@ -55,7 +56,7 @@ run_exp echonet_pediatric_a4c_full_cycle_unext_dynakey_v2_noleak \
   exp_id=echonet_pediatric_a4c_full_cycle_unext_dynakey_v2_noleak \
   dataset_name=echonet \
   data.protocol_name=echonet_pediatric_fullcycle_sparse \
-  data_path=/home/tahara/datasets/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
   main_training.batch_size=24 \
   main_training.num_workers=12 \
   wandb.group=unext_dynakey_v2_no_leak \
@@ -66,7 +67,7 @@ run_exp cardiacuda_a4c_lv_dense_unext_dynakey_v2_noleak \
   exp_id=cardiacuda_a4c_lv_dense_unext_dynakey_v2_noleak \
   dataset_name=cardiacuda \
   data.protocol_name=cardiacuda_a4c_lv_dense \
-  data_path=/home/tahara/datasets/processed/cardiacuda_a4c_lv_dense_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_dense_png128_10f \
   main_training.batch_size=4 \
   main_training.num_workers=4 \
   wandb.group=unext_dynakey_v2_no_leak \

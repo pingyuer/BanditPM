@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
 UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
 
 cd "${PROJECT_DIR}"
 export PYTHONPATH=.
@@ -92,6 +93,6 @@ run_all_methods() {
   run_bpm_rl "${name}" "${dataset}" "${path}" "${protocol}" "${batch_bpm}" "${workers}" "${tags}"
 }
 
-run_all_methods echonet echonet /home/tahara/datasets/processed/echonet_png128_10f echonet_ed2es_endpoint 24 20 12 "[echonet"
-run_all_methods echonet_full_cycle echonet /home/tahara/datasets/processed/echonet_full_cycle_png128_10f echonet_fullcycle_sparse 24 20 12 "[echonet,full_cycle"
-run_all_methods cardiacuda_a4c_lv_sparse cardiacuda /home/tahara/datasets/processed/cardiacuda_a4c_lv_png128_10f cardiacuda_a4c_lv_sparse 16 16 8 "[cardiacuda,a4c,lv,sparse"
+run_all_methods echonet echonet ${DATASETS_ROOT}/processed/echonet_png128_10f echonet_ed2es_endpoint 24 20 12 "[echonet"
+run_all_methods echonet_full_cycle echonet ${DATASETS_ROOT}/processed/echonet_full_cycle_png128_10f echonet_fullcycle_sparse 24 20 12 "[echonet,full_cycle"
+run_all_methods cardiacuda_a4c_lv_sparse cardiacuda ${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_png128_10f cardiacuda_a4c_lv_sparse 16 16 8 "[cardiacuda,a4c,lv,sparse"

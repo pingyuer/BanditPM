@@ -13,6 +13,21 @@ This repository keeps the original training shell and most of the project layout
 
 The current goal is not to turn this repo into a generic plugin framework. The goal is to keep the GDKVM shell, preserve KPFF, and make the memory/update path easier to replace for BanditPM research.
 
+## UNeXt-DynaKey Positioning
+
+`unext_dynakey` is a lightweight video echocardiography segmentation variant inspired by GDKVM-style dynamic memory, but it is not a full LKVA/GDR/KPFF reproduction. Its intended paper framing is:
+
+- UNeXt provides a strong single-frame spatial prior and mask decoder.
+- DynaKey maintains an online object-level dynamic key dictionary with first-order Euler latent dynamics.
+- A small mask-aware memory readout and gated temporal residual head refine current-frame logits.
+- The main protocol is sparse-supervised and no-leak: validation/test do not use oracle first-frame GT unless an explicit oracle upper-bound config is selected.
+
+Set `DATASETS_ROOT` to move data without editing configs or scripts:
+
+```bash
+export DATASETS_ROOT="${DATASETS_ROOT:-$HOME/datasets}"
+```
+
 ## What We Changed
 
 The main changes from the original baseline are:
@@ -64,11 +79,11 @@ This keeps sparse supervision but makes the temporal span much harder than the o
 
 Processed root for the original short-range task:
 
-- `/home/tahara/datasets/processed/echonet_png128_10f`
+- `${DATASETS_ROOT}/processed/echonet_png128_10f`
 
 Processed root for the full-cycle task:
 
-- `/home/tahara/datasets/processed/echonet_full_cycle_png128_10f`
+- `${DATASETS_ROOT}/processed/echonet_full_cycle_png128_10f`
 
 Use it with:
 
@@ -88,11 +103,11 @@ Full-cycle:
 
 Processed root for the original short-range task:
 
-- `/home/tahara/datasets/processed/echonet_pediatric_a4c_png128_10f`
+- `${DATASETS_ROOT}/processed/echonet_pediatric_a4c_png128_10f`
 
 Processed root for the full-cycle task:
 
-- `/home/tahara/datasets/processed/echonet_pediatric_a4c_full_cycle_png128_10f`
+- `${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f`
 
 Pediatric split mapping:
 
@@ -107,7 +122,7 @@ Use it with:
   --config-name config_banditpm_baseline \
   exp_id=echonet_pediatric_a4c_ed2es_gdkvm \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_pediatric_a4c_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_png128_10f \
   data.protocol_name=echonet_pediatric_a4c_endpoint
 ```
 
@@ -118,7 +133,7 @@ Full-cycle:
   --config-name config_banditpm_baseline \
   exp_id=echonet_pediatric_a4c_full_cycle_gdkvm \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
+  data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
   data.protocol_name=echonet_pediatric_fullcycle_sparse
 ```
 
@@ -126,11 +141,11 @@ Full-cycle:
 
 Processed root for the short dense task:
 
-- `/home/tahara/datasets/processed/camus_png256_10f`
+- `${DATASETS_ROOT}/processed/camus_png256_10f`
 
 Processed root for the full dense task:
 
-- `/home/tahara/datasets/processed/camus_full_png256_10f`
+- `${DATASETS_ROOT}/processed/camus_full_png256_10f`
 
 Use it with:
 
@@ -152,7 +167,7 @@ At the moment, CAMUS is mainly kept as a supporting experiment rather than the m
 
 Processed root for the current GDKVM integration:
 
-- `/home/tahara/datasets/processed/cardiacuda_a4c_lv_png128_10f`
+- `${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_png128_10f`
 
 Current contract:
 
@@ -221,8 +236,8 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ```bash
 ./.venv/bin/python tools/preprocess_echonet.py \
-  --input_root /home/tahara/datasets \
-  --output_root /home/tahara/datasets/processed \
+  --input_root ${DATASETS_ROOT} \
+  --output_root ${DATASETS_ROOT}/processed \
   --sampling_mode ed_to_es \
   --overwrite
 ```
@@ -231,8 +246,8 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ```bash
 ./.venv/bin/python tools/preprocess_echonet.py \
-  --input_root /home/tahara/datasets \
-  --output_root /home/tahara/datasets/processed \
+  --input_root ${DATASETS_ROOT} \
+  --output_root ${DATASETS_ROOT}/processed \
   --sampling_mode full_cycle \
   --overwrite
 ```
@@ -241,8 +256,8 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ```bash
 ./.venv/bin/python tools/preprocess_echonet_pediatric.py \
-  --input_root /home/tahara/datasets/echonetpediatric \
-  --output_root /home/tahara/datasets/processed \
+  --input_root ${DATASETS_ROOT}/echonetpediatric \
+  --output_root ${DATASETS_ROOT}/processed \
   --view A4C \
   --sampling_mode ed_to_es \
   --overwrite
@@ -252,8 +267,8 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ```bash
 ./.venv/bin/python tools/preprocess_echonet_pediatric.py \
-  --input_root /home/tahara/datasets/echonetpediatric \
-  --output_root /home/tahara/datasets/processed \
+  --input_root ${DATASETS_ROOT}/echonetpediatric \
+  --output_root ${DATASETS_ROOT}/processed \
   --view A4C \
   --sampling_mode full_cycle \
   --overwrite
@@ -263,8 +278,8 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ```bash
 ./.venv/bin/python tools/preprocess_camus.py \
-  --input_root /home/tahara/datasets \
-  --output_root /home/tahara/datasets/processed \
+  --input_root ${DATASETS_ROOT} \
+  --output_root ${DATASETS_ROOT}/processed \
   --sampling_mode short \
   --overwrite
 ```
@@ -273,8 +288,8 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ```bash
 ./.venv/bin/python tools/preprocess_camus.py \
-  --input_root /home/tahara/datasets \
-  --output_root /home/tahara/datasets/processed \
+  --input_root ${DATASETS_ROOT} \
+  --output_root ${DATASETS_ROOT}/processed \
   --sampling_mode full \
   --overwrite
 ```
@@ -283,8 +298,8 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
 
 ```bash
 ./.venv/bin/python tools/preprocess_cardiacuda.py \
-  --input_root /home/tahara/datasets \
-  --output_root /home/tahara/datasets/processed \
+  --input_root ${DATASETS_ROOT} \
+  --output_root ${DATASETS_ROOT}/processed \
   --target_label 1 \
   --overwrite
 ```
@@ -310,7 +325,7 @@ EchoNet full-cycle `gdkvm`:
   exp_id=echonet_full_cycle_gdkvm \
   wandb_mode=online \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_full_cycle_png128_10f
+  data_path=${DATASETS_ROOT}/processed/echonet_full_cycle_png128_10f
 ```
 
 Pediatric full-cycle `gdkvm`:
@@ -321,7 +336,7 @@ Pediatric full-cycle `gdkvm`:
   exp_id=echonet_pediatric_a4c_full_cycle_gdkvm \
   wandb_mode=online \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_pediatric_a4c_full_cycle_png128_10f
+  data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f
 ```
 
 ### Multi-GPU launch with `train.sh`
@@ -345,7 +360,7 @@ CUDA_VISIBLE_DEVICES=0,1 bash train.sh \
   exp_id=echonet_full_cycle_gdkvm \
   wandb_mode=online \
   dataset_name=echonet \
-  data_path=/home/tahara/datasets/processed/echonet_full_cycle_png128_10f
+  data_path=${DATASETS_ROOT}/processed/echonet_full_cycle_png128_10f
 ```
 
 ## Batch Experiments With tmux

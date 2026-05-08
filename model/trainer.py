@@ -76,11 +76,17 @@ class Trainer:
         self.main_process = self.rank == 0
 
         model_name_key = str(cfg.model.get("name", "")).lower()
+        allow_oracle_init = bool(
+            cfg.model.get(
+                "allow_oracle_init_when_requested",
+                cfg.model.get("use_first_frame_gt_init", True),
+            )
+        )
         if model_name_key in {"unext_dynakey", "dynakey_unext", "unextdynakey"}:
             model = UNeXtDynaKeySegmenter(cfg.model).to(self.device)
         else:
             model = GDKVM(
-                use_first_frame_gt_init=bool(cfg.model.get("use_first_frame_gt_init", True)),
+                use_first_frame_gt_init=allow_oracle_init,
                 prototype_value_cfg=cfg.model.get("prototype_value", None),
                 temporal_memory_cfg=cfg.model.get("temporal_memory", None),
                 memory_core_cfg=cfg.model.get("memory_core", None),
@@ -218,8 +224,23 @@ class Trainer:
     def _resolve_phase_init(self, phase: str) -> str:
         phase_cfg = self.cfg.get("phase_init", {})
         model_cfg = self.cfg.get("model", {})
-        default_mode = "oracle_gt" if bool(model_cfg.get("use_first_frame_gt_init", True)) else "pred_or_zero"
+        allow_oracle_init = bool(
+            model_cfg.get(
+                "allow_oracle_init_when_requested",
+                model_cfg.get("use_first_frame_gt_init", True),
+            )
+        )
+        default_mode = "oracle_gt" if allow_oracle_init else "pred_or_zero"
         return str(phase_cfg.get(phase, self.cfg.get("evaluation", {}).get("init_mode", default_mode)))
+
+    def _oracle_init_allowed(self) -> bool:
+        model_cfg = self.cfg.get("model", {})
+        return bool(
+            model_cfg.get(
+                "allow_oracle_init_when_requested",
+                model_cfg.get("use_first_frame_gt_init", True),
+            )
+        )
 
     def _resolve_eval_indices(self, data):
         T = data["rgb"].shape[1]
@@ -303,6 +324,7 @@ class Trainer:
     def _build_summary_row(self, mode: str, metrics: dict, epoch: int, it: int):
         metric_space = str(self.cfg.get("evaluation", {}).get("metric_space", "original"))
         init_mode = self._resolve_phase_init(mode)
+        uses_oracle_gt = init_mode == "oracle_gt" and self._oracle_init_allowed()
         return {
             "mode": mode,
             "iteration": it,
@@ -311,6 +333,8 @@ class Trainer:
             "dataset": str(self.cfg.get("dataset_name", "")),
             "protocol_name": str(self.cfg.get("data", {}).get("protocol_name", "unknown")),
             "init_mode": init_mode,
+            "oracle_gt_init_allowed": self._oracle_init_allowed(),
+            "uses_oracle_gt": uses_oracle_gt,
             "frame_scope": str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only")),
             "exclude_init_frame": bool(self.cfg.get("evaluation", {}).get("exclude_init_frame", False)),
             "init_frame_index": int(self.cfg.get("evaluation", {}).get("init_frame_index", 0)),
@@ -671,13 +695,18 @@ class Trainer:
                 mask_keys = [f"masks_{ti}" for ti in required_eval_ids]
 
                 if batch_idx == 0 and self.main_process:
+                    valid_mask_counts = eval_indices.sum(dim=1).detach().cpu().tolist()
+                    uses_oracle_gt = batch_data["init_mode"] == "oracle_gt" and self._oracle_init_allowed()
                     self.log.info(
                         f"[{mode.capitalize()}] init_mode={batch_data['init_mode']} | "
+                        f"oracle_gt_init_allowed={self._oracle_init_allowed()} | "
+                        f"uses_oracle_gt={uses_oracle_gt} | "
                         f"metric_space={str(self.cfg.get('evaluation', {}).get('metric_space', 'original'))} | "
                         f"exclude_init_frame={bool(self.cfg.get('evaluation', {}).get('exclude_init_frame', False))} | "
                         f"protocol_version={str(self.cfg.get('evaluation', {}).get('protocol_version', 'v1_oracle_init'))} | "
                         f"supervised_indices={self._format_frame_mask(supervised_indices)} | "
-                        f"eval_indices={self._format_frame_mask(eval_indices)}"
+                        f"eval_indices={self._format_frame_mask(eval_indices)} | "
+                        f"valid_mask_frame_counts={valid_mask_counts}"
                     )
 
                 if not all(k in out for k in mask_keys):

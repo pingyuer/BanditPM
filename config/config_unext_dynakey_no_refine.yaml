@@ -1,0 +1,17 @@
+defaults:
+  - config_unext_dynakey
+  - _self_
+
+exp_id: "unext_dynakey_no_refine_v2_no_leak"
+model_name: "UNeXtDynaKeyNoRefine"
+
+wandb:
+  project: "BanditPM"
+  group: "unext_dynakey_ablation_v2_no_leak"
+  tags: ["unext", "dynakey", "no_refine", "v2_no_leak", "predinit", "exclude_init_frame"]
+
+model:
+  unext_dynakey:
+    use_dynakey: true
+    use_temporal_refine: false
+    use_mask_memory: true

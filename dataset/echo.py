@@ -1,9 +1,15 @@
 import os
 import json
+import logging
 import cv2
 import torch
 import numpy as np
 from torch.utils.data import Dataset
+
+from dataset.frame_index import build_label_map
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _infer_protocol_name(filepath: str) -> str:
@@ -72,11 +78,7 @@ class EchoDataset(Dataset):
         imgs_np = np.zeros((self.seq_length, self.size, self.size), dtype=np.uint8)
         masks_np = np.zeros((self.seq_length, self.size, self.size), dtype=np.uint8)
 
-        label_map = {}
-        for label_name in label_files:
-            stem = os.path.splitext(label_name)[0]
-            if stem.isdigit():
-                label_map[int(stem)] = label_name
+        label_map = build_label_map(label_files, sample_meta, sample_name=sample['subfolder'], logger=LOGGER)
 
         for i in range(self.seq_length):
             img_path = os.path.join(img_folder, img_files[i])
@@ -96,7 +98,7 @@ class EchoDataset(Dataset):
                 if mask is not None:
                     if mask.shape != (self.size, self.size):
                         mask = cv2.resize(mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
-                    masks_np[i] = (mask == 1).astype(np.uint8)
+                    masks_np[i] = (mask > 0).astype(np.uint8)
 
         frames_t = torch.from_numpy(imgs_np).float().unsqueeze(1) / 255.0
         masks_t = torch.from_numpy(masks_np).long().unsqueeze(1)
@@ -119,16 +121,20 @@ class EchoDataset(Dataset):
         original_sizes = torch.tensor([original_size] * self.seq_length, dtype=torch.long)
         resized_sizes = torch.tensor([[self.size, self.size]] * self.seq_length, dtype=torch.long)
 
-        if masks_t[0].max() > 0:
+        has_foreground_label = masks_t.max() > 0
+        if has_foreground_label:
             info['num_objects'] = 1
             selector[0] = 1.0
             
             cls_gt = masks_t.clone()
-            first_frame_gt[0, 0] = masks_t[0, 0]
+            if masks_t[0].max() > 0:
+                first_frame_gt[0, 0] = masks_t[0, 0]
             for idx in label_map:
                 if 0 <= idx < self.seq_length:
                     label_valid[idx] = True
                     eval_valid[idx] = True
+        info['valid_label_frames'] = [int(idx) for idx in sorted(label_map) if 0 <= idx < self.seq_length]
+        info['has_first_frame_gt'] = bool(masks_t[0].max() > 0)
 
         data = {
             'rgb': frames_t,

@@ -4,7 +4,7 @@ defaults:
 
 exp_id: "echonet_fullcycle_oracle"
 dataset_name: "echonet"
-data_path: "/home/tahara/datasets/processed/echonet_full_cycle_png128_10f"
+data_path: "${processed_root}/echonet_full_cycle_png128_10f"
 
 data:
   protocol_name: "echonet_fullcycle_sparse"

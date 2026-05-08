@@ -24,7 +24,8 @@ wandb:
 
 model:
   name: "unext_dynakey"
-  use_first_frame_gt_init: true
+  allow_oracle_init_when_requested: false
+  use_first_frame_gt_init: false
   use_kpff: false
   memory_core:
     type: "dynakey"
@@ -52,7 +53,14 @@ model:
     num_classes: 2
     base_dim: 24
     value_dim: 128
+    use_dynakey: true
     use_temporal_refine: true
+    use_mask_memory: true
+    refine_alpha_init: 0.1
+    mask_memory_slots: 4
+    mask_memory_temperature: 0.1
+    mask_memory_ema: 0.9
+    mask_memory_confidence_threshold: 0.0
     use_ode_aux_loss: false
 
 hydra:

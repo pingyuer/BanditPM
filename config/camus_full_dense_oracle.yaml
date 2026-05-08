@@ -4,7 +4,7 @@ defaults:
 
 exp_id: "camus_full_dense_oracle"
 dataset_name: "camus"
-data_path: "/home/tahara/datasets/processed/camus_full_png256_10f"
+data_path: "${processed_root}/camus_full_png256_10f"
 
 data:
   protocol_name: "camus_full_dense"

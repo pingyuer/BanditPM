@@ -5,12 +5,13 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from model.losses import LossComputer
+from dataset.frame_index import parse_frame_index
 from model.modules.memory_core import MemoryCore
 from model.modules.unext.unext import UNeXtBackbone
 from model.unext_dynakey import UNeXtDynaKeySegmenter
 
 
-def _cfg(*, temporal_refine=True, ode_aux=False):
+def _cfg(*, temporal_refine=True, ode_aux=False, use_dynakey=True, use_mask_memory=True):
     return OmegaConf.create(
         {
             "model": {
@@ -36,7 +37,10 @@ def _cfg(*, temporal_refine=True, ode_aux=False):
                     "num_classes": 2,
                     "base_dim": 8,
                     "value_dim": 16,
+                    "use_dynakey": use_dynakey,
                     "use_temporal_refine": temporal_refine,
+                    "use_mask_memory": use_mask_memory,
+                    "refine_alpha_init": 0.1,
                     "use_ode_aux_loss": ode_aux,
                 },
             }
@@ -58,6 +62,16 @@ def _batch(batch_size=2, frames=3, height=32, width=32):
 
 
 class UNeXtDynaKeyTests(unittest.TestCase):
+    def test_frame_index_parser_common_echo_names(self):
+        metadata = {"ED_frame": 0, "ES_frame": 9}
+        self.assertEqual(parse_frame_index("000.png"), 0)
+        self.assertEqual(parse_frame_index("000001_mask.png"), 1)
+        self.assertEqual(parse_frame_index("frame_007.png"), 7)
+        self.assertEqual(parse_frame_index("frame001.png"), 1)
+        self.assertEqual(parse_frame_index("ED.png", metadata), 0)
+        self.assertEqual(parse_frame_index("ES.png", metadata), 9)
+        self.assertIsNone(parse_frame_index("not_a_frame.png"))
+
     def test_unext_backbone_shapes(self):
         model = UNeXtBackbone(in_channels=1, num_classes=2, base_dim=8, value_dim=16)
         out = model(torch.randn(2, 1, 32, 32))
@@ -84,6 +98,17 @@ class UNeXtDynaKeyTests(unittest.TestCase):
         self.assertEqual(out["logits_1"].shape, (1, 2, 32, 32))
         self.assertTrue(torch.isfinite(out["logits_1"]).all())
 
+    def test_unext_only_and_temporal_refine_only_modes(self):
+        unext_only = UNeXtDynaKeySegmenter(_cfg(temporal_refine=False, use_dynakey=False, use_mask_memory=False).model)
+        out = unext_only(_batch(batch_size=1))
+        self.assertEqual(out["memory_aux_1"]["memory_type"], "none")
+        self.assertFalse(out["memory_aux_1"]["dynakey_enabled"])
+
+        temporal_only = UNeXtDynaKeySegmenter(_cfg(temporal_refine=True, use_dynakey=False, use_mask_memory=False).model)
+        out = temporal_only(_batch(batch_size=1))
+        self.assertEqual(out["logits_2"].shape, (1, 2, 32, 32))
+        self.assertFalse(out["memory_aux_2"]["dynakey_enabled"])
+
     def test_unext_dynakey_backward_has_expected_grads(self):
         cfg = _cfg(temporal_refine=True)
         model = UNeXtDynaKeySegmenter(cfg.model)
@@ -106,6 +131,7 @@ class UNeXtDynaKeyTests(unittest.TestCase):
         self.assertIsNotNone(model.backbone.input_down[0].weight.grad)
         self.assertIsNotNone(model.temporal_refine_head[0].weight.grad)
         self.assertIsNotNone(model.temporal_delta_proj.weight.grad)
+        self.assertIsNotNone(model.temporal_gate_head[0].weight.grad)
 
     def test_existing_dynakey_memory_core_still_runs(self):
         cfg = OmegaConf.create(

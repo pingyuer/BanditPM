@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/tahara/GDKVM
+PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
+UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
+
+cd "${PROJECT_DIR}"
 export PYTHONPATH=.
 export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES=0
 
-UV_BIN=/home/tahara/miniconda3/bin/uv
 LOG_DIR=outputs/BanditPM/tmux_logs
 mkdir -p "${LOG_DIR}"
 
@@ -18,7 +21,7 @@ run_exp() {
   echo "[$(date '+%F %T')] END ${name}"
 }
 
-DATA_PATH=/home/tahara/datasets/processed/echonet_pediatric_a4c_png128_10f
+DATA_PATH=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_png128_10f
 
 run_exp echonet_pediatric_a4c_gdkvm \
   --config-name config_banditpm_baseline \

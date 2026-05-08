@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
 UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+DATASETS_ROOT="${DATASETS_ROOT:-${HOME}/datasets}"
 
 cd "${PROJECT_DIR}"
 export PYTHONPATH=.
@@ -92,6 +93,6 @@ run_all_methods() {
   run_bpm_rl "${name}" "${dataset}" "${path}" "${protocol}" "${batch_bpm}" "${workers}" "${tags}"
 }
 
-run_all_methods camus camus /home/tahara/datasets/processed/camus_png256_10f camus_short_dense 10 8 8 "[camus"
-run_all_methods echonet_pediatric_a4c_full_cycle echonet /home/tahara/datasets/processed/echonet_pediatric_a4c_full_cycle_png128_10f echonet_pediatric_fullcycle_sparse 24 20 12 "[echonet_pediatric,a4c,full_cycle"
-run_all_methods cardiacuda_a4c_lv_dense cardiacuda /home/tahara/datasets/processed/cardiacuda_a4c_lv_dense_png128_10f cardiacuda_a4c_lv_dense 4 4 4 "[cardiacuda,a4c,lv,dense"
+run_all_methods camus camus ${DATASETS_ROOT}/processed/camus_png256_10f camus_short_dense 10 8 8 "[camus"
+run_all_methods echonet_pediatric_a4c_full_cycle echonet ${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f echonet_pediatric_fullcycle_sparse 24 20 12 "[echonet_pediatric,a4c,full_cycle"
+run_all_methods cardiacuda_a4c_lv_dense cardiacuda ${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_dense_png128_10f cardiacuda_a4c_lv_dense 4 4 4 "[cardiacuda,a4c,lv,dense"
