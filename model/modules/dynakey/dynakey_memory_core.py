@@ -41,6 +41,11 @@ class DynaKeyMemoryCore(nn.Module):
         self._prev_pred = None
         self._prev_nearest = None
         self._prev_action = None
+        self._prev_cf_state = None
+        self._prev_q_state = None
+        self._prev_q_values = None
+        self._prev_action_mask = None
+        self._prev_actions = None
 
     def reset_state(self, batch_size: int, num_objects: int, device: torch.device) -> None:
         self.dictionary.reset_state(batch_size, num_objects, device)
@@ -48,6 +53,11 @@ class DynaKeyMemoryCore(nn.Module):
         self._prev_pred = None
         self._prev_nearest = None
         self._prev_action = None
+        self._prev_cf_state = None
+        self._prev_q_state = None
+        self._prev_q_values = None
+        self._prev_action_mask = None
+        self._prev_actions = None
 
     def _pool_state(self, value_BNCHW: torch.Tensor, mask_BNHW: torch.Tensor | None) -> torch.Tensor:
         if mask_BNHW is None:
@@ -83,13 +93,12 @@ class DynaKeyMemoryCore(nn.Module):
         actions = torch.where(~high & (count > 0), torch.full_like(actions, DynaKeyQMaintainer.ACTION_UPDATE), actions)
         return actions
 
-    def _select_actions(
+    def _select_actions_from_q_values(
         self,
         z: torch.Tensor,
         residual_norm: torch.Tensor,
-        residual: torch.Tensor,
-        retrieval_aux: dict,
         action_mask: torch.Tensor,
+        q_values: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.policy_mode == "no_update":
             return torch.full(z.shape[:2], DynaKeyQMaintainer.ACTION_KEEP, device=z.device, dtype=torch.long), None
@@ -98,24 +107,31 @@ class DynaKeyMemoryCore(nn.Module):
         if self.policy_mode == "fixed_residual":
             return self._fixed_residual_actions(residual_norm), None
         if self.policy_mode == "q_greedy":
-            pred = self._prev_pred if self._prev_pred is not None else z
-            q_base = self._prev_z if self._prev_z is not None else z
-            if self.detach_q_state:
-                q_base = q_base.detach()
-                pred = pred.detach()
-                z_target = z.detach()
-            else:
-                z_target = z
-            q_state = self.q_maintainer.build_q_state(
-                q_base,
-                pred,
-                z_target,
-                self.dictionary.state,
-                {**retrieval_aux, "residual_norm": residual_norm},
-            )
-            q_values = self.q_maintainer(q_state, action_mask)
-            return self.q_maintainer.select_action(q_values, action_mask, mode="greedy"), q_values
+            if q_values is None:
+                raise RuntimeError("q_greedy requires precomputed q_values")
+            return self.q_maintainer.select_action_from_q_values(q_values, action_mask, mode="greedy"), q_values
         return torch.full(z.shape[:2], DynaKeyQMaintainer.ACTION_KEEP, device=z.device, dtype=torch.long), None
+
+    def _build_q_decision(
+        self,
+        z: torch.Tensor,
+        z_next_pred: torch.Tensor,
+        residual_norm: torch.Tensor,
+        retrieval_aux: dict,
+        weights: torch.Tensor,
+        action_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q_z = z.detach() if self.detach_q_state else z
+        q_pred = z_next_pred.detach() if self.detach_q_state else z_next_pred
+        q_state = self.q_maintainer.build_q_state(
+            q_z,
+            q_pred,
+            None,
+            self.dictionary.state,
+            {**retrieval_aux, "weights": weights, "residual_norm": residual_norm.detach()},
+        )
+        q_values = self.q_maintainer(q_state, action_mask)
+        return q_state, q_values
 
     def _apply_actions(
         self,
@@ -134,22 +150,23 @@ class DynaKeyMemoryCore(nn.Module):
             if action_id == DynaKeyQMaintainer.ACTION_KEEP:
                 continue
             if action_id == DynaKeyQMaintainer.ACTION_UPDATE:
-                self.dictionary.update(prev_z, z, selected_slot, weight=mask.to(prev_z.dtype))
+                self.dictionary.update_masked(prev_z, z, selected_slot, enabled=mask)
                 continue
             if action_id == DynaKeyQMaintainer.ACTION_SPAWN:
-                self.dictionary.spawn(z.detach(), transition_velocity)
+                self.dictionary.spawn_masked(z.detach(), transition_velocity, enabled=mask)
                 continue
             if action_id == DynaKeyQMaintainer.ACTION_SPLIT:
-                self.dictionary.split(
+                self.dictionary.split_masked(
                     selected_slot,
                     residual=residual,
+                    enabled=mask,
                     split_eps=self.split_eps,
                     split_scale_factor=self.split_scale_factor,
                 )
                 continue
             if action_id == DynaKeyQMaintainer.ACTION_DELETE:
                 before = self.dictionary.active_key_count()
-                self.dictionary.delete(selected_slot)
+                self.dictionary.delete_masked(selected_slot, enabled=mask)
                 after = self.dictionary.active_key_count()
                 executed = torch.where((mask & (after == before)), torch.full_like(executed, DynaKeyQMaintainer.ACTION_KEEP), executed)
         return executed
@@ -165,8 +182,9 @@ class DynaKeyMemoryCore(nn.Module):
         del key_BCHW, pixfeat_BCHW
         z = self._pool_state(value_BNCHW, mask_BNHW)
 
-        if not self.dictionary.state.valid.any(dim=-1).all():
-            self.dictionary.spawn(z, torch.zeros_like(z))
+        initialized = self.dictionary.state.valid.any(dim=-1)
+        if not initialized.all():
+            self.dictionary.spawn_masked(z, torch.zeros_like(z), enabled=~initialized)
 
         if self._prev_pred is None:
             residual = torch.zeros_like(z)
@@ -183,25 +201,38 @@ class DynaKeyMemoryCore(nn.Module):
         q_target_action = None
         advantage_returns = None
         action_mask_for_loss = None
+        valid_q_samples = None
+        invalid_q_targets = None
+        q_loss_values = None
+        q_loss_state = None
         if self._prev_z is not None and self._prev_nearest is not None:
-            raw_returns, cf_aux = compute_counterfactual_returns(self.dictionary, self._prev_z, z.detach())
-            advantage_returns = cf_aux["advantage_returns"].detach()
-            q_target_action = cf_aux["best_action"].detach()
-            q_pred = self._prev_pred if self._prev_pred is not None else self._prev_z
-            q_base = self._prev_z.detach() if self.detach_q_state else self._prev_z
-            q_target = z.detach() if self.detach_q_state else z
-            q_state_for_loss = self.q_maintainer.build_q_state(
-                q_base,
-                q_pred.detach() if self.detach_q_state else q_pred,
-                q_target,
-                self.dictionary.state,
-                {**retrieval_aux, "weights": weights, "residual_norm": residual_norm.detach()},
+            raw_returns, cf_aux = compute_counterfactual_returns(
+                self.dictionary,
+                self._prev_z,
+                z.detach(),
+                initial_state=self._prev_cf_state,
             )
-            q_values_for_loss = self.q_maintainer(q_state_for_loss, action_mask)
-            action_mask_for_loss = action_mask.detach()
-            actions, q_values = self._select_actions(z, residual_norm, residual, retrieval_aux, action_mask)
-            if q_values is None:
-                q_values = q_values_for_loss
+            advantage_returns = cf_aux["advantage_returns"].detach()
+            action_mask_for_loss = self._prev_action_mask
+            if action_mask_for_loss is not None:
+                masked_advantage = advantage_returns.masked_fill(~action_mask_for_loss, -1.0e4)
+                valid_q_samples = action_mask_for_loss.any(dim=-1)
+                q_target_action = masked_advantage.argmax(dim=-1)
+                q_target_action = torch.where(
+                    valid_q_samples,
+                    q_target_action,
+                    torch.full_like(q_target_action, DynaKeyQMaintainer.ACTION_KEEP),
+                )
+                invalid_q_targets = ~action_mask_for_loss.gather(-1, q_target_action.unsqueeze(-1)).squeeze(-1)
+            q_loss_values = self._prev_q_values
+            q_loss_state = self._prev_q_state
+
+        pre_action_state = self.dictionary.clone_state()
+        pre_action_pred, _ = self.dictionary.predict(z, weights)
+        q_state, q_values = self._build_q_decision(z, pre_action_pred, residual_norm, retrieval_aux, weights, action_mask)
+
+        if self._prev_z is not None and self._prev_nearest is not None:
+            actions, _ = self._select_actions_from_q_values(z, residual_norm, action_mask, q_values)
             if self.policy_mode != "forced":
                 actions = torch.where(action_mask.gather(-1, actions.unsqueeze(-1)).squeeze(-1), actions, torch.full_like(actions, DynaKeyQMaintainer.ACTION_KEEP))
             executed_actions = self._apply_actions(actions, self._prev_z, z, self._prev_nearest, residual)
@@ -218,9 +249,16 @@ class DynaKeyMemoryCore(nn.Module):
         self._prev_pred = z_next_pred.detach()
         self._prev_nearest = nearest.detach()
         self._prev_action = executed_actions.detach()
+        self._prev_cf_state = pre_action_state
+        self._prev_q_state = q_state.detach()
+        self._prev_q_values = q_values
+        self._prev_action_mask = action_mask.detach()
+        self._prev_actions = executed_actions.detach()
         self.dictionary.tick_age()
 
-        hist = torch.nn.functional.one_hot(executed_actions, num_classes=5).float().mean(dim=(0, 1))
+        one_hot_actions = torch.nn.functional.one_hot(executed_actions, num_classes=5).float()
+        hist = one_hot_actions.mean(dim=(0, 1))
+        action_counts = one_hot_actions.sum(dim=(0, 1))
         entropy = (-(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(dim=-1)).detach()
         aux = {
             "weights": weights.detach(),
@@ -234,16 +272,20 @@ class DynaKeyMemoryCore(nn.Module):
             "executed_action": executed_actions.detach(),
             "actions": executed_actions.detach(),
             "action_hist": hist.detach(),
+            "action_counts": action_counts.detach(),
             "policy_mode": self.policy_mode,
             "action_keep": hist[0].detach(),
             "action_update": hist[1].detach(),
             "action_spawn": hist[2].detach(),
             "action_split": hist[3].detach(),
             "action_delete": hist[4].detach(),
-            "q_values": q_values,
+            "q_values": q_loss_values,
+            "q_state": q_loss_state,
             "q_target_action": q_target_action,
             "advantage_returns": advantage_returns,
             "action_mask": action_mask_for_loss,
+            "valid_q_samples": valid_q_samples.detach() if valid_q_samples is not None else None,
+            "invalid_q_targets": invalid_q_targets.detach() if invalid_q_targets is not None else None,
             "used_identity_fallback": pred_aux["used_identity_fallback"].detach(),
         }
         return readout, aux

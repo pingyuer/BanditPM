@@ -17,6 +17,7 @@ from utils.logger import TensorboardLogger
 from utils.log_integrator import Integrator
 from utils.time_estimator import TimeEstimator
 from model.gdkvm01 import GDKVM
+from model.unext_dynakey import UNeXtDynaKeySegmenter
 from model.utils.parameter_groups import get_parameter_groups
 from model.losses import LossComputer
 from vis.vis_0730 import visualize_sequence
@@ -74,13 +75,17 @@ class Trainer:
         self.world_size = dist.get_world_size() if self.is_distributed else 1
         self.main_process = self.rank == 0
 
-        model = GDKVM(
-            use_first_frame_gt_init=bool(cfg.model.get("use_first_frame_gt_init", True)),
-            prototype_value_cfg=cfg.model.get("prototype_value", None),
-            temporal_memory_cfg=cfg.model.get("temporal_memory", None),
-            memory_core_cfg=cfg.model.get("memory_core", None),
-            use_kpff=bool(cfg.model.get("use_kpff", True)),
-        ).to(self.device)
+        model_name_key = str(cfg.model.get("name", "")).lower()
+        if model_name_key in {"unext_dynakey", "dynakey_unext", "unextdynakey"}:
+            model = UNeXtDynaKeySegmenter(cfg.model).to(self.device)
+        else:
+            model = GDKVM(
+                use_first_frame_gt_init=bool(cfg.model.get("use_first_frame_gt_init", True)),
+                prototype_value_cfg=cfg.model.get("prototype_value", None),
+                temporal_memory_cfg=cfg.model.get("temporal_memory", None),
+                memory_core_cfg=cfg.model.get("memory_core", None),
+                use_kpff=bool(cfg.model.get("use_kpff", True)),
+            ).to(self.device)
         model = model.to(memory_format=torch.channels_last)
         self._apply_training_freeze(model)
         if self.is_distributed:
@@ -212,12 +217,14 @@ class Trainer:
 
     def _resolve_phase_init(self, phase: str) -> str:
         phase_cfg = self.cfg.get("phase_init", {})
-        default_mode = "oracle_gt" if bool(self.cfg.model.get("use_first_frame_gt_init", True)) else "pred_or_zero"
+        model_cfg = self.cfg.get("model", {})
+        default_mode = "oracle_gt" if bool(model_cfg.get("use_first_frame_gt_init", True)) else "pred_or_zero"
         return str(phase_cfg.get(phase, self.cfg.get("evaluation", {}).get("init_mode", default_mode)))
 
     def _resolve_eval_indices(self, data):
         T = data["rgb"].shape[1]
-        frame_scope = str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only"))
+        eval_cfg = self.cfg.get("evaluation", {})
+        frame_scope = str(eval_cfg.get("frame_scope", "supervised_only"))
         if frame_scope == "all_available":
             eval_valid = data.get("eval_valid")
             if eval_valid is not None:
@@ -228,11 +235,22 @@ class Trainer:
             source = data.get("label_valid")
 
         if source is None:
-            return torch.ones((data["rgb"].shape[0], T), device=self.device, dtype=torch.bool)
+            frame_mask = torch.ones((data["rgb"].shape[0], T), device=self.device, dtype=torch.bool)
+            return self._apply_eval_exclusions(frame_mask)
 
         frame_mask = self._resolve_frame_valid_mask(source, batch_size=data["rgb"].shape[0], total_frames=T)
         if not frame_mask.any():
-            return self._resolve_supervised_indices(data)
+            frame_mask = self._resolve_supervised_indices(data)
+        return self._apply_eval_exclusions(frame_mask)
+
+    def _apply_eval_exclusions(self, frame_mask: torch.Tensor) -> torch.Tensor:
+        eval_cfg = self.cfg.get("evaluation", {})
+        if not bool(eval_cfg.get("exclude_init_frame", False)):
+            return frame_mask
+        frame_mask = frame_mask.clone()
+        init_idx = int(eval_cfg.get("init_frame_index", 0))
+        if 0 <= init_idx < frame_mask.shape[1]:
+            frame_mask[:, init_idx] = False
         return frame_mask
 
     def _binary_overlap_metrics(self, pred: torch.Tensor, gt: torch.Tensor):
@@ -294,6 +312,9 @@ class Trainer:
             "protocol_name": str(self.cfg.get("data", {}).get("protocol_name", "unknown")),
             "init_mode": init_mode,
             "frame_scope": str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only")),
+            "exclude_init_frame": bool(self.cfg.get("evaluation", {}).get("exclude_init_frame", False)),
+            "init_frame_index": int(self.cfg.get("evaluation", {}).get("init_frame_index", 0)),
+            "protocol_version": str(self.cfg.get("evaluation", {}).get("protocol_version", "v1_oracle_init")),
             "metric_space": metric_space,
             "dice_frame_mean": metrics.get("dice_frame_mean", 0.0),
             "dice_video_mean": metrics.get("dice_video_mean", 0.0),
@@ -520,6 +541,7 @@ class Trainer:
             return
 
         try:
+            wandb_payload = {}
             occupancy_tensors = []
             active_count_tensors = []
             entropy_tensors = []
@@ -527,6 +549,9 @@ class Trainer:
             prediction_error_tensors = []
             residual_tensors = []
             action_hist_tensors = []
+            action_count_tensors = []
+            valid_q_tensors = []
+            invalid_target_tensors = []
             for key in memory_keys:
                 aux = data[key]
                 dynakey_aux = aux.get("dynakey_aux") if isinstance(aux, dict) else None
@@ -546,24 +571,61 @@ class Trainer:
                     residual_tensors.append(dynakey_aux["residual_norm"].detach().flatten())
                 if "action_hist" in dynakey_aux:
                     action_hist_tensors.append(dynakey_aux["action_hist"].detach())
+                if "action_counts" in dynakey_aux:
+                    action_count_tensors.append(dynakey_aux["action_counts"].detach())
+                if torch.is_tensor(dynakey_aux.get("valid_q_samples")):
+                    valid_q_tensors.append(dynakey_aux["valid_q_samples"].float().detach().flatten())
+                if torch.is_tensor(dynakey_aux.get("invalid_q_targets")):
+                    invalid_target_tensors.append(dynakey_aux["invalid_q_targets"].float().detach().flatten())
 
             if occupancy_tensors:
-                self.log.log_scalar("dynakey/occupancy_ratio", torch.cat(occupancy_tensors).mean().item(), it)
+                value = torch.cat(occupancy_tensors).mean().item()
+                self.log.log_scalar("dynakey/occupancy_ratio", value, it)
+                wandb_payload["dynakey/occupancy_ratio"] = value
             if active_count_tensors:
-                self.log.log_scalar("dynakey/active_key_count", torch.cat(active_count_tensors).mean().item(), it)
+                value = torch.cat(active_count_tensors).mean().item()
+                self.log.log_scalar("dynakey/active_key_count", value, it)
+                wandb_payload["dynakey/active_key_count"] = value
             if entropy_tensors:
-                self.log.log_scalar("dynakey/retrieval_entropy", torch.cat(entropy_tensors).mean().item(), it)
+                value = torch.cat(entropy_tensors).mean().item()
+                self.log.log_scalar("dynakey/retrieval_entropy", value, it)
+                wandb_payload["dynakey/retrieval_entropy"] = value
             if fallback_tensors:
-                self.log.log_scalar("dynakey/identity_fallback", torch.cat(fallback_tensors).mean().item(), it)
+                value = torch.cat(fallback_tensors).mean().item()
+                self.log.log_scalar("dynakey/identity_fallback", value, it)
+                wandb_payload["dynakey/identity_fallback"] = value
             if prediction_error_tensors:
-                self.log.log_scalar("dynakey/prediction_error", torch.cat(prediction_error_tensors).mean().item(), it)
+                value = torch.cat(prediction_error_tensors).mean().item()
+                self.log.log_scalar("dynakey/prediction_error", value, it)
+                wandb_payload["dynakey/prediction_error"] = value
             if residual_tensors:
-                self.log.log_scalar("dynakey/residual_norm", torch.cat(residual_tensors).mean().item(), it)
+                value = torch.cat(residual_tensors).mean().item()
+                self.log.log_scalar("dynakey/residual_norm", value, it)
+                wandb_payload["dynakey/residual_norm"] = value
             if action_hist_tensors:
                 hist = torch.stack(action_hist_tensors, dim=0).mean(dim=0)
                 names = ["keep", "update", "spawn", "split", "delete"]
                 for idx, name in enumerate(names):
-                    self.log.log_scalar(f"dynakey/action_{name}", hist[idx].item(), it)
+                    value = hist[idx].item()
+                    self.log.log_scalar(f"dynakey/action_{name}", value, it)
+                    wandb_payload[f"dynakey/action_{name}"] = value
+            if action_count_tensors:
+                counts = torch.stack(action_count_tensors, dim=0).sum(dim=0)
+                names = ["keep", "update", "spawn", "split", "delete"]
+                for idx, name in enumerate(names):
+                    value = counts[idx].item()
+                    self.log.log_scalar(f"dynakey/action_count_{name}", value, it)
+                    wandb_payload[f"dynakey/action_count_{name}"] = value
+            if valid_q_tensors:
+                value = torch.cat(valid_q_tensors).sum().item()
+                self.log.log_scalar("dynakey/valid_q_samples", value, it)
+                wandb_payload["dynakey/valid_q_samples"] = value
+            if invalid_target_tensors:
+                value = torch.cat(invalid_target_tensors).sum().item()
+                self.log.log_scalar("dynakey/invalid_q_targets", value, it)
+                wandb_payload["dynakey/invalid_q_targets"] = value
+            if wandb_payload:
+                wandb.log(wandb_payload, step=it)
         except Exception:
             pass
 
@@ -612,6 +674,8 @@ class Trainer:
                     self.log.info(
                         f"[{mode.capitalize()}] init_mode={batch_data['init_mode']} | "
                         f"metric_space={str(self.cfg.get('evaluation', {}).get('metric_space', 'original'))} | "
+                        f"exclude_init_frame={bool(self.cfg.get('evaluation', {}).get('exclude_init_frame', False))} | "
+                        f"protocol_version={str(self.cfg.get('evaluation', {}).get('protocol_version', 'v1_oracle_init'))} | "
                         f"supervised_indices={self._format_frame_mask(supervised_indices)} | "
                         f"eval_indices={self._format_frame_mask(eval_indices)}"
                     )

@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
+UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+
+cd "${PROJECT_DIR}"
+export PYTHONPATH=.
+export HYDRA_FULL_ERROR=1
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+
+LOG_DIR="${LOG_DIR:-outputs/BanditPM/tmux_logs}"
+mkdir -p "${LOG_DIR}"
+
+run_exp() {
+  local name="$1"
+  shift
+  echo "[$(date '+%F %T')] START ${name}"
+  "${UV_BIN}" run python train.py "$@" 2>&1 | tee "${LOG_DIR}/${name}.log"
+  echo "[$(date '+%F %T')] END ${name}"
+}
+
+NOLEAK_ARGS=(
+  --config-name config_banditpm_baseline
+  phase_init.train=pred_or_zero
+  phase_init.val=pred_or_zero
+  phase_init.test=pred_or_zero
+  evaluation.init_mode=pred_or_zero
+  evaluation.exclude_init_frame=true
+  evaluation.init_frame_index=0
+  evaluation.protocol_version=v2_no_leak
+  wandb_mode=online
+  save=1
+  save_weights_interval=500
+  save_checkpoint_interval=0
+)
+
+run_gdkvm() {
+  local name="$1" dataset="$2" path="$3" protocol="$4" batch="$5" workers="$6" tags="$7"
+  run_exp "${name}_gdkvm_v2_noleak" "${NOLEAK_ARGS[@]}" \
+    exp_id="${name}_gdkvm_v2_noleak" dataset_name="${dataset}" data_path="${path}" data.protocol_name="${protocol}" \
+    main_training.batch_size="${batch}" main_training.num_workers="${workers}" eval_stage.eval_interval=200 \
+    wandb.group=baselines_v2_no_leak wandb.tags="${tags},gdkvm,kpff,gdr,v2_no_leak,predinit,exclude_init_frame]"
+}
+
+run_kpff() {
+  local name="$1" dataset="$2" path="$3" protocol="$4" batch="$5" workers="$6" tags="$7"
+  run_exp "${name}_kpff_v2_noleak" "${NOLEAK_ARGS[@]}" \
+    exp_id="${name}_kpff_v2_noleak" dataset_name="${dataset}" data_path="${path}" data.protocol_name="${protocol}" \
+    main_training.batch_size="${batch}" main_training.num_workers="${workers}" eval_stage.eval_interval=200 \
+    model.memory_core.type=none model.temporal_memory.type=none \
+    wandb.group=baselines_v2_no_leak wandb.tags="${tags},kpff,no_gdr,v2_no_leak,predinit,exclude_init_frame]"
+}
+
+run_bpm_rule() {
+  local name="$1" dataset="$2" path="$3" protocol="$4" batch="$5" workers="$6" tags="$7"
+  run_exp "${name}_bpm_rule_v2_noleak" "${NOLEAK_ARGS[@]}" \
+    exp_id="${name}_bpm_rule_v2_noleak" dataset_name="${dataset}" data_path="${path}" data.protocol_name="${protocol}" \
+    main_training.batch_size="${batch}" main_training.num_workers="${workers}" eval_stage.eval_interval=200 \
+    model.memory_core.type=bpm model.temporal_memory.type=bpm \
+    model.temporal_memory.bpm.ENABLE=true \
+    model.temporal_memory.bpm.USE_RULE_BASED_POLICY=true \
+    model.temporal_memory.bpm.USE_LEARNED_POLICY=false \
+    model.temporal_memory.bpm.EXEC_POLICY=rule \
+    model.temporal_memory.bpm.ENABLE_POLICY_LOSS=false \
+    model.temporal_memory.bpm.ENABLE_POLICY_CE_LOSS=false \
+    model.temporal_memory.bpm.ENABLE_RL_LOSS=false \
+    wandb.group=baselines_v2_no_leak wandb.tags="${tags},bpm_rule,kpff,bpm,v2_no_leak,predinit,exclude_init_frame]"
+}
+
+run_bpm_rl() {
+  local name="$1" dataset="$2" path="$3" protocol="$4" batch="$5" workers="$6" tags="$7"
+  run_exp "${name}_bpm_rl_v2_noleak" "${NOLEAK_ARGS[@]}" \
+    exp_id="${name}_bpm_rl_v2_noleak" dataset_name="${dataset}" data_path="${path}" data.protocol_name="${protocol}" \
+    main_training.batch_size="${batch}" main_training.num_workers="${workers}" eval_stage.eval_interval=200 \
+    model.memory_core.type=bpm model.temporal_memory.type=bpm \
+    model.temporal_memory.bpm.ENABLE=true \
+    model.temporal_memory.bpm.USE_RULE_BASED_POLICY=true \
+    model.temporal_memory.bpm.USE_LEARNED_POLICY=true \
+    model.temporal_memory.bpm.EXEC_POLICY=mixed \
+    model.temporal_memory.bpm.ENABLE_POLICY_LOSS=true \
+    model.temporal_memory.bpm.ENABLE_POLICY_CE_LOSS=true \
+    model.temporal_memory.bpm.ENABLE_RL_LOSS=true \
+    wandb.group=baselines_v2_no_leak wandb.tags="${tags},bpm_rl,kpff,bpm,rl,v2_no_leak,predinit,exclude_init_frame]"
+}
+
+run_all_methods() {
+  local name="$1" dataset="$2" path="$3" protocol="$4" batch_fast="$5" batch_bpm="$6" workers="$7" tags="$8"
+  run_gdkvm "${name}" "${dataset}" "${path}" "${protocol}" "${batch_fast}" "${workers}" "${tags}"
+  run_kpff "${name}" "${dataset}" "${path}" "${protocol}" "${batch_fast}" "${workers}" "${tags}"
+  run_bpm_rule "${name}" "${dataset}" "${path}" "${protocol}" "${batch_bpm}" "${workers}" "${tags}"
+  run_bpm_rl "${name}" "${dataset}" "${path}" "${protocol}" "${batch_bpm}" "${workers}" "${tags}"
+}
+
+run_all_methods camus camus /home/tahara/datasets/processed/camus_png256_10f camus_short_dense 10 8 8 "[camus"
+run_all_methods echonet_pediatric_a4c_full_cycle echonet /home/tahara/datasets/processed/echonet_pediatric_a4c_full_cycle_png128_10f echonet_pediatric_fullcycle_sparse 24 20 12 "[echonet_pediatric,a4c,full_cycle"
+run_all_methods cardiacuda_a4c_lv_dense cardiacuda /home/tahara/datasets/processed/cardiacuda_a4c_lv_dense_png128_10f cardiacuda_a4c_lv_dense 4 4 4 "[cardiacuda,a4c,lv,dense"

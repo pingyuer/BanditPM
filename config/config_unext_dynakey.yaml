@@ -1,0 +1,60 @@
+defaults:
+  - config_gdkvm_01
+  - _self_
+
+exp_id: "unext_dynakey"
+model_name: "UNeXtDynaKey"
+output_root: "outputs/BanditPM"
+
+phase_init:
+  train: "pred_or_zero"
+  val: "pred_or_zero"
+  test: "pred_or_zero"
+
+evaluation:
+  init_mode: "pred_or_zero"
+  exclude_init_frame: true
+  init_frame_index: 0
+  protocol_version: "v2_no_leak_unext_dynakey"
+
+wandb:
+  project: "BanditPM"
+  group: "unext_dynakey_v2_no_leak"
+  tags: ["unext", "dynakey", "ode_memory", "v2_no_leak", "predinit", "temporal_refine"]
+
+model:
+  name: "unext_dynakey"
+  use_first_frame_gt_init: true
+  use_kpff: false
+  memory_core:
+    type: "dynakey"
+    dynakey:
+      BANK_SIZE: 4
+      DT: 1.0
+      EMA_ALPHA: 0.2
+      RETRIEVAL_TEMPERATURE: 1.0
+      MIN_SCALE: 1.0e-3
+      HIDDEN_DIM: 128
+      GATE_INIT: 1.0
+      POLICY_MODE: "fixed_residual"
+      FORCED_ACTION: "spawn"
+      RESIDUAL_SPAWN_THRESHOLD: 0.05
+      SPLIT_EPS: 0.01
+      SPLIT_SCALE_FACTOR: 0.7
+      ENABLE_Q_LOSS: false
+      DETACH_Q_STATE: true
+  temporal_memory:
+    type: "dynakey"
+    bpm:
+      ENABLE: false
+  unext_dynakey:
+    in_channels: 1
+    num_classes: 2
+    base_dim: 24
+    value_dim: 128
+    use_temporal_refine: true
+    use_ode_aux_loss: false
+
+hydra:
+  run:
+    dir: ${output_root}/${exp_id}/${now:%Y-%m-%d}/${now:%H-%M-%S}

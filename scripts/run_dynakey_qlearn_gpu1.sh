@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/tahara/GDKVM
+PROJECT_DIR="${PROJECT_DIR:-/home/tahara/GDKVM}"
+UV_BIN="${UV_BIN:-/home/tahara/miniconda3/bin/uv}"
+
+cd "${PROJECT_DIR}"
 export PYTHONPATH=.
 export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES=1
 
-UV_BIN=/home/tahara/miniconda3/bin/uv
 LOG_DIR=outputs/BanditPM/tmux_logs
 mkdir -p "${LOG_DIR}"
 

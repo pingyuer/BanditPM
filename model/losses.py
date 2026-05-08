@@ -233,24 +233,40 @@ class LossComputer(nn.Module):
             return {}
 
         q_values = torch.cat(q_values_list, dim=0)
-        labels = torch.cat(labels_list, dim=0)
+        labels = torch.cat(labels_list, dim=0).to(device=q_values.device)
         advantages = torch.cat(advantage_list, dim=0).clamp(
             -self.dynakey_advantage_clamp,
             self.dynakey_advantage_clamp,
         )
         action_mask = torch.cat(mask_list, dim=0)
+        labels = labels.clamp(0, q_values.shape[-1] - 1)
+        valid_label = action_mask.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
         q_values_masked = q_values.masked_fill(~action_mask, -1.0e4)
 
         out: Dict[str, torch.Tensor] = {}
         total = torch.zeros((), device=q_values.device, dtype=q_values.dtype)
+        out["dynakey_q_valid_samples"] = valid_label.float().sum().detach()
+        out["dynakey_q_invalid_targets"] = (~valid_label).float().sum().detach()
+        if not valid_label.any():
+            zero = q_values.sum() * 0.0
+            out["dynakey_q_ce"] = zero
+            out["dynakey_q_adv"] = zero
+            out["dynakey_q_total"] = zero
+            return out
+
+        q_values_valid = q_values[valid_label]
+        q_values_masked_valid = q_values_masked[valid_label]
+        labels_valid = labels[valid_label]
+        advantages_valid = advantages[valid_label]
+        action_mask_valid = action_mask[valid_label]
         if self.lambda_dynakey_q_ce > 0:
-            ce = F.cross_entropy(q_values_masked, labels)
+            ce = F.cross_entropy(q_values_masked_valid, labels_valid)
             out["dynakey_q_ce"] = ce * self.lambda_dynakey_q_ce
             total = total + out["dynakey_q_ce"]
         if self.lambda_dynakey_q_adv > 0:
-            adv_target = advantages.masked_fill(~action_mask, 0.0)
-            valid_count = action_mask.float().sum().clamp_min(1.0)
-            adv_loss = (((q_values - adv_target) ** 2) * action_mask.float()).sum() / valid_count
+            adv_target = advantages_valid.masked_fill(~action_mask_valid, 0.0)
+            valid_count = action_mask_valid.float().sum().clamp_min(1.0)
+            adv_loss = (((q_values_valid - adv_target) ** 2) * action_mask_valid.float()).sum() / valid_count
             out["dynakey_q_adv"] = adv_loss * self.lambda_dynakey_q_adv
             total = total + out["dynakey_q_adv"]
         out["dynakey_q_total"] = total

@@ -50,6 +50,82 @@ class SupervisionIndexTests(unittest.TestCase):
         idx = Trainer._resolve_eval_indices(trainer, data)
         self.assertTrue(torch.equal(idx, data["eval_valid"]))
 
+    def test_eval_exclude_init_frame_removes_frame_zero(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.device = torch.device("cpu")
+        trainer.cfg = OmegaConf.create(
+            {
+                "evaluation": {
+                    "frame_scope": "all_available",
+                    "exclude_init_frame": True,
+                    "init_frame_index": 0,
+                }
+            }
+        )
+        data = {
+            "rgb": make_video_batch(2, 5),
+            "label_valid": make_frame_valid_mask(
+                [True, False, False, False, True],
+                [True, True, False, True, False],
+            ),
+            "eval_valid": make_frame_valid_mask(
+                [True, True, False, False, True],
+                [True, True, True, True, False],
+            ),
+        }
+        idx = Trainer._resolve_eval_indices(trainer, data)
+        expected = make_frame_valid_mask(
+            [False, True, False, False, True],
+            [False, True, True, True, False],
+        )
+        self.assertTrue(torch.equal(idx, expected))
+
+    def test_eval_exclude_init_frame_does_not_fallback_to_leaky_init(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.device = torch.device("cpu")
+        trainer.cfg = OmegaConf.create(
+            {
+                "evaluation": {
+                    "frame_scope": "supervised_only",
+                    "exclude_init_frame": True,
+                    "init_frame_index": 0,
+                }
+            }
+        )
+        data = {
+            "rgb": make_video_batch(2, 4),
+            "label_valid": make_frame_valid_mask(
+                [True, False, False, False],
+                [True, False, False, False],
+            ),
+        }
+        idx = Trainer._resolve_eval_indices(trainer, data)
+        self.assertFalse(idx.any())
+
+    def test_summary_row_records_no_leak_protocol(self):
+        trainer = Trainer.__new__(Trainer)
+        trainer.exp_id = "unit_no_leak"
+        trainer.commit_hash = "test"
+        trainer.cfg = OmegaConf.create(
+            {
+                "dataset_name": "echonet",
+                "data": {"protocol_name": "unit"},
+                "seed": 7,
+                "phase_init": {"test": "pred_or_zero"},
+                "evaluation": {
+                    "frame_scope": "supervised_only",
+                    "init_mode": "pred_or_zero",
+                    "exclude_init_frame": True,
+                    "init_frame_index": 0,
+                    "protocol_version": "v2_no_leak",
+                },
+            }
+        )
+        row = Trainer._build_summary_row(trainer, "test", {}, epoch=0, it=0)
+        self.assertEqual(row["init_mode"], "pred_or_zero")
+        self.assertTrue(row["exclude_init_frame"])
+        self.assertEqual(row["protocol_version"], "v2_no_leak")
+
     def test_loss_computer_accepts_per_sample_supervision_masks(self):
         cfg = OmegaConf.create(
             {

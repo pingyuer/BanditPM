@@ -43,6 +43,7 @@ def compute_counterfactual_returns(
     z_tp1_BNC: torch.Tensor,
     actions_BN: Optional[torch.Tensor] = None,
     rewards_cfg: Optional[dict] = None,
+    initial_state: Optional[ODEKeyDictionaryState] = None,
 ) -> tuple[torch.Tensor, dict]:
     del actions_BN
     rewards_cfg = rewards_cfg or {}
@@ -52,7 +53,7 @@ def compute_counterfactual_returns(
     else:
         costs_t = torch.tensor(costs, device=z_t_BNC.device, dtype=z_t_BNC.dtype)
 
-    live_state = dictionary.clone_state()
+    live_state = _copy_state(initial_state) if initial_state is not None else dictionary.clone_state()
     raw_returns = []
     errors = []
 

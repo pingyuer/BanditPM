@@ -149,6 +149,9 @@ class DynaKeyQMaintainer(nn.Module):
         return q_values
 
     def select_action(self, q_values: torch.Tensor, action_mask: torch.Tensor, mode: str = "greedy") -> torch.Tensor:
+        return self.select_action_from_q_values(q_values, action_mask, mode=mode)
+
+    def select_action_from_q_values(self, q_values: torch.Tensor, action_mask: torch.Tensor, mode: str = "greedy") -> torch.Tensor:
         masked = q_values.masked_fill(~action_mask, -1.0e4)
         if mode == "greedy":
             return masked.argmax(dim=-1)

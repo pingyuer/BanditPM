@@ -81,6 +81,17 @@ class ODEKeyDictionary(nn.Module):
     def set_state(self, state: ODEKeyDictionaryState) -> None:
         self._state = state
 
+    def restore_state(self, state: ODEKeyDictionaryState) -> None:
+        self._state = ODEKeyDictionaryState(
+            center=state.center.clone(),
+            velocity=state.velocity.clone(),
+            scale=state.scale.clone(),
+            age=state.age.clone(),
+            usage=state.usage.clone(),
+            error_ema=state.error_ema.clone(),
+            valid=state.valid.clone(),
+        )
+
     def _ensure_state_for(self, z_BNC: torch.Tensor) -> None:
         B, N, C = z_BNC.shape
         if C != self.value_dim:
@@ -202,6 +213,30 @@ class ODEKeyDictionary(nn.Module):
         self._scatter_slot(state.valid, slot_idx, torch.ones_like(slot_idx, dtype=torch.bool))
         return slot_idx
 
+    def spawn_masked(
+        self,
+        z_BNC: torch.Tensor,
+        transition_velocity: Optional[torch.Tensor] = None,
+        enabled: Optional[torch.Tensor] = None,
+        slot_idx: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        self._ensure_state_for(z_BNC)
+        state = self.state
+        slot_idx = self._first_empty_slot() if slot_idx is None else slot_idx.long()
+        if enabled is None:
+            enabled = torch.ones(z_BNC.shape[:2], device=z_BNC.device, dtype=torch.bool)
+        enabled = enabled.to(device=z_BNC.device, dtype=torch.bool)
+        velocity = torch.zeros_like(z_BNC) if transition_velocity is None else transition_velocity
+        velocity = self._clamp_velocity(velocity.detach())
+        self._scatter_slot_masked(state.center, slot_idx, z_BNC.detach(), enabled)
+        self._scatter_slot_masked(state.velocity, slot_idx, velocity, enabled)
+        self._scatter_slot_masked(state.scale, slot_idx, torch.ones_like(slot_idx, dtype=state.scale.dtype, device=z_BNC.device), enabled)
+        self._scatter_slot_masked(state.age, slot_idx, torch.zeros_like(slot_idx, dtype=state.age.dtype, device=z_BNC.device), enabled)
+        self._scatter_slot_masked(state.usage, slot_idx, torch.ones_like(slot_idx, dtype=state.usage.dtype, device=z_BNC.device), enabled)
+        self._scatter_slot_masked(state.error_ema, slot_idx, torch.zeros_like(slot_idx, dtype=state.error_ema.dtype, device=z_BNC.device), enabled)
+        self._scatter_slot_masked(state.valid, slot_idx, torch.ones_like(slot_idx, dtype=torch.bool, device=z_BNC.device), enabled)
+        return slot_idx
+
     def clone_slot(self, src_idx: torch.Tensor, dst_idx: torch.Tensor) -> None:
         state = self.state
         src_idx = src_idx.long()
@@ -210,6 +245,16 @@ class ODEKeyDictionary(nn.Module):
             tensor = getattr(state, name)
             value = self._gather_slot(tensor, src_idx)
             self._scatter_slot(tensor, dst_idx, value)
+
+    def clone_slot_masked(self, src_idx: torch.Tensor, dst_idx: torch.Tensor, enabled: torch.Tensor) -> None:
+        state = self.state
+        src_idx = src_idx.long()
+        dst_idx = dst_idx.long()
+        enabled = enabled.to(device=state.center.device, dtype=torch.bool)
+        for name in ("center", "velocity", "scale", "age", "usage", "error_ema", "valid"):
+            tensor = getattr(state, name)
+            value = self._gather_slot(tensor, src_idx)
+            self._scatter_slot_masked(tensor, dst_idx, value, enabled)
 
     def update(
         self,
@@ -250,6 +295,50 @@ class ODEKeyDictionary(nn.Module):
         self._scatter_slot(state.usage, slot_idx, old_usage + 1.0)
         self._scatter_slot(state.valid, slot_idx, torch.ones_like(slot_idx, dtype=torch.bool))
 
+    def update_masked(
+        self,
+        prev_z: torch.Tensor,
+        z: Optional[torch.Tensor],
+        selected_slot: torch.Tensor,
+        enabled: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+    ) -> None:
+        self._ensure_state_for(prev_z)
+        state = self.state
+        selected_slot = selected_slot.long()
+        enabled = enabled.to(device=prev_z.device, dtype=torch.bool)
+        alpha_base = torch.ones(prev_z.shape[:2], device=prev_z.device, dtype=prev_z.dtype)
+        if weight is not None:
+            alpha_base = weight.to(device=prev_z.device, dtype=prev_z.dtype).clamp(0.0, 1.0)
+        alpha_tensor = (self.ema_alpha * alpha_base).clamp(0.0, 1.0)
+        alpha_exp = alpha_tensor.unsqueeze(-1)
+
+        old_center = self._gather_slot(state.center, selected_slot)
+        new_center = (1.0 - alpha_exp) * old_center + alpha_exp * prev_z.detach()
+        self._scatter_slot_masked(state.center, selected_slot, new_center, enabled)
+
+        if z is not None:
+            target_velocity = (z.detach() - prev_z.detach()) / max(self.dt, 1e-6)
+            target_velocity = self._clamp_velocity(target_velocity)
+            old_velocity = self._gather_slot(state.velocity, selected_slot)
+            new_velocity = (1.0 - alpha_exp) * old_velocity + alpha_exp * target_velocity
+            self._scatter_slot_masked(state.velocity, selected_slot, new_velocity, enabled)
+
+            pred = prev_z.detach() + self.dt * new_velocity
+            err = torch.mean((pred - z.detach()) ** 2, dim=-1)
+            old_err = self._gather_slot(state.error_ema.unsqueeze(-1), selected_slot).squeeze(-1)
+            new_err = (1.0 - alpha_tensor) * old_err + alpha_tensor * err
+            self._scatter_slot_masked(state.error_ema, selected_slot, new_err, enabled)
+
+            old_scale = self._gather_slot(state.scale.unsqueeze(-1), selected_slot).squeeze(-1)
+            target_scale = target_velocity.norm(dim=-1).clamp_min(self.min_scale)
+            new_scale = (1.0 - alpha_tensor) * old_scale + alpha_tensor * target_scale
+            self._scatter_slot_masked(state.scale, selected_slot, new_scale, enabled)
+
+        old_usage = self._gather_slot(state.usage.unsqueeze(-1), selected_slot).squeeze(-1)
+        self._scatter_slot_masked(state.usage, selected_slot, old_usage + 1.0, enabled)
+        self._scatter_slot_masked(state.valid, selected_slot, torch.ones_like(selected_slot, dtype=torch.bool, device=prev_z.device), enabled)
+
     def split(
         self,
         slot_idx: torch.Tensor,
@@ -278,6 +367,42 @@ class ODEKeyDictionary(nn.Module):
         self._scatter_slot(state.usage, dst_idx, torch.ones_like(dst_idx, dtype=state.usage.dtype))
         return dst_idx
 
+    def split_masked(
+        self,
+        selected_slot: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+        enabled: Optional[torch.Tensor] = None,
+        perturb_scale: float = 0.01,
+        split_eps: Optional[float] = None,
+        split_scale_factor: float = 0.7,
+    ) -> torch.Tensor:
+        state = self.state
+        selected_slot = selected_slot.long()
+        dst_idx = self._first_empty_slot()
+        if enabled is None:
+            enabled = torch.ones(selected_slot.shape, device=state.center.device, dtype=torch.bool)
+        enabled = enabled.to(device=state.center.device, dtype=torch.bool)
+        enabled = enabled & self._gather_slot(state.valid.unsqueeze(-1), selected_slot).squeeze(-1)
+
+        self.clone_slot_masked(selected_slot, dst_idx, enabled)
+        eps = float(perturb_scale if split_eps is None else split_eps)
+        center = self._gather_slot(state.center, dst_idx)
+        old_velocity = self._gather_slot(state.velocity, dst_idx)
+        if residual is None:
+            direction = torch.randn_like(center)
+        else:
+            direction = residual.detach().to(device=center.device, dtype=center.dtype)
+        direction = F.normalize(direction, dim=-1)
+        residual_velocity = direction if residual is None else residual.detach().to(device=center.device, dtype=center.dtype) / max(self.dt, 1e-6)
+        self._scatter_slot_masked(state.center, dst_idx, center + eps * direction, enabled)
+        self._scatter_slot_masked(state.velocity, dst_idx, self._clamp_velocity(old_velocity + residual_velocity), enabled)
+        old_scale = self._gather_slot(state.scale.unsqueeze(-1), dst_idx).squeeze(-1)
+        self._scatter_slot_masked(state.scale, dst_idx, (old_scale * float(split_scale_factor)).clamp_min(self.min_scale), enabled)
+        self._scatter_slot_masked(state.age, dst_idx, torch.zeros_like(dst_idx, dtype=state.age.dtype), enabled)
+        self._scatter_slot_masked(state.usage, dst_idx, torch.ones_like(dst_idx, dtype=state.usage.dtype), enabled)
+        self._scatter_slot_masked(state.valid, dst_idx, torch.ones_like(dst_idx, dtype=torch.bool), enabled)
+        return dst_idx
+
     def delete(self, slot_idx: torch.Tensor) -> None:
         state = self.state
         slot_idx = slot_idx.long()
@@ -289,6 +414,19 @@ class ODEKeyDictionary(nn.Module):
         self._scatter_slot_masked(state.usage, slot_idx, torch.zeros_like(slot_idx, dtype=state.usage.dtype), can_delete)
         self._scatter_slot_masked(state.error_ema, slot_idx, torch.zeros_like(slot_idx, dtype=state.error_ema.dtype), can_delete)
         self._scatter_slot_masked(state.valid, slot_idx, torch.zeros_like(slot_idx, dtype=torch.bool), can_delete)
+
+    def delete_masked(self, selected_slot: torch.Tensor, enabled: torch.Tensor) -> None:
+        state = self.state
+        selected_slot = selected_slot.long()
+        enabled = enabled.to(device=state.center.device, dtype=torch.bool)
+        can_delete = enabled & (self.active_key_count() > 1)
+        self._scatter_slot_masked(state.center, selected_slot, torch.zeros(*selected_slot.shape, self.value_dim, device=state.center.device, dtype=state.center.dtype), can_delete)
+        self._scatter_slot_masked(state.velocity, selected_slot, torch.zeros(*selected_slot.shape, self.value_dim, device=state.velocity.device, dtype=state.velocity.dtype), can_delete)
+        self._scatter_slot_masked(state.scale, selected_slot, torch.zeros_like(selected_slot, dtype=state.scale.dtype, device=state.scale.device), can_delete)
+        self._scatter_slot_masked(state.age, selected_slot, torch.zeros_like(selected_slot, dtype=state.age.dtype, device=state.age.device), can_delete)
+        self._scatter_slot_masked(state.usage, selected_slot, torch.zeros_like(selected_slot, dtype=state.usage.dtype, device=state.usage.device), can_delete)
+        self._scatter_slot_masked(state.error_ema, selected_slot, torch.zeros_like(selected_slot, dtype=state.error_ema.dtype, device=state.error_ema.device), can_delete)
+        self._scatter_slot_masked(state.valid, selected_slot, torch.zeros_like(selected_slot, dtype=torch.bool, device=state.valid.device), can_delete)
 
     def active_key_count(self) -> torch.Tensor:
         return self.state.valid.sum(dim=-1)

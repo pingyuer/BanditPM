@@ -31,6 +31,9 @@ phase_init:
 evaluation:
   frame_scope: "supervised_only"   # supervised_only | all_available
   init_mode: "oracle_gt"           # oracle_gt | pred_or_zero
+  exclude_init_frame: false        # v2 no-leak protocol should set this true
+  init_frame_index: 0
+  protocol_version: "v1_oracle_init"
   metric_space: "original"         # original | resized
   report_video_mean: true
   report_frame_mean: true
