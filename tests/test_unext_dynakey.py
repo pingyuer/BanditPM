@@ -5,7 +5,8 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from model.losses import LossComputer
-from dataset.frame_index import parse_frame_index
+from dataset.frame_index import build_label_map, parse_frame_index
+from model.memory_readout import MaskAwareMemoryReadout
 from model.modules.memory_core import MemoryCore
 from model.modules.unext.unext import UNeXtBackbone
 from model.unext_dynakey import UNeXtDynaKeySegmenter
@@ -40,7 +41,11 @@ def _cfg(*, temporal_refine=True, ode_aux=False, use_dynakey=True, use_mask_memo
                     "use_dynakey": use_dynakey,
                     "use_temporal_refine": temporal_refine,
                     "use_mask_memory": use_mask_memory,
-                    "refine_alpha_init": 0.1,
+                    "temporal_residual_init_scale": 0.1,
+                    "temporal_gate_bias": -2.0,
+                    "mask_memory_confidence_threshold": 0.55,
+                    "mask_memory_fg_ratio_min": 0.005,
+                    "mask_memory_fg_ratio_max": 0.60,
                     "use_ode_aux_loss": ode_aux,
                 },
             }
@@ -55,10 +60,11 @@ def _batch(batch_size=2, frames=3, height=32, width=32):
     return {
         "rgb": rgb,
         "ff_gt": ff_gt,
-        "cls_gt": cls_gt,
-        "info": {"num_objects": torch.ones(batch_size, dtype=torch.long)},
-        "init_mode": "oracle_gt",
-    }
+            "cls_gt": cls_gt,
+            "label_valid": torch.ones(batch_size, frames, dtype=torch.bool),
+            "info": {"num_objects": torch.ones(batch_size, dtype=torch.long)},
+            "init_mode": "oracle_gt",
+        }
 
 
 class UNeXtDynaKeyTests(unittest.TestCase):
@@ -71,6 +77,12 @@ class UNeXtDynaKeyTests(unittest.TestCase):
         self.assertEqual(parse_frame_index("ED.png", metadata), 0)
         self.assertEqual(parse_frame_index("ES.png", metadata), 9)
         self.assertIsNone(parse_frame_index("not_a_frame.png"))
+
+    def test_frame_index_maps_source_frames_to_local_indices(self):
+        metadata = {"source_frames": [30, 35, 40, 45, 50], "ED_frame": 40, "ES_frame": 50}
+        label_map = build_label_map(["ED.png", "ES.png", "frame_040.png"], metadata, sample_name="toy")
+        self.assertEqual(label_map[2], "ED.png")
+        self.assertEqual(label_map[4], "ES.png")
 
     def test_unext_backbone_shapes(self):
         model = UNeXtBackbone(in_channels=1, num_classes=2, base_dim=8, value_dim=16)
@@ -103,6 +115,8 @@ class UNeXtDynaKeyTests(unittest.TestCase):
         out = unext_only(_batch(batch_size=1))
         self.assertEqual(out["memory_aux_1"]["memory_type"], "none")
         self.assertFalse(out["memory_aux_1"]["dynakey_enabled"])
+        self.assertFalse(out["memory_aux_1"]["temporal_refine_enabled"])
+        self.assertTrue(torch.allclose(out["aux_1"]["object_logits"], out["aux_1"]["base_foreground_logits"], atol=1e-6))
 
         temporal_only = UNeXtDynaKeySegmenter(_cfg(temporal_refine=True, use_dynakey=False, use_mask_memory=False).model)
         out = temporal_only(_batch(batch_size=1))
@@ -132,6 +146,28 @@ class UNeXtDynaKeyTests(unittest.TestCase):
         self.assertIsNotNone(model.temporal_refine_head[0].weight.grad)
         self.assertIsNotNone(model.temporal_delta_proj.weight.grad)
         self.assertIsNotNone(model.temporal_gate_head[0].weight.grad)
+
+    def test_no_leak_pred_or_zero_ignores_first_frame_gt(self):
+        cfg = _cfg(temporal_refine=False, use_dynakey=False, use_mask_memory=False)
+        cfg.model.allow_oracle_init_when_requested = False
+        model = UNeXtDynaKeySegmenter(cfg.model)
+        data = _batch(batch_size=1)
+        data["init_mode"] = "pred_or_zero"
+        out = model(data)
+        self.assertFalse(out["memory_aux_0"]["oracle_gt_init_allowed"])
+        self.assertTrue(torch.allclose(out["aux_0"]["object_logits"], out["aux_0"]["base_foreground_logits"], atol=1e-6))
+
+    def test_mask_memory_rejects_empty_and_huge_predictions(self):
+        mem = MaskAwareMemoryReadout(4, confidence_threshold=0.55, fg_ratio_min=0.05, fg_ratio_max=0.60)
+        value = torch.randn(1, 1, 4, 4, 4)
+        empty = torch.zeros(1, 1, 16, 16)
+        aux_empty = mem.update(value, empty)
+        self.assertEqual(int(aux_empty["rejected_update_too_small"].item()), 1)
+        self.assertEqual(int(mem._valid.sum().item()), 0)
+        huge = torch.ones(1, 1, 16, 16)
+        aux_huge = mem.update(value, huge)
+        self.assertEqual(int(aux_huge["rejected_update_too_large"].item()), 1)
+        self.assertEqual(int(mem._valid.sum().item()), 0)
 
     def test_existing_dynakey_memory_core_still_runs(self):
         cfg = OmegaConf.create(

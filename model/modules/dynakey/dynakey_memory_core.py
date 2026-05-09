@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings
 
 from model.modules.dynakey.counterfactual import compute_counterfactual_returns
 from model.modules.dynakey.ode_key_dictionary import ODEKeyDictionary
@@ -31,7 +32,10 @@ class DynaKeyMemoryCore(nn.Module):
         )
         self.gate = nn.Parameter(torch.tensor(float(cfg.get("GATE_INIT", 1.0)), dtype=torch.float32))
         self.policy_mode = str(cfg.get("POLICY_MODE", "fixed_residual")).lower()
-        self.forced_action = str(cfg.get("FORCED_ACTION", "keep")).lower()
+        forced_cfg = cfg.get("FORCED_ACTION", None)
+        self.forced_action = None if forced_cfg in (None, "null", "") else str(forced_cfg).lower()
+        if self.policy_mode != "forced" and self.forced_action is not None:
+            warnings.warn("DynaKey FORCED_ACTION is ignored because POLICY_MODE is not 'forced'.", RuntimeWarning)
         self.residual_spawn_threshold = float(cfg.get("RESIDUAL_SPAWN_THRESHOLD", 0.05))
         self.split_eps = float(cfg.get("SPLIT_EPS", 0.01))
         self.split_scale_factor = float(cfg.get("SPLIT_SCALE_FACTOR", 0.7))
@@ -81,7 +85,7 @@ class DynaKeyMemoryCore(nn.Module):
         }.get(name, DynaKeyQMaintainer.ACTION_KEEP)
 
     def _forced_actions(self, z: torch.Tensor) -> torch.Tensor:
-        return torch.full(z.shape[:2], self._action_id(self.forced_action), device=z.device, dtype=torch.long)
+        return torch.full(z.shape[:2], self._action_id(self.forced_action or "keep"), device=z.device, dtype=torch.long)
 
     def _fixed_residual_actions(self, residual_norm: torch.Tensor) -> torch.Tensor:
         count = self.dictionary.active_key_count()
@@ -274,6 +278,7 @@ class DynaKeyMemoryCore(nn.Module):
             "action_hist": hist.detach(),
             "action_counts": action_counts.detach(),
             "policy_mode": self.policy_mode,
+            "forced_action": self.forced_action if self.policy_mode == "forced" else None,
             "action_keep": hist[0].detach(),
             "action_update": hist[1].detach(),
             "action_spawn": hist[2].detach(),

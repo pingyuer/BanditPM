@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from dataset.frame_index import build_label_map
+from dataset.frame_index import build_label_map, parse_frame_index
 
 
 def _load_json(path: Path) -> dict:
@@ -35,9 +35,12 @@ def _summarize_echonet(root: Path, split: str, size: int | None) -> dict:
         metadata = _load_json(meta_root / f"{img_dir.name}.json")
         label_map = build_label_map(label_files, metadata, sample_name=img_dir.name)
         valid_indices = sorted(idx for idx in label_map if 0 <= idx < len(img_files))
+        if not valid_indices:
+            issues["label_valid_all_zero"] += 1
         has_first = 0 in valid_indices
         empty_masks = 0
         size_mismatch = 0
+        fg_ratios = []
         for idx in valid_indices:
             mask = cv2.imread(str(label_dir / label_map[idx]), cv2.IMREAD_GRAYSCALE)
             if mask is None:
@@ -47,6 +50,22 @@ def _summarize_echonet(root: Path, split: str, size: int | None) -> dict:
                 size_mismatch += 1
             if int((mask > 0).sum()) == 0:
                 empty_masks += 1
+            fg_ratios.append(float((mask > 0).mean()))
+        source_frames = metadata.get("source_frames", [])
+        source_to_local = {int(src): local for local, src in enumerate(source_frames)} if source_frames else {}
+        ed_es_success = 0
+        frame_source_success = 0
+        unmapped_labels = 0
+        for name in label_files:
+            parsed = parse_frame_index(name, metadata)
+            if parsed is None:
+                unmapped_labels += 1
+                continue
+            upper_name = Path(name).stem.upper()
+            if upper_name in {"ED", "ES"} and parsed in source_to_local:
+                ed_es_success += 1
+            if parsed in source_to_local and parse_frame_index(name, None) == parsed:
+                frame_source_success += 1
         rows.append(
             {
                 "sample": img_dir.name,
@@ -56,6 +75,12 @@ def _summarize_echonet(root: Path, split: str, size: int | None) -> dict:
                 "has_first_frame_gt": has_first,
                 "empty_masks": empty_masks,
                 "size_mismatch": size_mismatch,
+                "fg_ratios": fg_ratios,
+                "source_frames_len": len(source_frames),
+                "source_frames_match_frames": len(source_frames) in {0, len(img_files)},
+                "ed_es_mapping_success": ed_es_success,
+                "frame_source_mapping_success": frame_source_success,
+                "unmapped_labels": unmapped_labels,
                 "metadata_protocol": metadata.get("protocol_name", ""),
             }
         )
@@ -76,6 +101,7 @@ def _summarize_camus(root: Path, split: str, size: int | None) -> dict:
         valid_indices = []
         empty_masks = 0
         size_mismatch = 0
+        fg_ratios = []
         for i, name in enumerate(label_files):
             if i >= len(img_files):
                 break
@@ -88,6 +114,9 @@ def _summarize_camus(root: Path, split: str, size: int | None) -> dict:
                 size_mismatch += 1
             if int((mask > 0).sum()) == 0:
                 empty_masks += 1
+            fg_ratios.append(float((mask > 0).mean()))
+        if not valid_indices:
+            issues["label_valid_all_zero"] += 1
         rows.append(
             {
                 "sample": img_dir.name,
@@ -97,6 +126,7 @@ def _summarize_camus(root: Path, split: str, size: int | None) -> dict:
                 "has_first_frame_gt": 0 in valid_indices,
                 "empty_masks": empty_masks,
                 "size_mismatch": size_mismatch,
+                "fg_ratios": fg_ratios,
             }
         )
     return {"rows": rows, "issues": issues}
@@ -109,17 +139,34 @@ def _print_split(dataset: str, split: str, summary: dict, *, max_samples: int) -
     first_gt = sum(1 for row in rows if row["has_first_frame_gt"])
     empty = sum(row["empty_masks"] for row in rows)
     mismatch = sum(row["size_mismatch"] for row in rows)
+    all_fg = [ratio for row in rows for ratio in row.get("fg_ratios", [])]
     print(f"\n[{dataset}:{split}] samples={len(rows)}")
     print(f"  frame_count_distribution={dict(sorted(frame_counts.items()))}")
     print(f"  label_valid_distribution={dict(sorted(label_counts.items()))}")
     print(f"  samples_with_first_frame_gt={first_gt}/{len(rows)}")
     print(f"  empty_masks={empty} size_mismatch={mismatch} issues={dict(summary['issues'])}")
+    if all_fg:
+        print(
+            "  mask_foreground_ratio="
+            f"min={min(all_fg):.4f} mean={float(np.mean(all_fg)):.4f} "
+            f"max={max(all_fg):.4f}"
+        )
     if dataset == "echonet":
         sparse_like = sum(1 for row in rows if len(row["valid_label_indices"]) <= 2)
         print(f"  echonet_sparse_ed_es_like={sparse_like}/{len(rows)}")
+        source_mismatch = sum(1 for row in rows if not row.get("source_frames_match_frames", True))
+        ed_es_success = sum(row.get("ed_es_mapping_success", 0) for row in rows)
+        frame_source_success = sum(row.get("frame_source_mapping_success", 0) for row in rows)
+        unmapped = sum(row.get("unmapped_labels", 0) for row in rows)
+        source_lens = Counter(row.get("source_frames_len", 0) for row in rows)
+        print(f"  source_frames_len_distribution={dict(sorted(source_lens.items()))}")
+        print(f"  source_frames_len_mismatch={source_mismatch}")
+        print(f"  ed_es_mapping_success={ed_es_success} frame_source_mapping_success={frame_source_success} unmapped_labels={unmapped}")
     if dataset == "camus":
         dense_like = sum(1 for row in rows if len(row["valid_label_indices"]) == row["frames"])
         print(f"  camus_dense_like={dense_like}/{len(rows)}")
+    if summary["issues"].get("label_valid_all_zero", 0) > 0:
+        raise SystemExit(f"{dataset}:{split} contains samples with label_valid all zero")
     for row in rows[:max_samples]:
         print(f"  sample={row['sample']} labels={row['valid_label_indices']} first_gt={row['has_first_frame_gt']}")
 

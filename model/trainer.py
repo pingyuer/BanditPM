@@ -149,6 +149,10 @@ class Trainer:
 
         self._init_metrics()
         self.commit_hash = self._resolve_commit_hash()
+        self.best_val_threshold = float(
+            self.cfg.get("evaluation", {}).get("default_threshold", 0.5)
+        )
+        self._best_val_threshold_ready = False
 
     @property
     def model_without_ddp(self) -> nn.Module:
@@ -349,6 +353,13 @@ class Trainer:
             "assd_resized": metrics.get("assd_resized", 0.0),
             "assd_original": metrics.get("assd_original", 0.0),
             "temporal_drift": metrics.get("temporal_drift", 0.0),
+            "threshold_0p5_dice_frame_mean": metrics.get("threshold_0p5_dice_frame_mean", metrics.get("dice_frame_mean", 0.0)),
+            "best_val_threshold": metrics.get("best_val_threshold", getattr(self, "best_val_threshold", 0.5)),
+            "best_threshold_dice_frame_mean": metrics.get("best_threshold_dice_frame_mean", metrics.get("dice_frame_mean", 0.0)),
+            "teacher_forcing_prob": metrics.get("teacher_forcing_prob", 0.0),
+            "gate_mean": metrics.get("gate_mean", 0.0),
+            "residual_abs_mean": metrics.get("residual_abs_mean", 0.0),
+            "memory_update_rate": metrics.get("memory_update_rate", 0.0),
             "best_ckpt_rule": str(self.cfg.get("evaluation", {}).get("best_ckpt_rule", "max_eval_dice_observed_no_reload")),
             "seed": int(self.cfg.get("seed", 42)),
             "commit_hash": self.commit_hash,
@@ -576,8 +587,24 @@ class Trainer:
             action_count_tensors = []
             valid_q_tensors = []
             invalid_target_tensors = []
+            gate_tensors = []
+            residual_abs_tensors = []
+            base_abs_tensors = []
+            memory_update_tensors = []
+            rejected_update_tensors = []
             for key in memory_keys:
                 aux = data[key]
+                if isinstance(aux, dict):
+                    if torch.is_tensor(aux.get("gate_mean")):
+                        gate_tensors.append(aux["gate_mean"].float().detach().flatten())
+                    if torch.is_tensor(aux.get("residual_abs_mean")):
+                        residual_abs_tensors.append(aux["residual_abs_mean"].float().detach().flatten())
+                    if torch.is_tensor(aux.get("base_logits_abs_mean")):
+                        base_abs_tensors.append(aux["base_logits_abs_mean"].float().detach().flatten())
+                    if torch.is_tensor(aux.get("mask_memory_update_rate")):
+                        memory_update_tensors.append(aux["mask_memory_update_rate"].float().detach().flatten())
+                    if torch.is_tensor(aux.get("rejected_update_count")):
+                        rejected_update_tensors.append(aux["rejected_update_count"].float().detach().flatten())
                 dynakey_aux = aux.get("dynakey_aux") if isinstance(aux, dict) else None
                 if not dynakey_aux:
                     continue
@@ -648,6 +675,26 @@ class Trainer:
                 value = torch.cat(invalid_target_tensors).sum().item()
                 self.log.log_scalar("dynakey/invalid_q_targets", value, it)
                 wandb_payload["dynakey/invalid_q_targets"] = value
+            if gate_tensors:
+                value = torch.cat(gate_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/gate_mean", value, it)
+                wandb_payload["unext_dynakey/gate_mean"] = value
+            if residual_abs_tensors:
+                value = torch.cat(residual_abs_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/residual_abs_mean", value, it)
+                wandb_payload["unext_dynakey/residual_abs_mean"] = value
+            if base_abs_tensors:
+                value = torch.cat(base_abs_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/base_logits_abs_mean", value, it)
+                wandb_payload["unext_dynakey/base_logits_abs_mean"] = value
+            if memory_update_tensors:
+                value = torch.cat(memory_update_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/memory_update_rate", value, it)
+                wandb_payload["unext_dynakey/memory_update_rate"] = value
+            if rejected_update_tensors:
+                value = torch.cat(rejected_update_tensors).sum().item()
+                self.log.log_scalar("unext_dynakey/rejected_update_count", value, it)
+                wandb_payload["unext_dynakey/rejected_update_count"] = value
             if wandb_payload:
                 wandb.log(wandb_payload, step=it)
         except Exception:
@@ -664,6 +711,24 @@ class Trainer:
     def _reset_metrics(self):
         self.conf_metric.reset()
 
+    def _threshold_candidates(self) -> list[float]:
+        eval_cfg = self.cfg.get("evaluation", {})
+        start = float(eval_cfg.get("threshold_search_start", 0.30))
+        end = float(eval_cfg.get("threshold_search_end", 0.70))
+        step = float(eval_cfg.get("threshold_search_step", 0.05))
+        if step <= 0:
+            return [0.5]
+        values = []
+        current = start
+        while current <= end + 1.0e-8:
+            values.append(round(current, 2))
+            current += step
+        return values or [0.5]
+
+    @staticmethod
+    def _threshold_key(threshold: float) -> str:
+        return f"thr_{threshold:.2f}".replace(".", "p")
+
     def _run_evaluation(self, data_loader, mode, epoch, run_path, it):
         if self.is_distributed:
             dist.barrier()
@@ -676,6 +741,14 @@ class Trainer:
         prev_mode = self.model.training
         self.model.eval()
         self._reset_metrics()
+        threshold_candidates = self._threshold_candidates()
+        active_threshold = 0.5
+        if mode == "test":
+            if not self._best_val_threshold_ready and self.main_process:
+                self.log.warning("[Test] best_val_threshold is not available; using 0.5.")
+            active_threshold = float(self.best_val_threshold)
+        elif mode not in {"val", "validation"}:
+            active_threshold = float(self.best_val_threshold if self._best_val_threshold_ready else 0.5)
 
         if isinstance(data_loader.sampler, DistributedSampler):
             data_loader.sampler.set_epoch(epoch)
@@ -743,7 +816,16 @@ class Trainer:
                         "conf_count": 0.0,
                         "temporal_drift_sum": 0.0,
                         "temporal_drift_count": 0.0,
+                        "gate_mean_sum": 0.0,
+                        "residual_abs_mean_sum": 0.0,
+                        "memory_update_rate_sum": 0.0,
+                        "teacher_forcing_prob_sum": 0.0,
+                        "aux_count": 0.0,
                     }
+                    for thr in threshold_candidates:
+                        key = self._threshold_key(thr)
+                        metric_totals[f"{key}_dice_sum"] = 0.0
+                        metric_totals[f"{key}_dice_count"] = 0.0
 
                 conf_pred_frames = []
                 conf_gt_frames = []
@@ -758,7 +840,13 @@ class Trainer:
                         pred = out[f"masks_{ti}"][bi:bi + 1]
                         if pred.shape[1] > 1:
                             pred = pred[:, 1:2, ...]
-                        pred_bin = (pred > 0.5).float()
+                        for thr in threshold_candidates:
+                            thr_bin = (pred > thr).float()
+                            thr_dice, _ = self._binary_overlap_metrics(thr_bin, gt[bi, ti, ...].unsqueeze(0).unsqueeze(0).float())
+                            key = self._threshold_key(thr)
+                            metric_totals[f"{key}_dice_sum"] += thr_dice
+                            metric_totals[f"{key}_dice_count"] += 1.0
+                        pred_bin = (pred > active_threshold).float()
                         gt_frame = gt[bi, ti, ...].unsqueeze(0).unsqueeze(0).float()
 
                         dice_t, iou_t = self._binary_overlap_metrics(pred_bin, gt_frame)
@@ -830,6 +918,26 @@ class Trainer:
                         pass
                     self.conf_metric.reset()
 
+                aux_frames = out.get("aux", []) if isinstance(out, dict) else []
+                if aux_frames:
+                    for aux_t in aux_frames:
+                        if not isinstance(aux_t, dict):
+                            continue
+                        memory_aux = aux_t.get("memory_aux", {}) if isinstance(aux_t.get("memory_aux", {}), dict) else {}
+                        for name in ("gate_mean", "residual_abs_mean", "memory_update_rate", "teacher_forcing_update_prob"):
+                            value = aux_t.get(name, memory_aux.get(name, None))
+                            if value is None:
+                                continue
+                            if torch.is_tensor(value):
+                                value = float(value.detach().float().mean().item())
+                            else:
+                                value = float(value)
+                            if name == "teacher_forcing_update_prob":
+                                metric_totals["teacher_forcing_prob_sum"] += value
+                            else:
+                                metric_totals[f"{name}_sum"] += value
+                        metric_totals["aux_count"] += 1.0
+
                 vis_limit = self.cfg.get("eval_stage", {}).get("num_vis", 0)
                 if vis_limit == 0:
                     vis_limit = self.cfg.get("num_vis", 0)
@@ -863,9 +971,38 @@ class Trainer:
                 "conf_count": 0.0,
                 "temporal_drift_sum": 0.0,
                 "temporal_drift_count": 0.0,
+                "gate_mean_sum": 0.0,
+                "residual_abs_mean_sum": 0.0,
+                "memory_update_rate_sum": 0.0,
+                "teacher_forcing_prob_sum": 0.0,
+                "aux_count": 0.0,
             }
+            for thr in threshold_candidates:
+                key = self._threshold_key(thr)
+                metric_totals[f"{key}_dice_sum"] = 0.0
+                metric_totals[f"{key}_dice_count"] = 0.0
 
         global_metrics = self._reduce_metric_totals(metric_totals)
+        threshold_metrics = {
+            thr: global_metrics.get(f"{self._threshold_key(thr)}_dice_frame_mean", 0.0)
+            for thr in threshold_candidates
+        }
+        if threshold_metrics:
+            best_thr, best_dice = max(threshold_metrics.items(), key=lambda item: item[1])
+            if mode in {"val", "validation"}:
+                self.best_val_threshold = float(best_thr)
+                self._best_val_threshold_ready = True
+                global_metrics["best_val_threshold"] = float(best_thr)
+                global_metrics["best_threshold_dice_frame_mean"] = float(best_dice)
+            else:
+                global_metrics["best_val_threshold"] = float(self.best_val_threshold)
+                chosen_key = self._threshold_key(float(self.best_val_threshold))
+                global_metrics["best_threshold_dice_frame_mean"] = global_metrics.get(
+                    f"{chosen_key}_dice_frame_mean", global_metrics.get("dice_frame_mean", 0.0)
+                )
+            global_metrics["threshold_0p5_dice_frame_mean"] = global_metrics.get(
+                f"{self._threshold_key(0.5)}_dice_frame_mean", global_metrics.get("dice_frame_mean", 0.0)
+            )
 
         if self.main_process:
             summary_row = self._build_summary_row(mode, global_metrics, epoch, it)
@@ -915,7 +1052,7 @@ class Trainer:
             return reduced[sum_key] / count if count > 0 else 0.0
 
         metric_space = str(self.cfg.get("evaluation", {}).get("metric_space", "original"))
-        return {
+        metrics = {
             "dice_frame_mean": mean("dice_frame_sum", "dice_frame_count"),
             "dice_video_mean": mean("dice_video_sum", "dice_video_count"),
             "iou_frame_mean": mean("iou_frame_sum", "iou_frame_count"),
@@ -934,7 +1071,16 @@ class Trainer:
             "iou": mean("iou_frame_sum", "iou_frame_count"),
             "hd95": mean("hd95_original_sum", "hd95_original_count") if metric_space == "original" else mean("hd95_resized_sum", "hd95_resized_count"),
             "assd": mean("assd_original_sum", "assd_original_count") if metric_space == "original" else mean("assd_resized_sum", "assd_resized_count"),
+            "gate_mean": mean("gate_mean_sum", "aux_count"),
+            "residual_abs_mean": mean("residual_abs_mean_sum", "aux_count"),
+            "memory_update_rate": mean("memory_update_rate_sum", "aux_count"),
+            "teacher_forcing_prob": mean("teacher_forcing_prob_sum", "aux_count"),
         }
+        for key in reduced:
+            if key.startswith("thr_") and key.endswith("_dice_sum"):
+                prefix = key[: -len("_dice_sum")]
+                metrics[f"{prefix}_dice_frame_mean"] = mean(key, f"{prefix}_dice_count")
+        return metrics
 
     def _log_final_metrics(self, metrics, mode, it, epoch):
         log_items = []

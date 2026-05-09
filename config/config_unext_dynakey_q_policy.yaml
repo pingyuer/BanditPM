@@ -1,0 +1,18 @@
+defaults:
+  - config_unext_dynakey
+  - _self_
+
+exp_id: "unext_dynakey_q_policy_v2_no_leak"
+model_name: "UNeXtDynaKeyQPolicy"
+
+wandb:
+  project: "BanditPM"
+  group: "unext_dynakey_ablation_v2_no_leak"
+  tags: ["unext", "dynakey", "q_policy", "exploratory", "v2_no_leak", "predinit"]
+
+model:
+  memory_core:
+    dynakey:
+      POLICY_MODE: "q_greedy"
+      FORCED_ACTION: null
+      ENABLE_Q_LOSS: true

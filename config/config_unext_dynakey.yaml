@@ -16,6 +16,10 @@ evaluation:
   exclude_init_frame: true
   init_frame_index: 0
   protocol_version: "v2_no_leak_unext_dynakey"
+  default_threshold: 0.5
+  threshold_search_start: 0.30
+  threshold_search_end: 0.70
+  threshold_search_step: 0.05
 
 wandb:
   project: "BanditPM"
@@ -38,7 +42,7 @@ model:
       HIDDEN_DIM: 128
       GATE_INIT: 1.0
       POLICY_MODE: "fixed_residual"
-      FORCED_ACTION: "spawn"
+      FORCED_ACTION: null
       RESIDUAL_SPAWN_THRESHOLD: 0.05
       SPLIT_EPS: 0.01
       SPLIT_SCALE_FACTOR: 0.7
@@ -51,16 +55,29 @@ model:
   unext_dynakey:
     in_channels: 1
     num_classes: 2
-    base_dim: 24
+    base_dim: 32
     value_dim: 128
     use_dynakey: true
     use_temporal_refine: true
     use_mask_memory: true
-    refine_alpha_init: 0.1
+    use_memory_readout: true
+    temporal_residual_init_scale: 0.1
+    temporal_gate_bias: -2.0
+    clamp_temporal_residual: true
+    temporal_residual_clip: 3.0
     mask_memory_slots: 4
     mask_memory_temperature: 0.1
     mask_memory_ema: 0.9
-    mask_memory_confidence_threshold: 0.0
+    mask_memory_confidence_threshold: 0.55
+    mask_memory_fg_ratio_min: 0.005
+    mask_memory_fg_ratio_max: 0.60
+    mask_memory_area_change_limit: null
+    teacher_forcing_update_memory:
+      enabled: true
+      start_prob: 0.5
+      end_prob: 0.0
+      warmup_iters: 300
+      apply_to: "memory_update_only"
     use_ode_aux_loss: false
 
 hydra:

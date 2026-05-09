@@ -16,6 +16,11 @@ model:
   temporal_memory:
     type: "none"
   unext_dynakey:
+    base_dim: 32
     use_dynakey: false
     use_temporal_refine: false
     use_mask_memory: false
+    use_memory_readout: false
+
+main_training:
+  point_supervision: false

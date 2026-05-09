@@ -38,6 +38,14 @@ class EchoDataset(Dataset):
         self.label_root = os.path.join(filepath, mode, 'label')
         
         self.samples = []
+        self.stats = {
+            'total_video_count': 0,
+            'accepted_video_count': 0,
+            'skipped_short_video_count': 0,
+            'skipped_no_label_count': 0,
+            'skipped_label_mapping_failed_count': 0,
+            'filtered_due_to_exact_length_old_rule_count': 0,
+        }
         
         if os.path.isdir(self.img_root) and os.path.isdir(self.label_root):
             subfolders = sorted(os.listdir(self.img_root))
@@ -47,18 +55,27 @@ class EchoDataset(Dataset):
                 label_folder = os.path.join(self.label_root, subfolder)
                 
                 if os.path.isdir(img_folder) and os.path.isdir(label_folder):
+                    self.stats['total_video_count'] += 1
                     img_files = sorted(os.listdir(img_folder))
                     label_files = sorted(os.listdir(label_folder))
 
-                    if len(img_files) == self.seq_length and 1 <= len(label_files) <= self.seq_length:
-                        self.samples.append({
-                            'subfolder': subfolder,
-                            'img_folder': img_folder,
-                            'label_folder': label_folder,
-                            'img_files': img_files,
-                            'label_files': label_files,
-                            'meta_path': os.path.join(filepath, mode, 'metadata', f'{subfolder}.json'),
-                        })
+                    if len(img_files) < self.seq_length:
+                        self.stats['skipped_short_video_count'] += 1
+                        continue
+                    if not label_files:
+                        self.stats['skipped_no_label_count'] += 1
+                        continue
+                    if len(img_files) != self.seq_length:
+                        self.stats['filtered_due_to_exact_length_old_rule_count'] += 1
+                    self.samples.append({
+                        'subfolder': subfolder,
+                        'img_folder': img_folder,
+                        'label_folder': label_folder,
+                        'img_files': img_files,
+                        'label_files': label_files,
+                        'meta_path': os.path.join(filepath, mode, 'metadata', f'{subfolder}.json'),
+                    })
+                    self.stats['accepted_video_count'] += 1
         
     def __len__(self):
         return len(self.samples)
@@ -79,9 +96,32 @@ class EchoDataset(Dataset):
         masks_np = np.zeros((self.seq_length, self.size, self.size), dtype=np.uint8)
 
         label_map = build_label_map(label_files, sample_meta, sample_name=sample['subfolder'], logger=LOGGER)
+        total_frames = len(img_files)
+        if total_frames == self.seq_length:
+            selected_indices = list(range(self.seq_length))
+        elif self.mode == 'train':
+            label_indices = [idx for idx in label_map if 0 <= idx < total_frames]
+            valid_starts = [
+                start
+                for start in range(0, total_frames - self.seq_length + 1)
+                if any(start <= label_idx < start + self.seq_length for label_idx in label_indices)
+            ]
+            if valid_starts:
+                start = int(valid_starts[int(torch.randint(0, len(valid_starts), (1,)).item())])
+            else:
+                start = int(torch.randint(0, total_frames - self.seq_length + 1, (1,)).item())
+            selected_indices = list(range(start, start + self.seq_length))
+        else:
+            selected_indices = np.linspace(0, total_frames - 1, self.seq_length).round().astype(int).tolist()
+        selected_to_local = {src_idx: local_idx for local_idx, src_idx in enumerate(selected_indices)}
+        local_label_map = {
+            selected_to_local[src_idx]: label_name
+            for src_idx, label_name in label_map.items()
+            if src_idx in selected_to_local
+        }
 
         for i in range(self.seq_length):
-            img_path = os.path.join(img_folder, img_files[i])
+            img_path = os.path.join(img_folder, img_files[selected_indices[i]])
             img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
             
             if img is not None:
@@ -90,8 +130,8 @@ class EchoDataset(Dataset):
                 imgs_np[i] = img
             
             mask_path = None
-            if i in label_map:
-                mask_path = os.path.join(label_folder, label_map[i])
+            if i in local_label_map:
+                mask_path = os.path.join(label_folder, local_label_map[i])
 
             if mask_path:
                 mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -115,7 +155,11 @@ class EchoDataset(Dataset):
         label_valid = torch.zeros(self.seq_length, dtype=torch.bool)
         eval_valid = torch.zeros(self.seq_length, dtype=torch.bool)
 
-        frame_indices = sample_meta.get('source_frames', list(range(self.seq_length)))
+        frame_indices_all = sample_meta.get('source_frames', list(range(total_frames)))
+        if len(frame_indices_all) >= total_frames:
+            frame_indices = [frame_indices_all[idx] for idx in selected_indices]
+        else:
+            frame_indices = selected_indices
         original_size = sample_meta.get('original_size', [self.size, self.size])
         protocol_name = sample_meta.get('protocol_name', _infer_protocol_name(self.filepath))
         original_sizes = torch.tensor([original_size] * self.seq_length, dtype=torch.long)
@@ -129,11 +173,13 @@ class EchoDataset(Dataset):
             cls_gt = masks_t.clone()
             if masks_t[0].max() > 0:
                 first_frame_gt[0, 0] = masks_t[0, 0]
-            for idx in label_map:
+            for idx in local_label_map:
                 if 0 <= idx < self.seq_length:
                     label_valid[idx] = True
                     eval_valid[idx] = True
-        info['valid_label_frames'] = [int(idx) for idx in sorted(label_map) if 0 <= idx < self.seq_length]
+        if not label_valid.any():
+            raise ValueError(f"EchoDataset sample {sample['subfolder']} has no labels after frame selection")
+        info['valid_label_frames'] = [int(idx) for idx in sorted(local_label_map) if 0 <= idx < self.seq_length]
         info['has_first_frame_gt'] = bool(masks_t[0].max() > 0)
 
         data = {

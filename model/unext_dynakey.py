@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Dict
+import math
+import warnings
 
 import torch
 import torch.nn as nn
@@ -33,12 +35,23 @@ class UNeXtDynaKeySegmenter(nn.Module):
         )
         self.use_dynakey = bool(model_cfg.get("use_dynakey", True))
         self.use_temporal_refine = bool(model_cfg.get("use_temporal_refine", True))
-        self.use_mask_memory = bool(model_cfg.get("use_mask_memory", self.use_dynakey))
+        self.use_mask_memory = bool(model_cfg.get("use_mask_memory", model_cfg.get("use_memory_readout", self.use_dynakey)))
         self.value_dim = int(model_cfg.get("value_dim", 256))
         self.num_classes = int(model_cfg.get("num_classes", 2))
         self.in_channels = int(model_cfg.get("in_channels", 1))
         base_dim = int(model_cfg.get("base_dim", 32))
-        self.refine_alpha = nn.Parameter(torch.tensor(float(model_cfg.get("refine_alpha_init", 0.1))))
+        residual_init = float(model_cfg.get("temporal_residual_init_scale", model_cfg.get("refine_alpha_init", 0.1)))
+        residual_init = min(max(residual_init, 1e-4), 1.0 - 1e-4)
+        self.temporal_residual_scale_logit = nn.Parameter(torch.tensor(math.log(residual_init / (1.0 - residual_init))))
+        self.clamp_temporal_residual = bool(model_cfg.get("clamp_temporal_residual", True))
+        self.temporal_residual_clip = float(model_cfg.get("temporal_residual_clip", 3.0))
+        self._warned_large_residual = False
+
+        tf_cfg = model_cfg.get("teacher_forcing_update_memory", {}) or {}
+        self.teacher_forcing_enabled = bool(tf_cfg.get("enabled", False))
+        self.teacher_forcing_start_prob = float(tf_cfg.get("start_prob", 0.5))
+        self.teacher_forcing_end_prob = float(tf_cfg.get("end_prob", 0.0))
+        self.teacher_forcing_warmup_iters = int(tf_cfg.get("warmup_iters", 300))
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -70,13 +83,18 @@ class UNeXtDynaKeySegmenter(nn.Module):
             nn.Conv2d(dec_dim, 1, kernel_size=1),
             nn.Sigmoid(),
         )
+        gate_bias = float(model_cfg.get("temporal_gate_bias", -2.0))
+        nn.init.constant_(self.temporal_gate_head[2].bias, gate_bias)
         self.mask_memory = MaskAwareMemoryReadout(
             self.value_dim,
             num_slots=int(model_cfg.get("mask_memory_slots", 4)),
             ema_momentum=float(model_cfg.get("mask_memory_ema", 0.9)),
             temperature=float(model_cfg.get("mask_memory_temperature", 0.1)),
             mask_size=int(model_cfg.get("mask_memory_size", 16)),
-            confidence_threshold=float(model_cfg.get("mask_memory_confidence_threshold", 0.0)),
+            confidence_threshold=float(model_cfg.get("mask_memory_confidence_threshold", 0.55)),
+            fg_ratio_min=float(model_cfg.get("mask_memory_fg_ratio_min", 0.005)),
+            fg_ratio_max=float(model_cfg.get("mask_memory_fg_ratio_max", 0.60)),
+            area_change_limit=model_cfg.get("mask_memory_area_change_limit", None),
         )
 
     def _normalize(self, image: torch.Tensor) -> torch.Tensor:
@@ -84,6 +102,14 @@ class UNeXtDynaKeySegmenter(nn.Module):
 
     def _object_value(self, value_BCHW: torch.Tensor, num_objects: int) -> torch.Tensor:
         return value_BCHW.unsqueeze(1).expand(-1, num_objects, -1, -1, -1).contiguous()
+
+    def _teacher_forcing_prob(self, data: Dict) -> float:
+        if not self.training or not self.teacher_forcing_enabled:
+            return 0.0
+        current_iter = int(data.get("current_iter", 0))
+        warmup = max(self.teacher_forcing_warmup_iters, 1)
+        ratio = min(max(current_iter / warmup, 0.0), 1.0)
+        return self.teacher_forcing_start_prob + ratio * (self.teacher_forcing_end_prob - self.teacher_forcing_start_prob)
 
     def _refine_object_logits(
         self,
@@ -93,11 +119,17 @@ class UNeXtDynaKeySegmenter(nn.Module):
         mask_BNHW: torch.Tensor,
         memory_readout_BNC11: torch.Tensor | None = None,
         mask_prior_BNHW: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict]:
         B, N = mask_BNHW.shape[:2]
         fg_base = base_logits_B2HW[:, 1:2].expand(-1, N, -1, -1)
         if not self.use_temporal_refine:
-            return fg_base
+            return fg_base, {
+                "gate_mean": torch.tensor(0.0, device=fg_base.device),
+                "gate_std": torch.tensor(0.0, device=fg_base.device),
+                "residual_abs_mean": torch.tensor(0.0, device=fg_base.device),
+                "base_logits_abs_mean": fg_base.detach().abs().mean(),
+                "temporal_residual_scale": torch.tensor(0.0, device=fg_base.device),
+            }
 
         target_hw = decoder_BCHW.shape[-2:]
         temporal = self.temporal_delta_proj(temporal_delta_BNCHW.flatten(0, 1))
@@ -124,8 +156,21 @@ class UNeXtDynaKeySegmenter(nn.Module):
         base_prob = torch.sigmoid(fg_base).flatten(0, 1).unsqueeze(1)
         refine_in = torch.cat([decoder, temporal, memory_map, soft_mask, base_prob, mask_prior], dim=1)
         residual = self.temporal_refine_head(refine_in).view(B, N, *decoder_BCHW.shape[-2:])
+        if self.clamp_temporal_residual:
+            residual = residual.clamp(min=-self.temporal_residual_clip, max=self.temporal_residual_clip)
         gate = self.temporal_gate_head(refine_in).view(B, N, *decoder_BCHW.shape[-2:])
-        return fg_base + self.refine_alpha.sigmoid() * gate * residual
+        scale = self.temporal_residual_scale_logit.sigmoid()
+        aux = {
+            "gate_mean": gate.detach().mean(),
+            "gate_std": gate.detach().std(),
+            "residual_abs_mean": residual.detach().abs().mean(),
+            "base_logits_abs_mean": fg_base.detach().abs().mean(),
+            "temporal_residual_scale": scale.detach(),
+        }
+        if bool(aux["residual_abs_mean"] > 2.0 * aux["base_logits_abs_mean"].clamp_min(1e-6)) and not self._warned_large_residual:
+            warnings.warn("UNeXt-DynaKey temporal residual magnitude is much larger than base logits.", RuntimeWarning)
+            self._warned_large_residual = True
+        return fg_base + scale * gate * residual, aux
 
     def _aggregate_logits(self, object_logits_BNHW: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         masks = torch.sigmoid(object_logits_BNHW)
@@ -155,6 +200,7 @@ class UNeXtDynaKeySegmenter(nn.Module):
             init_mask = torch.zeros_like(init_mask)
         last_masks = init_mask
         previous_value = None
+        teacher_forcing_prob = self._teacher_forcing_prob(data)
 
         for ti in range(T):
             frame = self._normalize(images_BTCHW[:, ti])
@@ -180,7 +226,7 @@ class UNeXtDynaKeySegmenter(nn.Module):
             if self.use_mask_memory:
                 memory_readout, mask_prior, mask_mem_aux = self.mask_memory.read(value_BNCHW, last_masks)
                 memory_aux.update(mask_mem_aux)
-            object_logits = self._refine_object_logits(
+            object_logits, refine_aux = self._refine_object_logits(
                 feat["logits"],
                 feat["decoder_feature"],
                 temporal_delta,
@@ -191,17 +237,38 @@ class UNeXtDynaKeySegmenter(nn.Module):
             logits, masks_all = self._aggregate_logits(object_logits)
             last_masks = masks_all[:, 1:].detach()
             if self.use_mask_memory:
-                self.mask_memory.update(value_BNCHW, last_masks)
+                update_masks = last_masks
+                if teacher_forcing_prob > 0.0 and "cls_gt" in data:
+                    gt_frame = data["cls_gt"][:, ti]
+                    if gt_frame.dim() == 4:
+                        gt_frame = gt_frame.squeeze(1)
+                    gt_mask = gt_frame.unsqueeze(1).float().expand_as(last_masks)
+                    label_valid = data.get("label_valid")
+                    valid = None
+                    if torch.is_tensor(label_valid) and label_valid.dim() >= 2:
+                        valid = label_valid[:, ti].view(-1, 1, 1, 1).to(last_masks.device)
+                    use_tf = torch.rand((), device=last_masks.device) < teacher_forcing_prob
+                    if valid is not None:
+                        update_masks = torch.where(use_tf & valid, gt_mask, last_masks)
+                    elif bool(use_tf):
+                        update_masks = gt_mask
+                update_aux = self.mask_memory.update(value_BNCHW, update_masks)
+                memory_aux.update(update_aux)
             previous_value = value_BNCHW.detach()
 
             out[f"logits_{ti}"] = logits
             out[f"masks_{ti}"] = masks_all[:, 1:]
-            out[f"aux_{ti}"] = {}
+            out[f"aux_{ti}"] = {
+                "base_foreground_logits": feat["logits"][:, 1:2].detach(),
+                "object_logits": object_logits.detach(),
+            }
             out[f"memory_aux_{ti}"] = memory_aux
+            memory_aux.update(refine_aux)
             memory_aux["temporal_refine_enabled"] = self.use_temporal_refine
             memory_aux["dynakey_enabled"] = self.use_dynakey
             memory_aux["oracle_gt_init_allowed"] = self.allow_oracle_init_when_requested
+            memory_aux["teacher_forcing_update_prob"] = torch.tensor(teacher_forcing_prob, device=images_BTCHW.device)
             if "dynakey_aux" in memory_aux:
                 memory_aux["dynakey_aux"]["temporal_delta_norm"] = temporal_delta.detach().pow(2).mean(dim=(2, 3, 4))
-                memory_aux["dynakey_aux"]["temporal_gate_alpha"] = self.refine_alpha.detach().sigmoid()
+                memory_aux["dynakey_aux"]["temporal_gate_alpha"] = self.temporal_residual_scale_logit.detach().sigmoid()
         return out

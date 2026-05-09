@@ -116,11 +116,25 @@ def build_label_map(
 ) -> dict[int, str]:
     logger = logger or LOGGER
     label_map: dict[int, str] = {}
+    source_frames = metadata.get("source_frames") if isinstance(metadata, Mapping) else None
+    source_to_local: dict[int, int] = {}
+    if isinstance(source_frames, (list, tuple)):
+        for local, src in enumerate(source_frames):
+            src_idx = _coerce_index(src)
+            if src_idx is not None:
+                source_to_local[src_idx] = local
     for label_name in label_files:
-        frame_idx = parse_frame_index(label_name, metadata)
-        if frame_idx is None:
+        parsed_idx = parse_frame_index(label_name, metadata)
+        if parsed_idx is None:
             logger.warning("Could not parse frame index from label '%s' in sample '%s'", label_name, sample_name)
             continue
+        stem = os.path.splitext(os.path.basename(label_name))[0].strip()
+        lowered = stem.lower()
+        should_map_source = stem.upper() in {"ED", "ES"} or re.match(r"^frame[_-]\d+$", lowered) is not None
+        if should_map_source and parsed_idx in source_to_local:
+            frame_idx = source_to_local[parsed_idx]
+        else:
+            frame_idx = parsed_idx
         if frame_idx in label_map:
             logger.warning(
                 "Duplicate label frame index %s in sample '%s': keeping '%s', ignoring '%s'",

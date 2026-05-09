@@ -19,3 +19,4 @@ model:
     use_dynakey: false
     use_temporal_refine: true
     use_mask_memory: false
+    use_memory_readout: false

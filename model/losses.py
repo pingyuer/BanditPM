@@ -81,7 +81,10 @@ class LossComputer(nn.Module):
     def mask_loss(
         self, logits: torch.Tensor, soft_gt: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert self.point_supervision
+        if not self.point_supervision:
+            loss_ce = ce_loss(logits, soft_gt)
+            loss_dice = dice_loss(logits.softmax(dim=1), soft_gt)
+            return loss_ce, loss_dice
 
         with torch.no_grad():
             point_coords = get_uncertain_point_coords_with_randomness(
