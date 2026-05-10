@@ -16,3 +16,6 @@ model:
       POLICY_MODE: "q_greedy"
       FORCED_ACTION: null
       ENABLE_Q_LOSS: true
+  unext_dynakey:
+    q_policy_mode: "diagnostic"
+    enable_q_loss: false

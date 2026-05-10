@@ -353,6 +353,9 @@ class Trainer:
             "assd_resized": metrics.get("assd_resized", 0.0),
             "assd_original": metrics.get("assd_original", 0.0),
             "temporal_drift": metrics.get("temporal_drift", 0.0),
+            "temporal_dice_consistency": metrics.get("temporal_dice_consistency", 0.0),
+            "area_smoothness": metrics.get("area_smoothness", 0.0),
+            "centroid_jitter": metrics.get("centroid_jitter", 0.0),
             "threshold_0p5_dice_frame_mean": metrics.get("threshold_0p5_dice_frame_mean", metrics.get("dice_frame_mean", 0.0)),
             "best_val_threshold": metrics.get("best_val_threshold", getattr(self, "best_val_threshold", 0.5)),
             "best_threshold_dice_frame_mean": metrics.get("best_threshold_dice_frame_mean", metrics.get("dice_frame_mean", 0.0)),
@@ -816,6 +819,12 @@ class Trainer:
                         "conf_count": 0.0,
                         "temporal_drift_sum": 0.0,
                         "temporal_drift_count": 0.0,
+                        "temporal_dice_consistency_sum": 0.0,
+                        "temporal_dice_consistency_count": 0.0,
+                        "area_smoothness_sum": 0.0,
+                        "area_smoothness_count": 0.0,
+                        "centroid_jitter_sum": 0.0,
+                        "centroid_jitter_count": 0.0,
                         "gate_mean_sum": 0.0,
                         "residual_abs_mean_sum": 0.0,
                         "memory_update_rate_sum": 0.0,
@@ -884,11 +893,20 @@ class Trainer:
                         key=lambda key: int(key.split("_")[-1]),
                     )
                     prev_pred = None
+                    area_values = []
+                    centroid_values = []
                     for key in all_mask_keys:
                         pred_any = out[key][bi:bi + 1]
                         if pred_any.shape[1] > 1:
                             pred_any = pred_any[:, 1:2, ...]
-                        pred_any = (pred_any > 0.5).float()
+                        pred_any = (pred_any > active_threshold).float()
+                        area_values.append(pred_any.mean().detach())
+                        mass = pred_any.sum(dim=(-2, -1)).clamp_min(1.0)
+                        yy = torch.linspace(0.0, 1.0, pred_any.shape[-2], device=pred_any.device).view(1, 1, -1, 1)
+                        xx = torch.linspace(0.0, 1.0, pred_any.shape[-1], device=pred_any.device).view(1, 1, 1, -1)
+                        cy = (pred_any * yy).sum(dim=(-2, -1)) / mass
+                        cx = (pred_any * xx).sum(dim=(-2, -1)) / mass
+                        centroid_values.append(torch.stack([cx.flatten()[0], cy.flatten()[0]]))
                         if prev_pred is not None:
                             _, iou_prev = self._binary_overlap_metrics(pred_any, prev_pred)
                             drift_values.append(1.0 - iou_prev)
@@ -901,8 +919,21 @@ class Trainer:
                         metric_totals["iou_video_sum"] += float(np.mean(sample_iou))
                         metric_totals["iou_video_count"] += 1.0
                     if drift_values:
-                        metric_totals["temporal_drift_sum"] += float(np.mean(drift_values))
+                        drift_mean = float(np.mean(drift_values))
+                        metric_totals["temporal_drift_sum"] += drift_mean
                         metric_totals["temporal_drift_count"] += 1.0
+                        metric_totals["temporal_dice_consistency_sum"] += 1.0 - drift_mean
+                        metric_totals["temporal_dice_consistency_count"] += 1.0
+                    if len(area_values) >= 3:
+                        area = torch.stack(area_values).float()
+                        smooth = (area[2:] - 2.0 * area[1:-1] + area[:-2]).abs().mean().item()
+                        metric_totals["area_smoothness_sum"] += float(smooth)
+                        metric_totals["area_smoothness_count"] += 1.0
+                    if len(centroid_values) >= 2:
+                        centroid = torch.stack(centroid_values).float()
+                        jitter = (centroid[1:] - centroid[:-1]).pow(2).sum(dim=-1).sqrt().mean().item()
+                        metric_totals["centroid_jitter_sum"] += float(jitter)
+                        metric_totals["centroid_jitter_count"] += 1.0
 
                 if conf_pred_frames:
                     preds_concat = torch.cat(conf_pred_frames, dim=0)
@@ -971,6 +1002,12 @@ class Trainer:
                 "conf_count": 0.0,
                 "temporal_drift_sum": 0.0,
                 "temporal_drift_count": 0.0,
+                "temporal_dice_consistency_sum": 0.0,
+                "temporal_dice_consistency_count": 0.0,
+                "area_smoothness_sum": 0.0,
+                "area_smoothness_count": 0.0,
+                "centroid_jitter_sum": 0.0,
+                "centroid_jitter_count": 0.0,
                 "gate_mean_sum": 0.0,
                 "residual_abs_mean_sum": 0.0,
                 "memory_update_rate_sum": 0.0,
@@ -1067,6 +1104,9 @@ class Trainer:
             "sp": mean("sp_sum", "conf_count"),
             "F1": mean("F1_sum", "conf_count"),
             "temporal_drift": mean("temporal_drift_sum", "temporal_drift_count"),
+            "temporal_dice_consistency": mean("temporal_dice_consistency_sum", "temporal_dice_consistency_count"),
+            "area_smoothness": mean("area_smoothness_sum", "area_smoothness_count"),
+            "centroid_jitter": mean("centroid_jitter_sum", "centroid_jitter_count"),
             "dice": mean("dice_frame_sum", "dice_frame_count"),
             "iou": mean("iou_frame_sum", "iou_frame_count"),
             "hd95": mean("hd95_original_sum", "hd95_original_count") if metric_space == "original" else mean("hd95_resized_sum", "hd95_resized_count"),

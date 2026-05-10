@@ -58,6 +58,13 @@ model:
     base_dim: 32
     value_dim: 128
     use_dynakey: true
+    dynakey_memory_mode: "global"   # global | spatial
+    use_phase_retrieval: false
+    readout_type: "global_broadcast" # global_broadcast | spatial_gate
+    dynamics_mode: "global"          # none | global | spatial
+    q_policy_mode: "off"             # off | diagnostic | training
+    enable_q_loss: false
+    return_debug_aux: true
     use_temporal_refine: true
     use_mask_memory: true
     use_memory_readout: true
@@ -72,6 +79,17 @@ model:
     mask_memory_fg_ratio_min: 0.005
     mask_memory_fg_ratio_max: 0.60
     mask_memory_area_change_limit: null
+    spatial_memory_slots: 4
+    spatial_memory_size: 16
+    spatial_memory_temperature: 0.1
+    spatial_memory_ema: 0.9
+    spatial_retrieval_weight: 1.0
+    phase_retrieval_weight: 1.0
+    spatial_memory_confidence_threshold: 0.55
+    spatial_memory_fg_ratio_min: 0.005
+    spatial_memory_fg_ratio_max: 0.60
+    spatial_dynamics_momentum: 0.8
+    lambda_q_ce: 1.0
     teacher_forcing_update_memory:
       enabled: true
       start_prob: 0.5

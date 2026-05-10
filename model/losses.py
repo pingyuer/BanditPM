@@ -50,6 +50,10 @@ class LossComputer(nn.Module):
         self.lambda_dynakey_q_ce = float(dynakey_cfg.get("LAMBDA_Q_CE", 1.0))
         self.lambda_dynakey_q_adv = float(dynakey_cfg.get("LAMBDA_Q_ADV", 0.0))
         self.dynakey_advantage_clamp = float(dynakey_cfg.get("ADVANTAGE_CLAMP", 5.0))
+        unext_dynakey_cfg = cfg.model.get("unext_dynakey", {})
+        self.spatial_q_policy_mode = str(unext_dynakey_cfg.get("q_policy_mode", "off")).lower()
+        self.enable_spatial_q_loss = bool(unext_dynakey_cfg.get("enable_q_loss", self.spatial_q_policy_mode == "training"))
+        self.lambda_spatial_q_ce = float(unext_dynakey_cfg.get("lambda_q_ce", 1.0))
 
     def _default_supervision_mask(
         self,
@@ -181,12 +185,15 @@ class LossComputer(nn.Module):
         dynakey_q_terms = self._compute_dynakey_q_loss(data)
         for k, v in dynakey_q_terms.items():
             losses[k] += v
+        spatial_q_terms = self._compute_spatial_q_loss(data)
+        for k, v in spatial_q_terms.items():
+            losses[k] += v
 
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
         for key, value in losses.items():
             if not (torch.is_tensor(value) or isinstance(value, (float, int))):
                 continue
-            if key.startswith("loss_") or key.startswith("aux_") or key == "dynakey_q_total" or key in {"rl_loss", "entropy_reg"}:
+            if key.startswith("loss_") or key.startswith("aux_") or key in {"dynakey_q_total", "spatial_q_total"} or key in {"rl_loss", "entropy_reg"}:
                 total_loss = total_loss + value
         losses['total_loss'] = total_loss
 
@@ -273,6 +280,49 @@ class LossComputer(nn.Module):
             out["dynakey_q_adv"] = adv_loss * self.lambda_dynakey_q_adv
             total = total + out["dynakey_q_adv"]
         out["dynakey_q_total"] = total
+        return out
+
+    def _compute_spatial_q_loss(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        if not self.enable_spatial_q_loss or self.spatial_q_policy_mode != "training":
+            return {}
+        q_values_list = []
+        labels_list = []
+        valid_list = []
+        for key in sorted(data.keys()):
+            if not key.startswith("memory_aux_"):
+                continue
+            memory_aux = data.get(key)
+            if not isinstance(memory_aux, dict):
+                continue
+            q_values = memory_aux.get("spatial_q_values")
+            target = memory_aux.get("spatial_q_target_action")
+            valid = memory_aux.get("spatial_q_valid")
+            if q_values is None or target is None:
+                continue
+            if not torch.is_tensor(q_values) or not q_values.requires_grad:
+                continue
+            q_values_list.append(q_values.flatten(0, 1))
+            labels_list.append(target.flatten().long().to(q_values.device))
+            if torch.is_tensor(valid):
+                valid_list.append(valid.flatten().bool().to(q_values.device))
+            else:
+                valid_list.append(torch.ones(target.numel(), device=q_values.device, dtype=torch.bool))
+        if not q_values_list:
+            return {}
+        q_values = torch.cat(q_values_list, dim=0)
+        labels = torch.cat(labels_list, dim=0).clamp(0, q_values.shape[-1] - 1)
+        valid = torch.cat(valid_list, dim=0)
+        zero = q_values.sum() * 0.0
+        out: Dict[str, torch.Tensor] = {
+            "spatial_q_valid_samples": valid.float().sum().detach(),
+        }
+        if not valid.any():
+            out["spatial_q_ce"] = zero
+            out["spatial_q_total"] = zero
+            return out
+        ce = F.cross_entropy(q_values[valid], labels[valid]) * self.lambda_spatial_q_ce
+        out["spatial_q_ce"] = ce
+        out["spatial_q_total"] = ce
         return out
 
     def _slice_aux_for_sample(

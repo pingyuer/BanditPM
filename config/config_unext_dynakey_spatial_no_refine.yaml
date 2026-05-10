@@ -1,0 +1,10 @@
+defaults:
+  - config_unext_dynakey_spatial
+  - _self_
+
+exp_id: "unext_dynakey_spatial_no_refine_v2_no_leak"
+model_name: "UNeXtDynaKeySpatialNoRefine"
+
+model:
+  unext_dynakey:
+    use_temporal_refine: false
