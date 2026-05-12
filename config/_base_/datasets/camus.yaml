@@ -1,0 +1,11 @@
+# @package _global_
+dataset_name: "camus"
+data_path: "${processed_root}/camus_png256_10f"
+
+data:
+  protocol_name: "camus_short_dense"
+
+evaluation:
+  init_mode: "pred_or_zero"
+  exclude_init_frame: true
+  protocol_version: "v3_canonical_no_leak"

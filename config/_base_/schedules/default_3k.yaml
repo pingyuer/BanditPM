@@ -1,0 +1,5 @@
+# @package _global_
+main_training:
+  num_iterations: 3000
+  val_interval: 200
+  save_interval: 200

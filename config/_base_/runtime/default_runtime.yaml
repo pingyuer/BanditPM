@@ -1,0 +1,8 @@
+# @package _global_
+output_root: "outputs/BanditPM"
+
+wandb:
+  project: "BanditPM"
+
+log_text_interval: 100
+log_image_interval: 500

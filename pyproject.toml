@@ -51,3 +51,11 @@ dev = [
 
 [tool.deptry.per_rule_ignores]
 DEP002 = ["numba", "tensorboard", "pydantic"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+    "ignore:Python 3.14 will, by default, filter extracted tar archives.*:DeprecationWarning",
+]

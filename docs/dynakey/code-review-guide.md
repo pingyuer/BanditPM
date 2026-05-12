@@ -81,7 +81,7 @@ Experiment scripts:
 
 Design document:
 
-- `docs/DYNAKEY_DESIGN.md`
+- `docs/dynakey-design.md`
   - Higher-level design and test plan.
 
 ## Runtime Data Flow
@@ -368,7 +368,7 @@ config/config_dynakey_baseline.yaml
 
 ## Suggested Review Order
 
-1. Read `docs/DYNAKEY_DESIGN.md` for intent.
+1. Read `docs/dynakey-design.md` for intent.
 2. Read `model/modules/memory_core.py` to understand integration.
 3. Read `model/modules/dynakey/dynakey_memory_core.py` for live data flow.
 4. Read `model/modules/dynakey/ode_key_dictionary.py` for state mutation correctness.

@@ -18,8 +18,7 @@ from omegaconf import OmegaConf, DictConfig
 import wandb
 from tqdm import tqdm
 
-from dataset.echo import EchoDataset
-from dataset.vos_dataset import TenCamusDataset
+from dataset.registry import resolve_dataset_class_from_cfg
 from model.trainer import Trainer
 from utils.logger import TensorboardLogger
 from utils.training_setup import (
@@ -52,24 +51,8 @@ def resolve_wandb_settings(cfg: DictConfig) -> dict:
 
 
 def resolve_dataset_class(cfg: DictConfig):
-    dataset_name = str(cfg.get("dataset_name", "")).lower().strip()
-    if not dataset_name:
-        data_path = os.path.expanduser(str(cfg.data_path)).lower()
-        if "cardiacuda" in data_path:
-            dataset_name = "cardiacuda"
-        elif "echonet" in data_path:
-            dataset_name = "echonet"
-        else:
-            dataset_name = "camus"
-
-    dataset_map = {
-        "camus": TenCamusDataset,
-        "echonet": EchoDataset,
-        "cardiacuda": EchoDataset,
-    }
-    if dataset_name not in dataset_map:
-        raise ValueError(f"Unsupported dataset_name={dataset_name!r}")
-    return dataset_name, dataset_map[dataset_name]
+    """Backward-compatible facade around the dataset registry."""
+    return resolve_dataset_class_from_cfg(cfg)
 
 
 @hydra.main(version_base="1.3.2", config_path="config", config_name="config_banditpm_baseline.yaml")

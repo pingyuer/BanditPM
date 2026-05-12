@@ -1,0 +1,12 @@
+# @package _global_
+model_name: "KPFF"
+
+model:
+  name: "kpff"
+  allow_oracle_init_when_requested: false
+  use_first_frame_gt_init: false
+  use_kpff: true
+  memory_core:
+    type: "none"
+  temporal_memory:
+    type: "none"

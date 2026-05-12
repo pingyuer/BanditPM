@@ -16,8 +16,7 @@ from omegaconf import DictConfig
 from utils.logger import TensorboardLogger
 from utils.log_integrator import Integrator
 from utils.time_estimator import TimeEstimator
-from model.gdkvm01 import GDKVM
-from model.unext_dynakey import UNeXtDynaKeySegmenter
+from model.registry import build_model
 from model.utils.parameter_groups import get_parameter_groups
 from model.losses import LossComputer
 from vis.vis_0730 import visualize_sequence
@@ -34,6 +33,11 @@ from monai.metrics import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def build_model_from_cfg(cfg: DictConfig, device: torch.device | str):
+    """Backward-compatible facade around the model registry."""
+    return build_model(cfg, device=device)
 
 
 def _contains_policy_head(name: str) -> bool:
@@ -75,23 +79,7 @@ class Trainer:
         self.world_size = dist.get_world_size() if self.is_distributed else 1
         self.main_process = self.rank == 0
 
-        model_name_key = str(cfg.model.get("name", "")).lower()
-        allow_oracle_init = bool(
-            cfg.model.get(
-                "allow_oracle_init_when_requested",
-                cfg.model.get("use_first_frame_gt_init", True),
-            )
-        )
-        if model_name_key in {"unext_dynakey", "dynakey_unext", "unextdynakey"}:
-            model = UNeXtDynaKeySegmenter(cfg.model).to(self.device)
-        else:
-            model = GDKVM(
-                use_first_frame_gt_init=allow_oracle_init,
-                prototype_value_cfg=cfg.model.get("prototype_value", None),
-                temporal_memory_cfg=cfg.model.get("temporal_memory", None),
-                memory_core_cfg=cfg.model.get("memory_core", None),
-                use_kpff=bool(cfg.model.get("use_kpff", True)),
-            ).to(self.device)
+        model = build_model_from_cfg(cfg, self.device)
         model = model.to(memory_format=torch.channels_last)
         self._apply_training_freeze(model)
         if self.is_distributed:

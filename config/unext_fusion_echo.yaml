@@ -1,0 +1,13 @@
+defaults:
+  - config_unext_dynakey_spatial_memory_primary
+  - _base_/datasets/echo
+  - _base_/models/unext_fusion
+  - _base_/runtime/default_runtime
+  - _base_/schedules/default_3k
+  - _self_
+
+exp_id: "unext_fusion_echo"
+
+wandb:
+  group: "canonical_unext_fusion"
+  tags: ["canonical", "unext_fusion", "echo", "no_leak"]

@@ -333,6 +333,7 @@ class SpatialDynaKeyTests(unittest.TestCase):
         )
         model = UNeXtDynaKeySegmenter(cfg.model)
         model.train()
+        model._warned_large_residual = True
         data = _batch(batch_size=2, frames=3)
         out = model(data)
         self.assertTrue(torch.isfinite(out["logits_2"]).all())

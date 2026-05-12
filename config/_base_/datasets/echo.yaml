@@ -1,0 +1,11 @@
+# @package _global_
+dataset_name: "echonet"
+data_path: "${processed_root}/echonet_png128_10f"
+
+data:
+  protocol_name: "echonet_ed2es_endpoint"
+
+evaluation:
+  init_mode: "pred_or_zero"
+  exclude_init_frame: true
+  protocol_version: "v3_canonical_no_leak"
