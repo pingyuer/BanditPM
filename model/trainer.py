@@ -595,6 +595,10 @@ class Trainer:
             base_abs_tensors = []
             memory_update_tensors = []
             rejected_update_tensors = []
+            mid_gate_tensors = []
+            mid_contrib_tensors = []
+            enhanced_diff_tensors = []
+            spatial_entropy_tensors = []
             for key in memory_keys:
                 aux = data[key]
                 if isinstance(aux, dict):
@@ -604,10 +608,20 @@ class Trainer:
                         residual_abs_tensors.append(aux["residual_abs_mean"].float().detach().flatten())
                     if torch.is_tensor(aux.get("base_logits_abs_mean")):
                         base_abs_tensors.append(aux["base_logits_abs_mean"].float().detach().flatten())
-                    if torch.is_tensor(aux.get("mask_memory_update_rate")):
-                        memory_update_tensors.append(aux["mask_memory_update_rate"].float().detach().flatten())
-                    if torch.is_tensor(aux.get("rejected_update_count")):
-                        rejected_update_tensors.append(aux["rejected_update_count"].float().detach().flatten())
+                    for update_key in ("mask_memory_update_rate", "spatial_memory_update_rate"):
+                        if torch.is_tensor(aux.get(update_key)):
+                            memory_update_tensors.append(aux[update_key].float().detach().flatten())
+                    for reject_key in ("rejected_update_count", "spatial_memory_rejected_count"):
+                        if torch.is_tensor(aux.get(reject_key)):
+                            rejected_update_tensors.append(aux[reject_key].float().detach().flatten())
+                    if torch.is_tensor(aux.get("mid_memory_gate_mean")):
+                        mid_gate_tensors.append(aux["mid_memory_gate_mean"].float().detach().flatten())
+                    if torch.is_tensor(aux.get("mid_memory_contribution_norm")):
+                        mid_contrib_tensors.append(aux["mid_memory_contribution_norm"].float().detach().flatten())
+                    if torch.is_tensor(aux.get("enhanced_feature_diff_norm")):
+                        enhanced_diff_tensors.append(aux["enhanced_feature_diff_norm"].float().detach().flatten())
+                    if torch.is_tensor(aux.get("spatial_memory_entropy")):
+                        spatial_entropy_tensors.append(aux["spatial_memory_entropy"].float().detach().flatten())
                 dynakey_aux = aux.get("dynakey_aux") if isinstance(aux, dict) else None
                 if not dynakey_aux:
                     continue
@@ -698,6 +712,22 @@ class Trainer:
                 value = torch.cat(rejected_update_tensors).sum().item()
                 self.log.log_scalar("unext_dynakey/rejected_update_count", value, it)
                 wandb_payload["unext_dynakey/rejected_update_count"] = value
+            if mid_gate_tensors:
+                value = torch.cat(mid_gate_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/mid_memory_gate_mean", value, it)
+                wandb_payload["unext_dynakey/mid_memory_gate_mean"] = value
+            if mid_contrib_tensors:
+                value = torch.cat(mid_contrib_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/mid_memory_contribution_norm", value, it)
+                wandb_payload["unext_dynakey/mid_memory_contribution_norm"] = value
+            if enhanced_diff_tensors:
+                value = torch.cat(enhanced_diff_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/enhanced_feature_diff_norm", value, it)
+                wandb_payload["unext_dynakey/enhanced_feature_diff_norm"] = value
+            if spatial_entropy_tensors:
+                value = torch.cat(spatial_entropy_tensors).mean().item()
+                self.log.log_scalar("unext_dynakey/spatial_memory_entropy", value, it)
+                wandb_payload["unext_dynakey/spatial_memory_entropy"] = value
             if wandb_payload:
                 wandb.log(wandb_payload, step=it)
         except Exception:

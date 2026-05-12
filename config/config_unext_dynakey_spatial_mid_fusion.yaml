@@ -1,0 +1,20 @@
+defaults:
+  - config_unext_dynakey_spatial
+  - _self_
+
+exp_id: "unext_dynakey_spatial_mid_fusion_v2_no_leak"
+model_name: "UNeXtDynaKeySpatialMidFusion"
+
+wandb:
+  project: "BanditPM"
+  group: "unext_dynakey_mid_fusion_ablation"
+  tags: ["unext", "dynakey", "spatial_memory", "mid_fusion", "v2_no_leak"]
+
+model:
+  unext_dynakey:
+    memory_fusion_level: "decoder"
+    prediction_mode: "memory_residual"
+    base_logits_weight: 0.5
+    use_temporal_refine: false
+    memory_only_head_enabled: false
+    lambda_memory_only: 0.0

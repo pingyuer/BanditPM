@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.point_features import calculate_uncertainty, point_sample, get_uncertain_point_coords_with_randomness
-from utils.tensor_utils import cls_to_one_hot
+from utils.tensor_utils import aggregate, cls_to_one_hot
 from utils.frame_validity import build_default_endpoint_mask, mask_to_frame_ids, normalize_frame_validity_mask
 
 @torch.jit.script
@@ -54,6 +54,8 @@ class LossComputer(nn.Module):
         self.spatial_q_policy_mode = str(unext_dynakey_cfg.get("q_policy_mode", "off")).lower()
         self.enable_spatial_q_loss = bool(unext_dynakey_cfg.get("enable_q_loss", self.spatial_q_policy_mode == "training"))
         self.lambda_spatial_q_ce = float(unext_dynakey_cfg.get("lambda_q_ce", 1.0))
+        self.enable_memory_only_loss = bool(unext_dynakey_cfg.get("memory_only_head_enabled", False))
+        self.lambda_memory_only = float(unext_dynakey_cfg.get("lambda_memory_only", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -172,6 +174,20 @@ class LossComputer(nn.Module):
                     
                     losses[f'aux_query_ce_l{level_idx}'] += l_ce / batch_size * self.query_weight
                     losses[f'aux_query_dice_l{level_idx}'] += l_dice / batch_size * self.query_weight
+
+            if self.enable_memory_only_loss and self.lambda_memory_only > 0:
+                memory_logits_frames = []
+                for a in aux_list:
+                    mem_logits = a.get("memory_only_logits") if isinstance(a, dict) else None
+                    if torch.is_tensor(mem_logits):
+                        memory_logits_frames.append(mem_logits[bi, :curr_num_obj])
+                if len(memory_logits_frames) == len(t_range):
+                    memory_obj = torch.stack(memory_logits_frames, dim=0)
+                    memory_masks = torch.sigmoid(memory_obj)
+                    memory_logits = aggregate(memory_masks, dim=1)
+                    l_ce, l_dice = self.frame_mask_loss(memory_logits, soft_gt)
+                    losses["aux_memory_only_ce"] += l_ce.mean() / batch_size * self.lambda_memory_only
+                    losses["aux_memory_only_dice"] += l_dice.mean() / batch_size * self.lambda_memory_only
 
             bpm_aux_list = [self._slice_aux_for_sample(data.get(f'bpm_aux_{ti}'), bi, batch_size) for ti in t_range]
             rl_terms = self._compute_policy_and_rl_losses(

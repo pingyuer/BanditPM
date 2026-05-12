@@ -10,6 +10,8 @@ import torch.nn.functional as F
 @dataclass
 class SpatialReadout:
     feature: torch.Tensor
+    delta: torch.Tensor
+    gate: torch.Tensor
     mask_prior: torch.Tensor
     weights: torch.Tensor
     phase: torch.Tensor
@@ -35,6 +37,8 @@ class SpatialDynaKeyMemory(nn.Module):
         temperature: float = 0.1,
         phase_weight: float = 1.0,
         spatial_weight: float = 1.0,
+        shape_weight: float = 1.0,
+        readout_scale: float = 0.1,
         confidence_threshold: float = 0.55,
         fg_ratio_min: float = 0.005,
         fg_ratio_max: float = 0.60,
@@ -49,6 +53,8 @@ class SpatialDynaKeyMemory(nn.Module):
         self.temperature = float(temperature)
         self.phase_weight = float(phase_weight)
         self.spatial_weight = float(spatial_weight)
+        self.shape_weight = float(shape_weight)
+        self.readout_scale = float(readout_scale)
         self.confidence_threshold = float(confidence_threshold)
         self.fg_ratio_min = float(fg_ratio_min)
         self.fg_ratio_max = float(fg_ratio_max)
@@ -101,14 +107,32 @@ class SpatialDynaKeyMemory(nn.Module):
         norm_time = torch.full_like(area, float(frame_index) / float(denom))
         return torch.stack([area, area_delta, norm_time, confidence], dim=-1)
 
-    def _spatial_query(self, value_BNCHW: torch.Tensor, prob_BNHW: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        B, N, C, _, _ = value_BNCHW.shape
+    def _resize_object_feature(self, feature_BCHW: torch.Tensor, num_objects: int) -> torch.Tensor:
         value = F.interpolate(
-            value_BNCHW.flatten(0, 1),
+            feature_BCHW,
             size=(self.spatial_size, self.spatial_size),
             mode="bilinear",
             align_corners=False,
-        ).view(B, N, C, self.spatial_size, self.spatial_size)
+        )
+        return value.unsqueeze(1).expand(-1, num_objects, -1, -1, -1).contiguous()
+
+    def _spatial_query(
+        self,
+        value_BNCHW: torch.Tensor,
+        prob_BNHW: torch.Tensor,
+        *,
+        key_BCHW: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, N, C, _, _ = value_BNCHW.shape
+        if key_BCHW is None:
+            value = F.interpolate(
+                value_BNCHW.flatten(0, 1),
+                size=(self.spatial_size, self.spatial_size),
+                mode="bilinear",
+                align_corners=False,
+            ).view(B, N, C, self.spatial_size, self.spatial_size)
+        else:
+            value = self._resize_object_feature(key_BCHW, N)
         mask = F.interpolate(
             prob_BNHW.flatten(0, 1).unsqueeze(1).float(),
             size=(self.spatial_size, self.spatial_size),
@@ -134,12 +158,19 @@ class SpatialDynaKeyMemory(nn.Module):
         value_BNCHW: torch.Tensor,
         prob_BNHW: torch.Tensor,
         *,
+        key_BCHW: torch.Tensor | None = None,
+        pixfeat_BCHW: torch.Tensor | None = None,
         frame_index: int = 0,
         total_frames: int = 1,
         use_phase: bool = True,
+        use_spatial_readout: bool = True,
     ) -> SpatialReadout:
         self._ensure_state(value_BNCHW)
-        query_spatial, query_global, _ = self._spatial_query(value_BNCHW.detach(), prob_BNHW.detach())
+        query_spatial, query_global, query_mask = self._spatial_query(
+            value_BNCHW.detach(),
+            prob_BNHW.detach(),
+            key_BCHW=key_BCHW.detach() if key_BCHW is not None else None,
+        )
         phase = self._phase_descriptor(prob_BNHW, frame_index=frame_index, total_frames=total_frames).to(value_BNCHW.dtype)
 
         qg = F.normalize(query_global, dim=-1)
@@ -150,40 +181,68 @@ class SpatialDynaKeyMemory(nn.Module):
         ss = F.normalize(self._spatial.flatten(3), dim=-1)
         spatial_sim = (qs.unsqueeze(2) * ss).sum(dim=-1)
 
+        shape_dist = (query_mask.unsqueeze(2) - self._mask_proto).abs().mean(dim=(-2, -1))
         phase_dist = (phase.unsqueeze(2) - self._phase).abs().mean(dim=-1)
-        logits = (feature_sim + self.spatial_weight * spatial_sim) / max(self.temperature, 1.0e-6)
+        logits = (feature_sim + self.spatial_weight * spatial_sim - self.shape_weight * shape_dist) / max(self.temperature, 1.0e-6)
         if use_phase:
             logits = logits - self.phase_weight * phase_dist
         logits = logits.masked_fill(~self._valid, -1.0e4)
         weights = torch.softmax(logits, dim=-1)
-        weights = torch.where(self._valid.any(dim=-1, keepdim=True), weights, torch.zeros_like(weights))
+        has_valid = self._valid.any(dim=-1, keepdim=True)
+        weights = torch.where(has_valid, weights, torch.zeros_like(weights))
 
-        spatial = (weights[..., None, None, None] * (self._spatial + self._velocity)).sum(dim=2)
+        current_spatial = self._resize_object_feature(pixfeat_BCHW.detach(), value_BNCHW.shape[1]) if pixfeat_BCHW is not None else query_spatial
+        memory_spatial = (weights[..., None, None, None] * (self._spatial + self._velocity)).sum(dim=2)
+        memory_spatial = torch.where(has_valid.unsqueeze(-1).unsqueeze(-1), memory_spatial, current_spatial)
         mask_prior = (weights[..., None, None] * self._mask_proto).sum(dim=2)
+        spatial_delta = memory_spatial - current_spatial
+        gate_logits = mask_prior.unsqueeze(2) - spatial_delta.detach().abs().mean(dim=2, keepdim=True)
+        spatial_gate = torch.sigmoid(gate_logits)
+        if use_spatial_readout:
+            spatial = current_spatial + self.readout_scale * spatial_gate * spatial_delta
+        else:
+            spatial = current_spatial
+            spatial_delta = torch.zeros_like(spatial_delta)
+            spatial_gate = torch.zeros_like(spatial_gate)
+        top_slot = weights.argmax(dim=-1)
         aux = {
             "spatial_memory_valid_slots": self._valid.sum(dim=-1).detach(),
             "spatial_memory_weights": weights.detach(),
             "spatial_memory_entropy": (-(weights.clamp_min(1.0e-8).log() * weights).sum(dim=-1)).detach(),
+            "spatial_memory_top_slot": top_slot.detach(),
             "phase_descriptor": phase.detach(),
             "phase_area": phase[..., 0].detach(),
             "phase_area_delta": phase[..., 1].detach(),
             "spatial_feature_similarity_mean": feature_sim.detach().mean(),
             "spatial_consistency_mean": spatial_sim.detach().mean(),
+            "shape_consistency_mean": (-shape_dist).detach().mean(),
+            "spatial_delta_norm": spatial_delta.detach().pow(2).mean(dim=(2, 3, 4)).sqrt(),
+            "spatial_delta_hw_std": spatial_delta.detach().mean(dim=2).flatten(-2).std(dim=-1),
+            "spatial_gate_mean": spatial_gate.detach().mean(),
+            "spatial_gate_std": spatial_gate.detach().std(),
+            "spatial_gate_max": spatial_gate.detach().max(),
+            "key_BCHW_used": torch.tensor(1.0 if key_BCHW is not None else 0.0, device=value_BNCHW.device),
+            "pixfeat_BCHW_used": torch.tensor(1.0 if pixfeat_BCHW is not None else 0.0, device=value_BNCHW.device),
         }
         aux.update(self._last_update_aux)
-        return SpatialReadout(feature=spatial, mask_prior=mask_prior, weights=weights, phase=phase, aux=aux)
+        return SpatialReadout(feature=spatial, delta=spatial_delta, gate=spatial_gate, mask_prior=mask_prior, weights=weights, phase=phase, aux=aux)
 
     def update(
         self,
         value_BNCHW: torch.Tensor,
         prob_BNHW: torch.Tensor,
         *,
+        key_BCHW: torch.Tensor | None = None,
         frame_index: int = 0,
         total_frames: int = 1,
     ) -> dict:
         self._ensure_state(value_BNCHW)
         with torch.no_grad():
-            spatial, pooled, mask_proto = self._spatial_query(value_BNCHW.detach(), prob_BNHW.detach())
+            spatial, pooled, mask_proto = self._spatial_query(
+                value_BNCHW.detach(),
+                prob_BNHW.detach(),
+                key_BCHW=key_BCHW.detach() if key_BCHW is not None else None,
+            )
             phase = self._phase_descriptor(prob_BNHW, frame_index=frame_index, total_frames=total_frames).to(value_BNCHW.dtype)
             confidence = phase[..., 3].float()
             fg_ratio = phase[..., 0].float()

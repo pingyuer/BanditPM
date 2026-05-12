@@ -1,0 +1,10 @@
+defaults:
+  - config_unext_dynakey_spatial_q_training
+  - _self_
+
+exp_id: "unext_dynakey_spatial_q_training_latent_v2_no_leak"
+model_name: "UNeXtDynaKeySpatialQTrainingLatent"
+
+model:
+  unext_dynakey:
+    q_reward_type: "latent"

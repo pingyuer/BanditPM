@@ -1,0 +1,10 @@
+defaults:
+  - config_unext_dynakey_spatial
+  - _self_
+
+exp_id: "unext_dynakey_spatial_broadcast_v2_no_leak"
+model_name: "UNeXtDynaKeySpatialBroadcast"
+
+model:
+  unext_dynakey:
+    readout_type: "global_broadcast"

@@ -61,8 +61,20 @@ model:
     dynakey_memory_mode: "global"   # global | spatial
     use_phase_retrieval: false
     readout_type: "global_broadcast" # global_broadcast | spatial_gate
+    memory_fusion_level: "late"       # late | decoder
+    prediction_mode: "base_residual"  # base_residual | memory_residual | memory_primary
+    base_logits_weight: 1.0
+    detach_base_logits: false
+    base_prob_dropout: 0.0
+    decoder_feature_dropout: 0.0
+    freeze_unext: false
+    memory_only_head_enabled: false
+    lambda_memory_only: 0.0
+    mid_memory_fusion_init_scale: 0.1
+    mid_memory_gate_bias: -2.0
     dynamics_mode: "global"          # none | global | spatial
     q_policy_mode: "off"             # off | diagnostic | training
+    q_reward_type: "segmentation_gain" # segmentation_gain | latent
     enable_q_loss: false
     return_debug_aux: true
     use_temporal_refine: true
@@ -84,7 +96,9 @@ model:
     spatial_memory_temperature: 0.1
     spatial_memory_ema: 0.9
     spatial_retrieval_weight: 1.0
+    shape_retrieval_weight: 1.0
     phase_retrieval_weight: 1.0
+    spatial_readout_scale: 0.1
     spatial_memory_confidence_threshold: 0.55
     spatial_memory_fg_ratio_min: 0.005
     spatial_memory_fg_ratio_max: 0.60

@@ -1,0 +1,10 @@
+defaults:
+  - config_unext_dynakey_spatial
+  - _self_
+
+exp_id: "unext_dynakey_spatial_no_dynamics_v2_no_leak"
+model_name: "UNeXtDynaKeySpatialNoDynamics"
+
+model:
+  unext_dynakey:
+    dynamics_mode: "none"
