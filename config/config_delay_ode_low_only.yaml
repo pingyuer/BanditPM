@@ -1,0 +1,10 @@
+defaults:
+  - config_delay_ode
+  - _self_
+
+exp_id: "delay_ode_low_only"
+model:
+  delay_ode:
+    delay_ode_use_low: true
+    delay_ode_use_mid: false
+    delay_ode_use_high: false

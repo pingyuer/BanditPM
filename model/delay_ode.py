@@ -29,7 +29,11 @@ def _masked_mean(feature: torch.Tensor, mask: torch.Tensor | None = None) -> tor
 
 
 def mask_geometry_stats(mask_BNHW: torch.Tensor, prev_stats: torch.Tensor | None = None) -> torch.Tensor:
-    """Return area, centroid, soft size, entropy, and simple velocities."""
+    """Return shape stats used by S_t, including simple temporal velocities.
+
+    Layout: area, cx, cy, width, height, entropy, area_v, cx_v, cy_v,
+    scale_v, entropy_v.
+    """
     B, N, H, W = mask_BNHW.shape
     mask = mask_BNHW.float().clamp(0.0, 1.0)
     area = mask.mean(dim=(-2, -1))
@@ -46,9 +50,20 @@ def mask_geometry_stats(mask_BNHW: torch.Tensor, prev_stats: torch.Tensor | None
     ).mean(dim=(-2, -1))
     base = torch.stack([area, cx, cy, width, height, entropy], dim=-1)
     if prev_stats is None:
-        velocity = torch.zeros(B, N, 3, device=mask.device, dtype=mask.dtype)
+        velocity = torch.zeros(B, N, 5, device=mask.device, dtype=mask.dtype)
     else:
-        velocity = base[..., :3] - prev_stats[..., :3]
+        scale = 0.5 * (width + height)
+        prev_scale = 0.5 * (prev_stats[..., 3] + prev_stats[..., 4])
+        velocity = torch.stack(
+            [
+                area - prev_stats[..., 0],
+                cx - prev_stats[..., 1],
+                cy - prev_stats[..., 2],
+                scale - prev_scale,
+                entropy - prev_stats[..., 5],
+            ],
+            dim=-1,
+        )
     return torch.cat([base, velocity], dim=-1)
 
 
@@ -63,11 +78,11 @@ class DelayODEBlock(nn.Module):
         nn.init.normal_(self.net[-1].weight, mean=0.0, std=1.0e-2)
         nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, z_BNDHW: torch.Tensor, condition_BND: torch.Tensor, dt: float) -> torch.Tensor:
+    def forward(self, z_BNDHW: torch.Tensor, condition_BND: torch.Tensor, dt: float, gamma: float) -> torch.Tensor:
         B, N, D, H, W = z_BNDHW.shape
         z = z_BNDHW.flatten(0, 1)
         cond = condition_BND.flatten(0, 1).view(B * N, D, 1, 1).expand(-1, -1, H, W)
-        dz = self.net(torch.cat([z, cond], dim=1)).view(B, N, D, H, W)
+        dz = float(gamma) * torch.tanh(self.net(torch.cat([z, cond], dim=1))).view(B, N, D, H, W)
         return z_BNDHW + float(dt) * dz
 
 
@@ -114,6 +129,10 @@ class DelayODEKeyMapSegmenter(nn.Module):
         self.temperature = float(_cfg_get(method_cfg, "delay_ode_temperature", 0.07))
         self.dt = float(_cfg_get(method_cfg, "delay_ode_dt", 1.0))
         self.steps = int(_cfg_get(method_cfg, "delay_ode_steps", 1))
+        self.gamma = float(_cfg_get(method_cfg, "delay_ode_gamma", 0.1))
+        self.keymap_ema = float(_cfg_get(method_cfg, "delay_ode_keymap_ema", 0.85))
+        self.first_frame_init = str(_cfg_get(method_cfg, "delay_ode_first_frame_init", "init_head")).lower()
+        self.allow_current_feature_for_current_mask = bool(_cfg_get(method_cfg, "delay_ode_allow_current_feature_for_current_mask", False))
         self.update_gate_max = float(_cfg_get(method_cfg, "delay_ode_update_gate_max", 0.5))
         self.supervise_first_frame = bool(_cfg_get(method_cfg, "delay_ode_supervise_first_frame", False))
         self.level_enabled = {
@@ -122,7 +141,13 @@ class DelayODEKeyMapSegmenter(nn.Module):
             "high": bool(_cfg_get(method_cfg, "delay_ode_use_high", True)),
         }
 
-        self.lambda_selection_entropy = float(_cfg_get(method_cfg, "delay_ode_lambda_selection_entropy", 0.001))
+        self.lambda_slot_balance = float(
+            _cfg_get(
+                method_cfg,
+                "delay_ode_lambda_slot_balance",
+                _cfg_get(method_cfg, "delay_ode_lambda_selection_entropy", 0.001),
+            )
+        )
         self.lambda_gate_smooth = float(_cfg_get(method_cfg, "delay_ode_lambda_gate_smooth", 0.01))
         self.lambda_latent_smooth = float(_cfg_get(method_cfg, "delay_ode_lambda_latent_smooth", 0.01))
         self.lambda_state_smooth = float(_cfg_get(method_cfg, "delay_ode_lambda_state_smooth", 0.01))
@@ -135,9 +160,13 @@ class DelayODEKeyMapSegmenter(nn.Module):
         )
         dims = {"low": base_dim, "mid": base_dim * 2, "high": base_dim * 4}
         self.feature_proj = nn.ModuleDict({level: nn.Conv2d(dims[level], self.value_dim, 1) for level in LEVELS})
+        self.init_head = nn.Sequential(
+            nn.Conv2d(self.value_dim, self.value_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(self.value_dim, 1, kernel_size=1),
+        )
         self.desc_proj = nn.ModuleDict({level: nn.Linear(self.value_dim + self.state_dim, self.key_dim + self.value_dim) for level in LEVELS})
         self.query_proj = nn.ModuleDict({level: nn.Linear(self.state_dim, self.key_dim) for level in LEVELS})
-        self.write_proj = nn.ModuleDict({level: nn.Linear(self.value_dim + self.state_dim + 9, self.num_slots + 1) for level in LEVELS})
         self.ode = nn.ModuleDict({level: DelayODEBlock(self.value_dim) for level in LEVELS})
         self.slot_key_embed = nn.ParameterDict({
             level: nn.Parameter(torch.randn(self.num_slots, self.key_dim) * 0.02) for level in LEVELS
@@ -145,12 +174,14 @@ class DelayODEKeyMapSegmenter(nn.Module):
         self.slot_value_embed = nn.ParameterDict({
             level: nn.Parameter(torch.randn(self.num_slots, self.value_dim) * 0.02) for level in LEVELS
         })
+        self.stats_dim = 11
+        self.write_proj = nn.ModuleDict({level: nn.Linear(self.value_dim + self.state_dim + self.stats_dim, self.num_slots + 1) for level in LEVELS})
         self.init_state = nn.Sequential(
-            nn.Linear(self.value_dim * 3 + 9, self.state_dim),
+            nn.Linear(self.value_dim * 3 + self.stats_dim, self.state_dim),
             nn.GELU(),
             nn.Linear(self.state_dim, self.state_dim),
         )
-        self.state_update = nn.GRUCell(self.value_dim * 3 + 9 + self.num_slots * 3, self.state_dim)
+        self.state_update = nn.GRUCell(self.value_dim * 3 + self.stats_dim + self.num_slots * 3, self.state_dim)
         self.decoder = DelayODEMaskDecoder(self.value_dim)
 
     def _normalize(self, image: torch.Tensor) -> torch.Tensor:
@@ -177,11 +208,25 @@ class DelayODEKeyMapSegmenter(nn.Module):
             desc[level] = pooled
         return desc
 
-    def _init_from_observation(self, feats: dict[str, torch.Tensor], num_objects: int, output_hw: tuple[int, int]):
+    def _initial_mask(self, feats: dict[str, torch.Tensor], data: Dict, num_objects: int, output_hw: tuple[int, int]) -> tuple[torch.Tensor, torch.Tensor]:
         B = next(iter(feats.values())).shape[0]
-        zero_mask = torch.zeros(B, num_objects, *output_hw, device=next(iter(feats.values())).device, dtype=next(iter(feats.values())).dtype)
-        stats = mask_geometry_stats(zero_mask, None)
-        desc = self._descriptors(feats, num_objects, None)
+        device = next(iter(feats.values())).device
+        dtype = next(iter(feats.values())).dtype
+        if self.first_frame_init == "zero":
+            logits = torch.zeros(B, num_objects, *output_hw, device=device, dtype=dtype)
+            return logits, torch.zeros_like(logits)
+        if self.first_frame_init == "oracle_upperbound" and torch.is_tensor(data.get("ff_gt")):
+            mask = data["ff_gt"][:, 0, :num_objects].to(device=device, dtype=dtype).clamp(0.0, 1.0)
+            logits = torch.logit(mask.clamp(1.0e-4, 1.0 - 1.0e-4))
+            return logits, mask
+        init_feature = F.interpolate(feats["low"], size=output_hw, mode="bilinear", align_corners=False)
+        logits = self.init_head(init_feature).expand(-1, num_objects, -1, -1).contiguous()
+        return logits, torch.sigmoid(logits)
+
+    def _init_from_observation(self, feats: dict[str, torch.Tensor], init_mask: torch.Tensor):
+        num_objects = init_mask.shape[1]
+        stats = mask_geometry_stats(init_mask.detach(), None)
+        desc = self._descriptors(feats, num_objects, init_mask.detach())
         state_in = torch.cat([desc["low"], desc["mid"], desc["high"], stats], dim=-1)
         state = self.init_state(state_in)
         latents = {level: self._expand_objects(feats[level], num_objects) for level in LEVELS}
@@ -214,9 +259,10 @@ class DelayODEKeyMapSegmenter(nn.Module):
         next_latents = {}
         for level in LEVELS:
             z = latents[level]
+            sub_dt = self.dt / float(max(self.steps, 1))
             for _ in range(max(self.steps, 1)):
                 if self.level_enabled[level]:
-                    z = self.ode[level](z, conditions[level], self.dt)
+                    z = self.ode[level](z, conditions[level], sub_dt, self.gamma)
             next_latents[level] = z
         return next_latents
 
@@ -248,7 +294,8 @@ class DelayODEKeyMapSegmenter(nn.Module):
             write_logits = write_raw[..., : self.num_slots]
             gate = torch.sigmoid(write_raw[..., self.num_slots:]) * self.update_gate_max
             write = torch.softmax(write_logits, dim=-1)
-            gate_write = gate * write
+            effective_gate = gate * (1.0 - self.keymap_ema)
+            gate_write = effective_gate * write
             if self.level_enabled[level]:
                 new_keys[level] = keys[level] * (1.0 - gate_write.unsqueeze(-1)) + cand_key.unsqueeze(2) * gate_write.unsqueeze(-1)
                 new_values[level] = values[level] * (1.0 - gate_write.unsqueeze(-1)) + cand_value.unsqueeze(2) * gate_write.unsqueeze(-1)
@@ -256,7 +303,32 @@ class DelayODEKeyMapSegmenter(nn.Module):
                 new_keys[level] = keys[level]
                 new_values[level] = values[level]
             gates[level] = gate
-        return state, new_keys, new_values, stats, gates
+        effective_gates = {level: gates[level] * (1.0 - self.keymap_ema) for level in LEVELS}
+        return state, new_keys, new_values, stats, gates, effective_gates
+
+    def _update_latents(
+        self,
+        latents: dict[str, torch.Tensor],
+        feats: dict[str, torch.Tensor],
+        pred_mask: torch.Tensor,
+        gates: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        updated = {}
+        for level in LEVELS:
+            obs = self._expand_objects(feats[level], pred_mask.shape[1])
+            if obs.shape[-2:] != latents[level].shape[-2:]:
+                obs = F.interpolate(
+                    obs.flatten(0, 1),
+                    size=latents[level].shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                ).view_as(latents[level])
+            gate = gates[level].view(gates[level].shape[0], gates[level].shape[1], 1, 1, 1)
+            if self.level_enabled[level]:
+                updated[level] = latents[level] * (1.0 - gate) + obs * gate
+            else:
+                updated[level] = latents[level]
+        return updated
 
     def _aggregate_object_logits(self, object_logits_BNHW: torch.Tensor):
         masks = torch.sigmoid(object_logits_BNHW)
@@ -268,16 +340,17 @@ class DelayODEKeyMapSegmenter(nn.Module):
             device = state_hist[0].device
             zero = torch.zeros((), device=device)
             return {
-                "selection_entropy": zero,
+                "slot_balance": zero,
                 "gate_smooth": zero,
                 "latent_smooth": zero,
                 "state_smooth": zero,
             }
-        entropy_terms = []
-        for item in weight_hist:
-            for level in LEVELS:
-                w = item[level]
-                entropy_terms.append(-(w.clamp_min(1.0e-8).log() * w).sum(dim=-1).mean())
+        balance_terms = []
+        for level in LEVELS:
+            usage = torch.stack([item[level] for item in weight_hist], dim=2).mean(dim=(0, 1, 2))
+            usage = usage / usage.sum().clamp_min(1.0e-8)
+            uniform = torch.full_like(usage, 1.0 / max(usage.numel(), 1))
+            balance_terms.append((usage.clamp_min(1.0e-8) * (usage.clamp_min(1.0e-8).log() - uniform.log())).sum())
         gate_terms = []
         if len(gate_hist) > 1:
             for a, b in zip(gate_hist[:-1], gate_hist[1:]):
@@ -289,9 +362,9 @@ class DelayODEKeyMapSegmenter(nn.Module):
                 for level in LEVELS:
                     latent_terms.append((a[level] - b[level]).pow(2).mean())
         state_terms = [(a - b).pow(2).mean() for a, b in zip(state_hist[:-1], state_hist[1:])]
-        zero = entropy_terms[0].sum() * 0.0
+        zero = balance_terms[0].sum() * 0.0
         return {
-            "selection_entropy": torch.stack(entropy_terms).mean() if entropy_terms else zero,
+            "slot_balance": torch.stack(balance_terms).mean() if balance_terms else zero,
             "gate_smooth": torch.stack(gate_terms).mean() if gate_terms else zero,
             "latent_smooth": torch.stack(latent_terms).mean() if latent_terms else zero,
             "state_smooth": torch.stack(state_terms).mean() if state_terms else zero,
@@ -306,19 +379,20 @@ class DelayODEKeyMapSegmenter(nn.Module):
         out: Dict = {"num_objects": num_objects}
 
         feats0 = self._features(images[:, 0])
-        state, latents, keys, values, prev_stats = self._init_from_observation(feats0, max_num_objects, output_hw)
+        init_object_logits, init_masks = self._initial_mask(feats0, data, max_num_objects, output_hw)
+        state, latents, keys, values, prev_stats = self._init_from_observation(feats0, init_masks)
 
-        zero_logits = torch.zeros(B, 2, *output_hw, device=images.device, dtype=images.dtype)
-        zero_masks = torch.zeros(B, max_num_objects, *output_hw, device=images.device, dtype=images.dtype)
-        out["logits_0"] = zero_logits
-        out["masks_0"] = zero_masks
-        out["aux_0"] = {"delay_ode_warmup_only": True}
+        init_logits, init_fg_masks = self._aggregate_object_logits(init_object_logits)
+        out["logits_0"] = init_logits
+        out["masks_0"] = init_fg_masks
+        out["aux_0"] = {"delay_ode_warmup_only": True, "init_object_logits": init_object_logits.detach()}
 
         weight_hist = []
         gate_hist = []
         state_hist = [state]
         latent_hist = [{level: latents[level] for level in LEVELS}]
         stats_hist = [prev_stats]
+        effective_gate_hist = []
 
         warmup_aux = {
             "method": "delay_ode",
@@ -330,6 +404,8 @@ class DelayODEKeyMapSegmenter(nn.Module):
                 "states": torch.stack(state_hist, dim=2).detach(),
                 "mask_stats": torch.stack(stats_hist, dim=2).detach(),
                 "latents": {level: latents[level].detach() for level in LEVELS},
+                "init_mode": self.first_frame_init,
+                "current_feature_used_for_current_mask": False,
             },
         }
         out["memory_aux_0"] = warmup_aux
@@ -348,7 +424,7 @@ class DelayODEKeyMapSegmenter(nn.Module):
             }
 
             feats_t = self._features(images[:, ti])
-            state, keys, values, prev_stats, gates = self._update_state_and_keymap(
+            state, keys, values, prev_stats, gates, effective_gates = self._update_state_and_keymap(
                 feats_t,
                 fg_masks,
                 state,
@@ -357,9 +433,10 @@ class DelayODEKeyMapSegmenter(nn.Module):
                 prev_stats,
                 weights,
             )
-            latents = next_latents
+            latents = self._update_latents(next_latents, feats_t, fg_masks, gates)
             weight_hist.append(weights)
             gate_hist.append(gates)
+            effective_gate_hist.append(effective_gates)
             state_hist.append(state)
             latent_hist.append({level: latents[level] for level in LEVELS})
             stats_hist.append(prev_stats)
@@ -367,19 +444,24 @@ class DelayODEKeyMapSegmenter(nn.Module):
             delay_aux = {
                 "keymap_weights": {level: torch.stack([w[level] for w in weight_hist], dim=2).detach() for level in LEVELS},
                 "update_gates": {level: torch.stack([g[level] for g in gate_hist], dim=2).detach() for level in LEVELS},
+                "effective_update_gates": {level: torch.stack([g[level] for g in effective_gate_hist], dim=2).detach() for level in LEVELS},
                 "states": torch.stack(state_hist, dim=2).detach(),
                 "mask_stats": torch.stack(stats_hist, dim=2).detach(),
                 "latents": {level: latents[level].detach() for level in LEVELS},
-                "selection_entropy": regs["selection_entropy"],
+                "slot_balance": regs["slot_balance"],
                 "gate_smooth": regs["gate_smooth"],
                 "latent_smooth": regs["latent_smooth"],
                 "state_smooth": regs["state_smooth"],
-                "lambda_selection_entropy": torch.tensor(self.lambda_selection_entropy, device=images.device),
+                "lambda_slot_balance": torch.tensor(self.lambda_slot_balance, device=images.device),
                 "lambda_gate_smooth": torch.tensor(self.lambda_gate_smooth, device=images.device),
                 "lambda_latent_smooth": torch.tensor(self.lambda_latent_smooth, device=images.device),
                 "lambda_state_smooth": torch.tensor(self.lambda_state_smooth, device=images.device),
                 "current_feature_used_for_current_mask": False,
-                "first_frame_mode": "warmup_only",
+                "first_frame_mode": self.first_frame_init,
+                "conditional_ode_keymap": True,
+                "ode_gamma": torch.tensor(self.gamma, device=images.device),
+                "ode_sub_dt": torch.tensor(self.dt / float(max(self.steps, 1)), device=images.device),
+                "keymap_ema": torch.tensor(self.keymap_ema, device=images.device),
             }
             out[f"memory_aux_{ti}"] = {
                 "method": "delay_ode",

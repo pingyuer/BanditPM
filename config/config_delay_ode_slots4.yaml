@@ -1,0 +1,8 @@
+defaults:
+  - config_delay_ode
+  - _self_
+
+exp_id: "delay_ode_slots4"
+model:
+  delay_ode:
+    delay_ode_num_slots: 4

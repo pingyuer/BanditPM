@@ -24,14 +24,17 @@ model:
     delay_ode_temperature: 0.07
     delay_ode_dt: 1.0
     delay_ode_steps: 1
+    delay_ode_gamma: 0.1
+    delay_ode_keymap_ema: 0.85
     delay_ode_update_gate_max: 0.5
+    delay_ode_first_frame_init: "init_head"
     delay_ode_first_frame_mode: "warmup_only"
     delay_ode_supervise_first_frame: false
     delay_ode_allow_current_feature_for_current_mask: false
     delay_ode_use_low: true
     delay_ode_use_mid: true
     delay_ode_use_high: true
-    delay_ode_lambda_selection_entropy: 0.001
+    delay_ode_lambda_slot_balance: 0.001
     delay_ode_lambda_gate_smooth: 0.01
     delay_ode_lambda_latent_smooth: 0.01
     delay_ode_lambda_state_smooth: 0.01

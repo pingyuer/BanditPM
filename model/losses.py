@@ -59,7 +59,12 @@ class LossComputer(nn.Module):
         delay_ode_cfg = cfg.model.get("delay_ode", {})
         self.is_delay_ode = str(cfg.model.get("name", "")).lower() == "delay_ode"
         self.delay_ode_supervise_first_frame = bool(delay_ode_cfg.get("delay_ode_supervise_first_frame", False))
-        self.lambda_delay_ode_selection_entropy = float(delay_ode_cfg.get("delay_ode_lambda_selection_entropy", 0.0))
+        self.lambda_delay_ode_slot_balance = float(
+            delay_ode_cfg.get(
+                "delay_ode_lambda_slot_balance",
+                delay_ode_cfg.get("delay_ode_lambda_selection_entropy", 0.0),
+            )
+        )
         self.lambda_delay_ode_gate_smooth = float(delay_ode_cfg.get("delay_ode_lambda_gate_smooth", 0.0))
         self.lambda_delay_ode_latent_smooth = float(delay_ode_cfg.get("delay_ode_lambda_latent_smooth", 0.0))
         self.lambda_delay_ode_state_smooth = float(delay_ode_cfg.get("delay_ode_lambda_state_smooth", 0.0))
@@ -248,7 +253,7 @@ class LossComputer(nn.Module):
         terms = {}
         total = None
         mapping = {
-            "selection_entropy": ("aux_delay_ode_selection_entropy", self.lambda_delay_ode_selection_entropy),
+            "slot_balance": ("aux_delay_ode_slot_balance", self.lambda_delay_ode_slot_balance),
             "gate_smooth": ("aux_delay_ode_gate_smooth", self.lambda_delay_ode_gate_smooth),
             "latent_smooth": ("aux_delay_ode_latent_smooth", self.lambda_delay_ode_latent_smooth),
             "state_smooth": ("aux_delay_ode_state_smooth", self.lambda_delay_ode_state_smooth),
