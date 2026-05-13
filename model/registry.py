@@ -4,6 +4,7 @@ import torch
 
 from utils.registry import Registry
 from model.gdkvm01 import GDKVM
+from model.delay_ode import DelayODEKeyMapSegmenter
 from model.unext_dynakey import UNeXtDynaKeySegmenter
 
 
@@ -54,6 +55,11 @@ def build_kpff(cfg, *, device: torch.device | str):
 @MODEL_REGISTRY.register("unextdynakey")
 def build_unext_fusion(cfg, *, device: torch.device | str):
     return UNeXtDynaKeySegmenter(_model_cfg(cfg)).to(device)
+
+
+@MODEL_REGISTRY.register("delay_ode")
+def build_delay_ode(cfg, *, device: torch.device | str):
+    return DelayODEKeyMapSegmenter(_model_cfg(cfg)).to(device)
 
 
 def build_model(cfg, *, device: torch.device | str):

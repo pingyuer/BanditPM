@@ -1,0 +1,69 @@
+defaults:
+  - config_gdkvm_01
+  - _self_
+
+exp_id: "delay_ode"
+model_name: "DelayODE"
+output_root: "outputs/BanditPM"
+
+phase_init:
+  train: "pred_or_zero"
+  val: "pred_or_zero"
+  test: "pred_or_zero"
+
+evaluation:
+  init_mode: "pred_or_zero"
+  exclude_init_frame: true
+  init_frame_index: 0
+  protocol_version: "delay_ode_warmup_no_leak"
+  default_threshold: 0.5
+  threshold_search_start: 0.30
+  threshold_search_end: 0.70
+  threshold_search_step: 0.05
+
+wandb:
+  project: "BanditPM"
+  group: "delay_ode"
+  tags: ["delay_ode", "predict_before_update", "warmup_only", "no_leak"]
+
+model:
+  name: "delay_ode"
+  allow_oracle_init_when_requested: false
+  use_first_frame_gt_init: false
+  use_kpff: false
+  memory_core:
+    type: "none"
+    dynakey: {}
+  temporal_memory:
+    type: "none"
+    bpm:
+      ENABLE: false
+  delay_ode:
+    in_channels: 1
+    num_classes: 2
+    base_dim: 32
+    delay_ode_num_slots: 8
+    delay_ode_key_dim: 64
+    delay_ode_value_dim: 64
+    delay_ode_state_dim: 128
+    delay_ode_temperature: 0.07
+    delay_ode_dt: 1.0
+    delay_ode_steps: 1
+    delay_ode_gamma: 0.1
+    delay_ode_use_low: true
+    delay_ode_use_mid: true
+    delay_ode_use_high: true
+    delay_ode_keymap_ema: 0.85
+    delay_ode_update_gate_max: 0.5
+    delay_ode_first_frame_mode: "warmup_only"
+    delay_ode_supervise_first_frame: false
+    delay_ode_detach_mask_for_update: true
+    delay_ode_allow_current_feature_for_current_mask: false
+    delay_ode_lambda_selection_entropy: 0.001
+    delay_ode_lambda_gate_smooth: 0.01
+    delay_ode_lambda_latent_smooth: 0.01
+    delay_ode_lambda_state_smooth: 0.01
+
+hydra:
+  run:
+    dir: ${output_root}/${exp_id}/${now:%Y-%m-%d}/${now:%H-%M-%S}

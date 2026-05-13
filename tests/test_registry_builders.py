@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 from dataset.echo import EchoDataset
 from dataset.registry import DATASET_REGISTRY, resolve_dataset_class_from_cfg
 from dataset.vos_dataset import TenCamusDataset
+from model.delay_ode import DelayODEKeyMapSegmenter
 from model.gdkvm01 import GDKVM
 from model.registry import MODEL_REGISTRY
 from model.unext_dynakey import UNeXtDynaKeySegmenter
@@ -88,6 +89,26 @@ class RegistryBuilderTests(unittest.TestCase):
                     MODEL_REGISTRY.build(cfg, device=torch.device("cpu")),
                     UNeXtDynaKeySegmenter,
                 )
+
+        delay_cfg = OmegaConf.create(
+            {
+                "model": {
+                    "name": "delay_ode",
+                    "memory_core": {"type": "none", "dynakey": {}},
+                    "temporal_memory": {"type": "none", "bpm": {}},
+                    "delay_ode": {
+                        "in_channels": 1,
+                        "num_classes": 2,
+                        "base_dim": 8,
+                        "delay_ode_value_dim": 16,
+                        "delay_ode_key_dim": 12,
+                        "delay_ode_state_dim": 20,
+                        "delay_ode_num_slots": 4,
+                    },
+                }
+            }
+        )
+        self.assertIsInstance(MODEL_REGISTRY.build(delay_cfg, device=torch.device("cpu")), DelayODEKeyMapSegmenter)
 
 
 if __name__ == "__main__":

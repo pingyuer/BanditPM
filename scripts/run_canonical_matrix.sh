@@ -17,7 +17,7 @@ LOG_DIR="${LOG_DIR:-outputs/BanditPM/tmux_logs}"
 mkdir -p "${LOG_DIR}"
 EXTRA_ARGS=("$@")
 
-METHODS=(gdkvm kpff unext_fusion)
+METHODS=(gdkvm kpff unext_fusion delay_ode)
 DATASETS=(echo camus domain)
 
 select_values() {

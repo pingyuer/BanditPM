@@ -7,6 +7,7 @@ from omegaconf import OmegaConf
 
 from dataset.echo import EchoDataset
 from dataset.vos_dataset import TenCamusDataset
+from model.delay_ode import DelayODEKeyMapSegmenter
 from model.gdkvm01 import GDKVM
 from model.trainer import build_model_from_cfg
 from model.unext_dynakey import UNeXtDynaKeySegmenter
@@ -27,6 +28,9 @@ CANONICAL_CONFIGS = [
     "unext_fusion_echo",
     "unext_fusion_camus",
     "unext_fusion_domain",
+    "delay_ode_echo",
+    "delay_ode_camus",
+    "delay_ode_domain",
 ]
 
 BASE_CONFIGS = [
@@ -36,6 +40,7 @@ BASE_CONFIGS = [
     "_base_/models/gdkvm",
     "_base_/models/kpff",
     "_base_/models/unext_fusion",
+    "_base_/models/delay_ode",
     "_base_/runtime/default_runtime",
     "_base_/schedules/default_3k",
 ]
@@ -51,7 +56,7 @@ class FrameworkRefactorTests(unittest.TestCase):
             with self.subTest(config=name):
                 cfg = self._compose(name)
                 self.assertEqual(str(cfg.exp_id), name)
-                self.assertIn(str(cfg.model.name), {"gdkvm", "kpff", "unext_fusion"})
+                self.assertIn(str(cfg.model.name), {"gdkvm", "kpff", "unext_fusion", "delay_ode"})
                 self.assertIn(str(cfg.dataset_name), {"echonet", "camus", "domain"})
                 self.assertEqual(str(cfg.evaluation.init_mode), "pred_or_zero")
                 self.assertTrue(bool(cfg.evaluation.exclude_init_frame))
@@ -121,6 +126,27 @@ class FrameworkRefactorTests(unittest.TestCase):
         )
         unext = build_model_from_cfg(unext_cfg, torch.device("cpu"))
         self.assertIsInstance(unext, UNeXtDynaKeySegmenter)
+
+        delay_cfg = OmegaConf.create(
+            {
+                "model": {
+                    "name": "delay_ode",
+                    "memory_core": {"type": "none", "dynakey": {}},
+                    "temporal_memory": {"type": "none", "bpm": {}},
+                    "delay_ode": {
+                        "in_channels": 1,
+                        "num_classes": 2,
+                        "base_dim": 8,
+                        "delay_ode_value_dim": 16,
+                        "delay_ode_key_dim": 12,
+                        "delay_ode_state_dim": 20,
+                        "delay_ode_num_slots": 4,
+                    },
+                }
+            }
+        )
+        delay_ode = build_model_from_cfg(delay_cfg, torch.device("cpu"))
+        self.assertIsInstance(delay_ode, DelayODEKeyMapSegmenter)
 
 
 if __name__ == "__main__":

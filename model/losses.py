@@ -56,6 +56,13 @@ class LossComputer(nn.Module):
         self.lambda_spatial_q_ce = float(unext_dynakey_cfg.get("lambda_q_ce", 1.0))
         self.enable_memory_only_loss = bool(unext_dynakey_cfg.get("memory_only_head_enabled", False))
         self.lambda_memory_only = float(unext_dynakey_cfg.get("lambda_memory_only", 0.0))
+        delay_ode_cfg = cfg.model.get("delay_ode", {})
+        self.is_delay_ode = str(cfg.model.get("name", "")).lower() == "delay_ode"
+        self.delay_ode_supervise_first_frame = bool(delay_ode_cfg.get("delay_ode_supervise_first_frame", False))
+        self.lambda_delay_ode_selection_entropy = float(delay_ode_cfg.get("delay_ode_lambda_selection_entropy", 0.0))
+        self.lambda_delay_ode_gate_smooth = float(delay_ode_cfg.get("delay_ode_lambda_gate_smooth", 0.0))
+        self.lambda_delay_ode_latent_smooth = float(delay_ode_cfg.get("delay_ode_lambda_latent_smooth", 0.0))
+        self.lambda_delay_ode_state_smooth = float(delay_ode_cfg.get("delay_ode_lambda_state_smooth", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -129,6 +136,8 @@ class LossComputer(nn.Module):
             num_frames=num_frames,
             device=data['rgb'].device,
         )
+        if self.is_delay_ode and not self.delay_ode_supervise_first_frame and num_frames > 0:
+            supervised_mask[:, 0] = False
 
         for bi in range(batch_size):
             t_range = self._frame_ids_for_sample(supervised_mask, bi)
@@ -204,6 +213,9 @@ class LossComputer(nn.Module):
         spatial_q_terms = self._compute_spatial_q_loss(data)
         for k, v in spatial_q_terms.items():
             losses[k] += v
+        delay_ode_terms = self._compute_delay_ode_regularizers(data)
+        for k, v in delay_ode_terms.items():
+            losses[k] += v
 
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
         for key, value in losses.items():
@@ -220,6 +232,37 @@ class LossComputer(nn.Module):
                 losses['total_loss'] = losses['total_loss'] + losses['policy_ce']
 
         return losses
+
+    def _compute_delay_ode_regularizers(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        if not self.is_delay_ode:
+            return {}
+        latest_aux = None
+        for key in sorted(data.keys()):
+            if not key.startswith("memory_aux_"):
+                continue
+            aux = data.get(key)
+            if isinstance(aux, dict) and isinstance(aux.get("delay_ode_aux"), dict):
+                latest_aux = aux["delay_ode_aux"]
+        if latest_aux is None:
+            return {}
+        terms = {}
+        total = None
+        mapping = {
+            "selection_entropy": ("aux_delay_ode_selection_entropy", self.lambda_delay_ode_selection_entropy),
+            "gate_smooth": ("aux_delay_ode_gate_smooth", self.lambda_delay_ode_gate_smooth),
+            "latent_smooth": ("aux_delay_ode_latent_smooth", self.lambda_delay_ode_latent_smooth),
+            "state_smooth": ("aux_delay_ode_state_smooth", self.lambda_delay_ode_state_smooth),
+        }
+        for src, (dst, weight) in mapping.items():
+            value = latest_aux.get(src)
+            if not torch.is_tensor(value) or weight <= 0:
+                continue
+            weighted = value * float(weight)
+            terms[dst] = weighted
+            total = weighted if total is None else total + weighted
+        if total is not None:
+            terms["aux_delay_ode_total"] = total
+        return terms
 
     def _compute_dynakey_q_loss(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         if not self.enable_dynakey_q_loss:
