@@ -1,0 +1,12 @@
+defaults:
+  - delay_ode_v2_echo
+  - _self_
+
+exp_id: "delay_ode_v2_single_scale_mid"
+
+model:
+  delay_ode:
+    delay_ode_use_low: false
+    delay_ode_use_mid: true
+    delay_ode_use_high: false
+

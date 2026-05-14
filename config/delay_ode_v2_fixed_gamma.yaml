@@ -1,0 +1,10 @@
+defaults:
+  - delay_ode_v2_echo
+  - _self_
+
+exp_id: "delay_ode_v2_fixed_gamma"
+
+model:
+  delay_ode:
+    delay_ode_use_adaptive_motion_scale: false
+

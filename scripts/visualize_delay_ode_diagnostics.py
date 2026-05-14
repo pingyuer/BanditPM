@@ -31,6 +31,12 @@ def main() -> None:
 
     weights = aux.get("keymap_weights", {})
     gates = aux.get("update_gates", {})
+    gate_groups = {
+        "keymap": aux.get("keymap_gates", {}),
+        "latent": aux.get("latent_gates", {}),
+        "state": aux.get("state_gates", {}),
+    }
+    motion = aux.get("motion_scale", {})
     stats = aux.get("mask_stats")
 
     for level, tensor in weights.items():
@@ -49,6 +55,25 @@ def main() -> None:
         with path.open("w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["frame", "gate"])
+            for t, value in enumerate(values):
+                writer.writerow([t + 1, float(value)])
+
+    for group_name, group in gate_groups.items():
+        for level, tensor in group.items():
+            path = out_dir / f"{level}_{group_name}_gate.csv"
+            values = tensor[0, 0, :, 0] if tensor.numel() else torch.empty(0)
+            with path.open("w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["frame", f"{group_name}_gate"])
+                for t, value in enumerate(values):
+                    writer.writerow([t + 1, float(value)])
+
+    for level, tensor in motion.items():
+        path = out_dir / f"{level}_motion_scale.csv"
+        values = tensor[0, 0, :, 0] if tensor.numel() else torch.empty(0)
+        with path.open("w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["frame", "motion_scale"])
             for t, value in enumerate(values):
                 writer.writerow([t + 1, float(value)])
 

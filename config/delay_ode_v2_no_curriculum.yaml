@@ -1,0 +1,12 @@
+defaults:
+  - delay_ode_v2_echo
+  - _self_
+
+exp_id: "delay_ode_v2_no_curriculum"
+
+model:
+  delay_ode:
+    delay_ode_curriculum:
+      stage: "full_rollout"
+      rollout_length_schedule: ["full"]
+

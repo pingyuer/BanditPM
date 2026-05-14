@@ -1,0 +1,10 @@
+defaults:
+  - delay_ode_echo
+  - _self_
+
+exp_id: "delay_ode_v2_echo"
+
+wandb:
+  group: "canonical_delay_ode_v2"
+  tags: ["canonical", "delay_ode", "delay_ode_v2", "echo", "no_leak", "strong_init"]
+

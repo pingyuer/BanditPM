@@ -68,6 +68,14 @@ class LossComputer(nn.Module):
         self.lambda_delay_ode_gate_smooth = float(delay_ode_cfg.get("delay_ode_lambda_gate_smooth", 0.0))
         self.lambda_delay_ode_latent_smooth = float(delay_ode_cfg.get("delay_ode_lambda_latent_smooth", 0.0))
         self.lambda_delay_ode_state_smooth = float(delay_ode_cfg.get("delay_ode_lambda_state_smooth", 0.0))
+        self.lambda_delay_ode_phase_slot_usage = float(delay_ode_cfg.get("delay_ode_lambda_phase_slot_usage", 0.0))
+        self.lambda_delay_ode_motion_scale_smooth = float(delay_ode_cfg.get("delay_ode_lambda_motion_scale_smooth", 0.0))
+        self.lambda_delay_ode_latent_decode = {
+            "low": float(delay_ode_cfg.get("delay_ode_lambda_latent_decode_low", 0.0)),
+            "mid": float(delay_ode_cfg.get("delay_ode_lambda_latent_decode_mid", 0.0)),
+            "high": float(delay_ode_cfg.get("delay_ode_lambda_latent_decode_high", 0.0)),
+        }
+        self.lambda_delay_ode_boundary = float(delay_ode_cfg.get("delay_ode_lambda_boundary", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -254,9 +262,11 @@ class LossComputer(nn.Module):
         total = None
         mapping = {
             "slot_balance": ("aux_delay_ode_slot_balance", self.lambda_delay_ode_slot_balance),
+            "phase_slot_usage": ("aux_delay_ode_phase_slot_usage", self.lambda_delay_ode_phase_slot_usage),
             "gate_smooth": ("aux_delay_ode_gate_smooth", self.lambda_delay_ode_gate_smooth),
             "latent_smooth": ("aux_delay_ode_latent_smooth", self.lambda_delay_ode_latent_smooth),
             "state_smooth": ("aux_delay_ode_state_smooth", self.lambda_delay_ode_state_smooth),
+            "motion_scale_smooth": ("aux_delay_ode_motion_scale_smooth", self.lambda_delay_ode_motion_scale_smooth),
         }
         for src, (dst, weight) in mapping.items():
             value = latest_aux.get(src)
@@ -267,7 +277,50 @@ class LossComputer(nn.Module):
             total = weighted if total is None else total + weighted
         if total is not None:
             terms["aux_delay_ode_total"] = total
+        decode_terms = self._compute_delay_ode_decode_losses(data, latest_aux)
+        for key, value in decode_terms.items():
+            terms[key] = value
+            if key.startswith("aux_delay_ode_"):
+                terms["aux_delay_ode_total"] = value if "aux_delay_ode_total" not in terms else terms["aux_delay_ode_total"] + value
         return terms
+
+    def _compute_delay_ode_decode_losses(self, data: Dict[str, torch.Tensor], latest_aux: Dict) -> Dict[str, torch.Tensor]:
+        if "cls_gt" not in data:
+            return {}
+        cls_gt = data["cls_gt"]
+        if cls_gt.shape[1] <= 1:
+            return {}
+        target_t = cls_gt[:, -1]
+        out: Dict[str, torch.Tensor] = {}
+        latent_logits = latest_aux.get("latent_decode_logits", {})
+        if isinstance(latent_logits, dict):
+            for level, weight in self.lambda_delay_ode_latent_decode.items():
+                obj_logits = latent_logits.get(level)
+                if weight <= 0 or not torch.is_tensor(obj_logits):
+                    continue
+                masks = torch.sigmoid(obj_logits)
+                logits = aggregate(masks, dim=1)
+                total = torch.zeros((), device=logits.device, dtype=logits.dtype)
+                valid_count = 0
+                for bi in range(logits.shape[0]):
+                    num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else masks.shape[1]
+                    soft_gt = cls_to_one_hot(target_t[bi : bi + 1], num_obj)
+                    ce, dice = self.mask_loss(logits[bi : bi + 1, : num_obj + 1], soft_gt)
+                    total = total + ce + dice
+                    valid_count += 1
+                if valid_count:
+                    out[f"aux_delay_ode_latent_decode_{level}"] = total / valid_count * weight
+        boundary_logits = latest_aux.get("boundary_logits")
+        if self.lambda_delay_ode_boundary > 0 and torch.is_tensor(boundary_logits):
+            fg = (target_t.float() > 0).float()
+            if fg.ndim == 3:
+                fg = fg.unsqueeze(1)
+            dil = F.max_pool2d(fg, kernel_size=3, stride=1, padding=1)
+            ero = -F.max_pool2d(-fg, kernel_size=3, stride=1, padding=1)
+            boundary = (dil - ero).clamp(0.0, 1.0)
+            pred = boundary_logits[:, : boundary.shape[1]]
+            out["aux_delay_ode_boundary"] = F.binary_cross_entropy_with_logits(pred, boundary.to(device=pred.device, dtype=pred.dtype)) * self.lambda_delay_ode_boundary
+        return out
 
     def _compute_dynakey_q_loss(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         if not self.enable_dynakey_q_loss:

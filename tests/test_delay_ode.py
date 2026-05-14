@@ -19,6 +19,10 @@ def _cfg(
     keymap_ema=0.85,
     first_frame_init="init_head",
     allow_current_feature=False,
+    use_adaptive_motion=True,
+    gate_mode="separated",
+    use_latent_decode=True,
+    use_boundary_decoder=True,
 ):
     return OmegaConf.create(
         {
@@ -44,13 +48,27 @@ def _cfg(
                     "delay_ode_gamma": gamma,
                     "delay_ode_keymap_ema": keymap_ema,
                     "delay_ode_first_frame_init": first_frame_init,
+                    "delay_ode_use_strong_initializer": first_frame_init == "strong_initnet",
+                    "delay_ode_use_decodable_latent_regularizer": use_latent_decode,
+                    "delay_ode_use_boundary_decoder": use_boundary_decoder,
+                    "delay_ode_use_adaptive_motion_scale": use_adaptive_motion,
+                    "delay_ode_gate_mode": gate_mode,
                     "delay_ode_update_gate_max": 0.5,
+                    "delay_ode_keymap_gate_max": 0.35,
+                    "delay_ode_latent_gate_max": 0.65,
+                    "delay_ode_state_gate_max": 0.25,
                     "delay_ode_use_low": use_low,
                     "delay_ode_use_mid": use_mid,
                     "delay_ode_use_high": use_high,
                     "delay_ode_supervise_first_frame": False,
                     "delay_ode_allow_current_feature_for_current_mask": allow_current_feature,
                     "delay_ode_lambda_slot_balance": 0.001,
+                    "delay_ode_lambda_phase_slot_usage": 0.001,
+                    "delay_ode_lambda_latent_decode_low": 0.01,
+                    "delay_ode_lambda_latent_decode_mid": 0.01,
+                    "delay_ode_lambda_latent_decode_high": 0.01,
+                    "delay_ode_lambda_boundary": 0.01,
+                    "delay_ode_lambda_motion_scale_smooth": 0.01,
                     "delay_ode_lambda_gate_smooth": 0.01,
                     "delay_ode_lambda_latent_smooth": 0.01,
                     "delay_ode_lambda_state_smooth": 0.01,
@@ -78,7 +96,7 @@ def _batch(batch_size=2, frames=5, height=32, width=32, requires_grad=False):
 
 class DelayODETests(unittest.TestCase):
     def test_forward_shapes(self):
-        model = DelayODEKeyMapSegmenter(_cfg().model)
+        model = DelayODEKeyMapSegmenter(_cfg(first_frame_init="strong_initnet").model)
         out = model(_batch(batch_size=2, frames=5, height=112, width=112))
         self.assertEqual(out["logits_0"].shape, (2, 2, 112, 112))
         self.assertEqual(out["masks_0"].shape, (2, 1, 112, 112))
@@ -87,6 +105,14 @@ class DelayODETests(unittest.TestCase):
         for level in ("low", "mid", "high"):
             self.assertEqual(aux["keymap_weights"][level].shape, (2, 1, 4, 8))
             self.assertEqual(aux["update_gates"][level].shape[:3], (2, 1, 4))
+            self.assertEqual(aux["keymap_gates"][level].shape[:3], (2, 1, 4))
+            self.assertEqual(aux["latent_gates"][level].shape[:3], (2, 1, 4))
+            self.assertEqual(aux["state_gates"][level].shape[:3], (2, 1, 4))
+            self.assertEqual(aux["motion_scale"][level].shape[:3], (2, 1, 4))
+            self.assertIn(level, aux["latent_decode_logits"])
+        self.assertIn("strong_init_aux", aux)
+        self.assertIn("dynamics_monitor", aux)
+        self.assertIn("boundary_logits", aux)
 
     def test_current_feature_does_not_leak_to_current_logits(self):
         torch.manual_seed(3)
@@ -120,7 +146,7 @@ class DelayODETests(unittest.TestCase):
 
     def test_first_frame_init_mask_is_valid_and_affects_future(self):
         torch.manual_seed(6)
-        model = DelayODEKeyMapSegmenter(_cfg().model).eval()
+        model = DelayODEKeyMapSegmenter(_cfg(first_frame_init="strong_initnet").model).eval()
         data_a = _batch(batch_size=1, frames=3)
         data_b = {k: v.clone() if torch.is_tensor(v) else v for k, v in data_a.items()}
         data_b["rgb"][:, 0] = data_b["rgb"][:, 0] + 2.0
@@ -132,6 +158,56 @@ class DelayODETests(unittest.TestCase):
         self.assertGreater(out_a["masks_0"].mean().item(), 0.0)
         aux0 = out_a["memory_aux_0"]["delay_ode_aux"]
         self.assertTrue(torch.allclose(aux0["mask_stats"][:, :, 0, 0], out_a["masks_0"].mean(dim=(-2, -1)), atol=1.0e-5))
+        self.assertEqual(aux0["init_mode"], "strong_initnet")
+        self.assertIn("strong_init_aux", aux0)
+
+    def test_separated_gates_have_distinct_ranges(self):
+        torch.manual_seed(61)
+        model = DelayODEKeyMapSegmenter(_cfg(gate_mode="separated").model).eval()
+        out = model(_batch(batch_size=1, frames=3))
+        aux = out["memory_aux_2"]["delay_ode_aux"]
+        for level in ("low", "mid", "high"):
+            self.assertLessEqual(aux["keymap_gates"][level].max().item(), 0.35 + 1e-6)
+            self.assertLessEqual(aux["latent_gates"][level].max().item(), 0.65 + 1e-6)
+            self.assertLessEqual(aux["state_gates"][level].max().item(), 0.25 + 1e-6)
+
+    def test_adaptive_motion_scale_changes_ode_path(self):
+        torch.manual_seed(62)
+        adaptive = DelayODEKeyMapSegmenter(_cfg(use_adaptive_motion=True).model).eval()
+        fixed = DelayODEKeyMapSegmenter(_cfg(use_adaptive_motion=False).model).eval()
+        fixed.load_state_dict(adaptive.state_dict(), strict=False)
+        data = _batch(batch_size=1, frames=4)
+        with torch.no_grad():
+            out_adapt = adaptive(data)
+            out_fixed = fixed(data)
+        self.assertFalse(torch.allclose(out_adapt["logits_3"], out_fixed["logits_3"], atol=1e-6, rtol=1e-6))
+        aux = out_adapt["memory_aux_3"]["delay_ode_aux"]
+        self.assertTrue(torch.isfinite(aux["motion_scale"]["mid"]).all())
+
+    def test_latent_decode_and_boundary_aux_losses_exist(self):
+        cfg = _cfg(first_frame_init="strong_initnet")
+        model = DelayODEKeyMapSegmenter(cfg.model)
+        data = _batch(batch_size=1, frames=3)
+        out = model(data)
+        aux = out["memory_aux_2"]["delay_ode_aux"]
+        for level in ("low", "mid", "high"):
+            self.assertIn(level, aux["latent_decode_logits"])
+            self.assertEqual(aux["latent_decode_logits"][level].shape[-2:], data["rgb"].shape[-2:])
+        self.assertEqual(aux["boundary_logits"].shape[-2:], data["rgb"].shape[-2:])
+        data.update(out)
+        stage_cfg = OmegaConf.create(
+            {
+                "point_supervision": False,
+                "train_num_points": 64,
+                "oversample_ratio": 1.0,
+                "importance_sample_ratio": 0.5,
+            }
+        )
+        losses = LossComputer(cfg, stage_cfg).compute(data, [1])
+        self.assertIn("aux_delay_ode_latent_decode_low", losses)
+        self.assertIn("aux_delay_ode_boundary", losses)
+        self.assertIn("aux_delay_ode_phase_slot_usage", losses)
+        self.assertIn("aux_delay_ode_motion_scale_smooth", losses)
 
     def test_multi_scale_keymaps_participate(self):
         torch.manual_seed(7)

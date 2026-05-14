@@ -1,0 +1,10 @@
+defaults:
+  - delay_ode_domain
+  - _self_
+
+exp_id: "delay_ode_v2_domain"
+
+wandb:
+  group: "canonical_delay_ode_v2"
+  tags: ["canonical", "delay_ode", "delay_ode_v2", "domain", "cardiacuda", "no_leak", "strong_init"]
+
