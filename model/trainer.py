@@ -492,6 +492,7 @@ class Trainer:
                     self.log.log_scalar("lr", self.scheduler.get_last_lr()[0], it)
                 self._log_bpm_stats(data, it)
                 self._log_dynakey_stats(data, it)
+                self._log_anchor_ode_stats(data, it)
 
         return loss.detach()
 
@@ -716,6 +717,63 @@ class Trainer:
                 value = torch.cat(spatial_entropy_tensors).mean().item()
                 self.log.log_scalar("unext_dynakey/spatial_memory_entropy", value, it)
                 wandb_payload["unext_dynakey/spatial_memory_entropy"] = value
+            if wandb_payload:
+                wandb.log(wandb_payload, step=it)
+        except Exception:
+            pass
+
+    def _log_anchor_ode_stats(self, data, it: int) -> None:
+        memory_keys = sorted(k for k in data.keys() if k.startswith("memory_aux_"))
+        if not memory_keys:
+            return
+
+        try:
+            wandb_payload = {}
+            prior_conf = []
+            base_conf = []
+            update_conf = []
+            disagreement = []
+            entropy = []
+            affine_abs = []
+            slot_entropy = []
+            for key in memory_keys:
+                aux = data.get(key)
+                anchor_aux = aux.get("anchor_ode_aux") if isinstance(aux, dict) else None
+                if not isinstance(anchor_aux, dict):
+                    continue
+                for src, dst in (
+                    ("confidence_prior", prior_conf),
+                    ("confidence_base", base_conf),
+                    ("confidence_update", update_conf),
+                    ("base_prior_disagreement", disagreement),
+                    ("mask_entropy", entropy),
+                ):
+                    value = anchor_aux.get(src)
+                    if torch.is_tensor(value):
+                        dst.append(value.float().detach().flatten())
+                affine = anchor_aux.get("affine")
+                if torch.is_tensor(affine):
+                    affine_abs.append(affine.float().detach().abs().flatten())
+                weights = anchor_aux.get("slot_weights")
+                if torch.is_tensor(weights):
+                    w = weights.float().detach().clamp_min(1.0e-8)
+                    slot_entropy.append((-(w * w.log()).sum(dim=-1) / math.log(max(w.shape[-1], 2))).flatten())
+
+            metrics = {
+                "anchor_ode/confidence_prior": prior_conf,
+                "anchor_ode/confidence_base": base_conf,
+                "anchor_ode/confidence_update": update_conf,
+                "anchor_ode/base_prior_disagreement": disagreement,
+                "anchor_ode/mask_entropy": entropy,
+                "anchor_ode/affine_abs_mean": affine_abs,
+                "anchor_ode/slot_entropy": slot_entropy,
+            }
+            for name, tensors in metrics.items():
+                if not tensors:
+                    continue
+                value = torch.cat(tensors).mean().item()
+                self.log.log_scalar(name, value, it)
+                wandb_payload[name] = value
             if wandb_payload:
                 wandb.log(wandb_payload, step=it)
         except Exception:

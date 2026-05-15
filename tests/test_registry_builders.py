@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 from dataset.echo import EchoDataset
 from dataset.registry import DATASET_REGISTRY, resolve_dataset_class_from_cfg
 from dataset.vos_dataset import TenCamusDataset
+from model.anchor_ode import UNeXtAnchorODESegmenter
 from model.delay_ode import DelayODEKeyMapSegmenter
 from model.gdkvm01 import GDKVM
 from model.registry import MODEL_REGISTRY
@@ -109,6 +110,33 @@ class RegistryBuilderTests(unittest.TestCase):
             }
         )
         self.assertIsInstance(MODEL_REGISTRY.build(delay_cfg, device=torch.device("cpu")), DelayODEKeyMapSegmenter)
+
+        for alias in ["anchor_ode", "unext_anchor_ode"]:
+            with self.subTest(alias=alias):
+                cfg = OmegaConf.create(
+                    {
+                        "model": {
+                            "name": alias,
+                            "memory_core": {"type": "none", "dynakey": {}},
+                            "temporal_memory": {"type": "none", "bpm": {}},
+                            "anchor_ode": {
+                                "in_channels": 1,
+                                "num_classes": 2,
+                                "base_dim": 8,
+                                "value_dim": 16,
+                                "num_slots": 4,
+                                "state_dim": 24,
+                                "hidden_dim": 24,
+                                "anchor_size": 16,
+                                "condition_dim": 12,
+                            },
+                        }
+                    }
+                )
+                self.assertIsInstance(
+                    MODEL_REGISTRY.build(cfg, device=torch.device("cpu")),
+                    UNeXtAnchorODESegmenter,
+                )
 
 
 if __name__ == "__main__":

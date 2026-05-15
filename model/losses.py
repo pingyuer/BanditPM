@@ -76,6 +76,14 @@ class LossComputer(nn.Module):
             "high": float(delay_ode_cfg.get("delay_ode_lambda_latent_decode_high", 0.0)),
         }
         self.lambda_delay_ode_boundary = float(delay_ode_cfg.get("delay_ode_lambda_boundary", 0.0))
+        anchor_ode_cfg = cfg.model.get("anchor_ode", {})
+        self.is_anchor_ode = str(cfg.model.get("name", "")).lower() in {"anchor_ode", "unext_anchor_ode", "unextanchorode"}
+        self.lambda_anchor_ode_prior = float(anchor_ode_cfg.get("lambda_prior", 0.0))
+        self.lambda_anchor_ode_multiscale_prior = float(anchor_ode_cfg.get("lambda_multiscale_prior", 0.0))
+        self.lambda_anchor_ode_geo = float(anchor_ode_cfg.get("lambda_geo", 0.0))
+        self.lambda_anchor_ode_temp_geo = float(anchor_ode_cfg.get("lambda_temp_geo", 0.0))
+        self.lambda_anchor_ode_conf = float(anchor_ode_cfg.get("lambda_conf", 0.0))
+        self.lambda_anchor_ode_slot_balance = float(anchor_ode_cfg.get("lambda_slot_balance", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -229,6 +237,9 @@ class LossComputer(nn.Module):
         delay_ode_terms = self._compute_delay_ode_regularizers(data)
         for k, v in delay_ode_terms.items():
             losses[k] += v
+        anchor_ode_terms = self._compute_anchor_ode_losses(data, supervised_mask)
+        for k, v in anchor_ode_terms.items():
+            losses[k] += v
 
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
         for key, value in losses.items():
@@ -283,6 +294,136 @@ class LossComputer(nn.Module):
             if key.startswith("aux_delay_ode_"):
                 terms["aux_delay_ode_total"] = value if "aux_delay_ode_total" not in terms else terms["aux_delay_ode_total"] + value
         return terms
+
+    def _soft_geometry6(self, mask_BNHW: torch.Tensor) -> torch.Tensor:
+        B, N, H, W = mask_BNHW.shape
+        mask = mask_BNHW.float().clamp(0.0, 1.0)
+        area = mask.mean(dim=(-2, -1))
+        ys = torch.linspace(0.0, 1.0, H, device=mask.device, dtype=mask.dtype).view(1, 1, H, 1)
+        xs = torch.linspace(0.0, 1.0, W, device=mask.device, dtype=mask.dtype).view(1, 1, 1, W)
+        mass = mask.sum(dim=(-2, -1)).clamp_min(1.0e-6)
+        cx = (mask * xs).sum(dim=(-2, -1)) / mass
+        cy = (mask * ys).sum(dim=(-2, -1)) / mass
+        width = torch.sqrt(((xs - cx[..., None, None]) ** 2 * mask).sum(dim=(-2, -1)) / mass + 1.0e-6)
+        height = torch.sqrt(((ys - cy[..., None, None]) ** 2 * mask).sum(dim=(-2, -1)) / mass + 1.0e-6)
+        ratio = width / height.clamp_min(1.0e-6)
+        return torch.stack([area, cx, cy, width, height, ratio], dim=-1)
+
+    def _gt_object_masks(self, cls_gt_THW: torch.Tensor, num_objects: int) -> torch.Tensor:
+        if cls_gt_THW.dim() == 4:
+            cls_gt_THW = cls_gt_THW.squeeze(1)
+        masks = [(cls_gt_THW == obj_id).float() for obj_id in range(1, num_objects + 1)]
+        if not masks:
+            return torch.zeros(cls_gt_THW.shape[0], 0, *cls_gt_THW.shape[-2:], device=cls_gt_THW.device)
+        return torch.stack(masks, dim=1)
+
+    def _compute_anchor_ode_losses(
+        self,
+        data: Dict[str, torch.Tensor],
+        supervised_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if not self.is_anchor_ode:
+            return {}
+        if "cls_gt" not in data:
+            return {}
+
+        batch_size, num_frames = data["rgb"].shape[:2]
+        out: Dict[str, torch.Tensor] = {}
+        device = data["rgb"].device
+        zero = torch.zeros((), device=device, dtype=torch.float32)
+        prior_terms = []
+        multi_terms = []
+        geo_terms = []
+        conf_terms = []
+        temp_geo_terms = []
+        slot_terms = []
+
+        for bi in range(batch_size):
+            curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
+            frame_ids = self._frame_ids_for_sample(supervised_mask, bi)
+            prev_pred_geo = None
+            prev_gt_geo = None
+            for ti in frame_ids:
+                memory_aux = data.get(f"memory_aux_{ti}")
+                aux = memory_aux.get("anchor_ode_aux") if isinstance(memory_aux, dict) else None
+                if not isinstance(aux, dict):
+                    continue
+                gt_mask = self._gt_object_masks(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+                soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+
+                prior_obj = aux.get("prior_logits")
+                if torch.is_tensor(prior_obj) and self.lambda_anchor_ode_prior > 0:
+                    prior_obj = prior_obj[bi : bi + 1, :curr_num_obj]
+                    prior_logits = aggregate(torch.sigmoid(prior_obj), dim=1)
+                    ce, dice = self.mask_loss(prior_logits, soft_gt)
+                    prior_terms.append(ce + dice)
+
+                warped = aux.get("warped_priors")
+                if isinstance(warped, dict) and self.lambda_anchor_ode_multiscale_prior > 0:
+                    for value in warped.values():
+                        if not torch.is_tensor(value):
+                            continue
+                        prior_obj_s = F.interpolate(
+                            value[bi : bi + 1, :curr_num_obj].flatten(0, 1).unsqueeze(1),
+                            size=gt_mask.shape[-2:],
+                            mode="bilinear",
+                            align_corners=False,
+                        ).view(1, curr_num_obj, *gt_mask.shape[-2:])
+                        prior_logits_s = aggregate(torch.sigmoid(prior_obj_s), dim=1)
+                        ce, dice = self.mask_loss(prior_logits_s, soft_gt)
+                        multi_terms.append(ce + dice)
+
+                geom_pred = aux.get("geometry_pred")
+                gt_geo = self._soft_geometry6(gt_mask)
+                if torch.is_tensor(geom_pred) and self.lambda_anchor_ode_geo > 0:
+                    pred = geom_pred[bi : bi + 1, :curr_num_obj, :6]
+                    geo_terms.append(F.smooth_l1_loss(pred, gt_geo.to(device=pred.device, dtype=pred.dtype)))
+                    if prev_pred_geo is not None and prev_gt_geo is not None and self.lambda_anchor_ode_temp_geo > 0:
+                        temp_geo_terms.append(
+                            F.smooth_l1_loss(
+                                pred - prev_pred_geo,
+                                gt_geo.to(device=pred.device, dtype=pred.dtype) - prev_gt_geo,
+                            )
+                        )
+                    prev_pred_geo = pred
+                    prev_gt_geo = gt_geo.to(device=pred.device, dtype=pred.dtype)
+
+                conf = aux.get("confidence_prior")
+                if torch.is_tensor(conf) and torch.is_tensor(prior_obj) and self.lambda_anchor_ode_conf > 0:
+                    with torch.no_grad():
+                        prior_prob = torch.sigmoid(aux["prior_logits"][bi : bi + 1, :curr_num_obj])
+                        err = (prior_prob - gt_mask.to(device=prior_prob.device, dtype=prior_prob.dtype)).abs().mean(dim=(-2, -1))
+                        target = torch.exp(-4.0 * err).clamp(0.0, 1.0)
+                    pred_conf = conf[bi : bi + 1, :curr_num_obj].to(device=target.device, dtype=target.dtype)
+                    conf_terms.append(F.smooth_l1_loss(pred_conf, target))
+
+            slot_weights = []
+            for ti in range(num_frames):
+                memory_aux = data.get(f"memory_aux_{ti}")
+                aux = memory_aux.get("anchor_ode_aux") if isinstance(memory_aux, dict) else None
+                if isinstance(aux, dict) and torch.is_tensor(aux.get("slot_weights")):
+                    slot_weights.append(aux["slot_weights"][bi, :curr_num_obj])
+            if slot_weights and self.lambda_anchor_ode_slot_balance > 0:
+                usage = torch.stack(slot_weights, dim=0).mean(dim=(0, 1))
+                usage = usage / usage.sum().clamp_min(1.0e-8)
+                uniform = torch.full_like(usage, 1.0 / max(usage.numel(), 1))
+                slot_terms.append((usage.clamp_min(1.0e-8) * (usage.clamp_min(1.0e-8).log() - uniform.log())).sum())
+
+        if prior_terms:
+            out["aux_anchor_ode_prior"] = torch.stack(prior_terms).mean() * self.lambda_anchor_ode_prior
+        if multi_terms:
+            out["aux_anchor_ode_multiscale_prior"] = torch.stack(multi_terms).mean() * self.lambda_anchor_ode_multiscale_prior
+        if geo_terms:
+            out["aux_anchor_ode_geo"] = torch.stack(geo_terms).mean() * self.lambda_anchor_ode_geo
+        if temp_geo_terms:
+            out["aux_anchor_ode_temp_geo"] = torch.stack(temp_geo_terms).mean() * self.lambda_anchor_ode_temp_geo
+        if conf_terms:
+            out["aux_anchor_ode_conf"] = torch.stack(conf_terms).mean() * self.lambda_anchor_ode_conf
+        if slot_terms:
+            out["aux_anchor_ode_slot_balance"] = torch.stack(slot_terms).mean() * self.lambda_anchor_ode_slot_balance
+        if not out:
+            out["aux_anchor_ode_zero"] = zero
+        return out
 
     def _compute_delay_ode_decode_losses(self, data: Dict[str, torch.Tensor], latest_aux: Dict) -> Dict[str, torch.Tensor]:
         if "cls_gt" not in data:
