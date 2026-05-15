@@ -70,20 +70,37 @@ class UNeXtBackbone(nn.Module):
         self.decoder_dim = dims[0]
         self.value_dim = value_dim
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+    def encode(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         low = self.stem(self.input_down(x))
         mid = self.down1(low)
         high = self.token_mlp(self.down2(mid))
+        return {"low": low, "mid": mid, "high": high}
+
+    def decode(
+        self,
+        low: torch.Tensor,
+        mid: torch.Tensor,
+        high: torch.Tensor,
+        output_size: tuple[int, int],
+    ) -> dict[str, torch.Tensor]:
         dec_mid = self.up1(high, mid)
         dec_low = self.up2(dec_mid, low)
-        dec = F.interpolate(dec_low, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        dec = F.interpolate(dec_low, size=output_size, mode="bilinear", align_corners=False)
         dec = self.full_res(dec)
         return {
             "logits": self.logit_head(dec),
             "decoder_feature": dec,
-            "low": low,
-            "mid": mid,
-            "high": high,
             "value": self.value_proj(dec_mid),
             "high_value": self.high_proj(high),
+        }
+
+    def logits_from_decoder_feature(self, decoder_feature: torch.Tensor) -> torch.Tensor:
+        return self.logit_head(decoder_feature)
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        encoded = self.encode(x)
+        decoded = self.decode(encoded["low"], encoded["mid"], encoded["high"], x.shape[-2:])
+        return {
+            **decoded,
+            **encoded,
         }

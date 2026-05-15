@@ -5,7 +5,7 @@ import torch
 from utils.registry import Registry
 from model.gdkvm01 import GDKVM
 from model.delay_ode import DelayODEKeyMapSegmenter
-from model.anchor_ode import UNeXtAnchorODESegmenter
+from model.anchor_ode import UNeXtAnchorODEAffineSegmenter, UNeXtAnchorODESegmenter
 from model.unext_dynakey import UNeXtDynaKeySegmenter
 
 
@@ -68,6 +68,13 @@ def build_delay_ode(cfg, *, device: torch.device | str):
 @MODEL_REGISTRY.register("unextanchorode")
 def build_anchor_ode(cfg, *, device: torch.device | str):
     return UNeXtAnchorODESegmenter(_model_cfg(cfg)).to(device)
+
+
+@MODEL_REGISTRY.register("anchor_ode_v2")
+@MODEL_REGISTRY.register("unext_anchor_ode_affine")
+@MODEL_REGISTRY.register("unextanchorodeaffine")
+def build_anchor_ode_v2(cfg, *, device: torch.device | str):
+    return UNeXtAnchorODEAffineSegmenter(_model_cfg(cfg)).to(device)
 
 
 def build_model(cfg, *, device: torch.device | str):

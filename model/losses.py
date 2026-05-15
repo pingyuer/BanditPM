@@ -77,13 +77,23 @@ class LossComputer(nn.Module):
         }
         self.lambda_delay_ode_boundary = float(delay_ode_cfg.get("delay_ode_lambda_boundary", 0.0))
         anchor_ode_cfg = cfg.model.get("anchor_ode", {})
-        self.is_anchor_ode = str(cfg.model.get("name", "")).lower() in {"anchor_ode", "unext_anchor_ode", "unextanchorode"}
+        self.is_anchor_ode = str(cfg.model.get("name", "")).lower() in {
+            "anchor_ode",
+            "unext_anchor_ode",
+            "unextanchorode",
+            "anchor_ode_v2",
+            "unext_anchor_ode_affine",
+            "unextanchorodeaffine",
+        }
+        self.lambda_anchor_ode_base_seg = float(anchor_ode_cfg.get("lambda_base_seg", 0.0))
         self.lambda_anchor_ode_prior = float(anchor_ode_cfg.get("lambda_prior", 0.0))
+        self.lambda_anchor_ode_warp_prior = float(anchor_ode_cfg.get("lambda_warp_prior", 0.0))
         self.lambda_anchor_ode_multiscale_prior = float(anchor_ode_cfg.get("lambda_multiscale_prior", 0.0))
         self.lambda_anchor_ode_geo = float(anchor_ode_cfg.get("lambda_geo", 0.0))
         self.lambda_anchor_ode_temp_geo = float(anchor_ode_cfg.get("lambda_temp_geo", 0.0))
         self.lambda_anchor_ode_conf = float(anchor_ode_cfg.get("lambda_conf", 0.0))
         self.lambda_anchor_ode_slot_balance = float(anchor_ode_cfg.get("lambda_slot_balance", 0.0))
+        self.lambda_anchor_ode_affine_reg = float(anchor_ode_cfg.get("lambda_affine_reg", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -332,11 +342,13 @@ class LossComputer(nn.Module):
         device = data["rgb"].device
         zero = torch.zeros((), device=device, dtype=torch.float32)
         prior_terms = []
+        base_terms = []
         multi_terms = []
         geo_terms = []
         conf_terms = []
         temp_geo_terms = []
         slot_terms = []
+        affine_reg_terms = []
 
         for bi in range(batch_size):
             curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
@@ -351,6 +363,13 @@ class LossComputer(nn.Module):
                 gt_mask = self._gt_object_masks(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
                 soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
 
+                base_obj = aux.get("base_object_logits")
+                if torch.is_tensor(base_obj) and self.lambda_anchor_ode_base_seg > 0:
+                    base_obj = base_obj[bi : bi + 1, :curr_num_obj]
+                    base_logits = aggregate(torch.sigmoid(base_obj), dim=1)
+                    ce, dice = self.mask_loss(base_logits, soft_gt)
+                    base_terms.append(ce + dice)
+
                 prior_obj = aux.get("prior_logits")
                 if torch.is_tensor(prior_obj) and self.lambda_anchor_ode_prior > 0:
                     prior_obj = prior_obj[bi : bi + 1, :curr_num_obj]
@@ -359,7 +378,10 @@ class LossComputer(nn.Module):
                     prior_terms.append(ce + dice)
 
                 warped = aux.get("warped_priors")
-                if isinstance(warped, dict) and self.lambda_anchor_ode_multiscale_prior > 0:
+                multi_weight = self.lambda_anchor_ode_multiscale_prior
+                if str(aux.get("mode", "")) == "current_anchor_affine":
+                    multi_weight = max(multi_weight, self.lambda_anchor_ode_warp_prior)
+                if isinstance(warped, dict) and multi_weight > 0:
                     for value in warped.values():
                         if not torch.is_tensor(value):
                             continue
@@ -372,6 +394,10 @@ class LossComputer(nn.Module):
                         prior_logits_s = aggregate(torch.sigmoid(prior_obj_s), dim=1)
                         ce, dice = self.mask_loss(prior_logits_s, soft_gt)
                         multi_terms.append(ce + dice)
+
+                affine_reg = aux.get("affine_reg")
+                if torch.is_tensor(affine_reg) and self.lambda_anchor_ode_affine_reg > 0:
+                    affine_reg_terms.append(affine_reg)
 
                 geom_pred = aux.get("geometry_pred")
                 gt_geo = self._soft_geometry6(gt_mask)
@@ -409,10 +435,13 @@ class LossComputer(nn.Module):
                 uniform = torch.full_like(usage, 1.0 / max(usage.numel(), 1))
                 slot_terms.append((usage.clamp_min(1.0e-8) * (usage.clamp_min(1.0e-8).log() - uniform.log())).sum())
 
+        if base_terms:
+            out["aux_anchor_ode_base"] = torch.stack(base_terms).mean() * self.lambda_anchor_ode_base_seg
         if prior_terms:
             out["aux_anchor_ode_prior"] = torch.stack(prior_terms).mean() * self.lambda_anchor_ode_prior
         if multi_terms:
-            out["aux_anchor_ode_multiscale_prior"] = torch.stack(multi_terms).mean() * self.lambda_anchor_ode_multiscale_prior
+            weight = max(self.lambda_anchor_ode_multiscale_prior, self.lambda_anchor_ode_warp_prior)
+            out["aux_anchor_ode_multiscale_prior"] = torch.stack(multi_terms).mean() * weight
         if geo_terms:
             out["aux_anchor_ode_geo"] = torch.stack(geo_terms).mean() * self.lambda_anchor_ode_geo
         if temp_geo_terms:
@@ -421,6 +450,8 @@ class LossComputer(nn.Module):
             out["aux_anchor_ode_conf"] = torch.stack(conf_terms).mean() * self.lambda_anchor_ode_conf
         if slot_terms:
             out["aux_anchor_ode_slot_balance"] = torch.stack(slot_terms).mean() * self.lambda_anchor_ode_slot_balance
+        if affine_reg_terms:
+            out["aux_anchor_ode_affine_reg"] = torch.stack(affine_reg_terms).mean() * self.lambda_anchor_ode_affine_reg
         if not out:
             out["aux_anchor_ode_zero"] = zero
         return out
