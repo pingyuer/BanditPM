@@ -4,7 +4,7 @@ output_root: "outputs/BanditPM"
 mlflow:
   enabled: true
   tracking_uri: "http://172.16.240.77:5000"
-  experiment_name: "anchor_ode"
+  experiment_name: null
   run_name: null
   resume_run_id: null
 

@@ -11,6 +11,7 @@ from model.anchor_ode import UNeXtAnchorODEAffineSegmenter, UNeXtAnchorODESegmen
 from model.losses import LossComputer
 from model.trainer import ModelEMA, Trainer
 from model.utils.parameter_groups import get_parameter_groups
+from train import resolve_mlflow_experiment_name
 
 
 def _cfg():
@@ -553,7 +554,7 @@ class AnchorODEV2Tests(unittest.TestCase):
             self.assertTrue(cfg.evaluation.postprocess.enabled)
             self.assertFalse(cfg.evaluation.postprocess.binary_closing)
             self.assertEqual(cfg.evaluation.protocol_version, "v3_current_anchor_affine")
-            self.assertEqual(cfg.mlflow.experiment_name, "anchor_ode")
+            self.assertEqual(resolve_mlflow_experiment_name(cfg), "anchor_ode")
 
         for name in (
             "anchor_ode_v2_v3_echo_e2_long_raw_tta",
@@ -602,7 +603,7 @@ class AnchorODEV2Tests(unittest.TestCase):
             self.assertAlmostEqual(cfg.evaluation.threshold_search_step, 0.01)
             self.assertTrue(cfg.evaluation.postprocess.enabled)
             self.assertEqual(cfg.evaluation.protocol_version, "v3_current_anchor_affine")
-            self.assertEqual(cfg.mlflow.experiment_name, "anchor_ode")
+            self.assertEqual(resolve_mlflow_experiment_name(cfg), "anchor_ode")
 
         for name in echo_names:
             cfg = cfgs[name]

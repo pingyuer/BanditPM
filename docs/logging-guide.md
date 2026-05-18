@@ -8,14 +8,14 @@ Hydra run dir 由 config 决定，默认在：
 outputs/BanditPM/<exp_id>/<date>/<time>
 ```
 
-每个 run 可包含：
+MLflow UI 是正式实验入口。每个 run 可包含：
 
 - MLflow run。
 - `summary.csv`。
 - checkpoint / weights。
 - configs / eval / visuals / env / source artifacts。
 
-历史 run 可汇总到：
+本地 legacy 汇总工具可读取历史 run：
 
 ```text
 outputs/EXPERIMENT_SUMMARY.csv
@@ -87,9 +87,9 @@ unext_dynakey/mid_memory_gate_mean
 unext_dynakey/spatial_memory_entropy
 ```
 
-## summary.csv 扩展原则
+## summary.csv legacy 原则
 
-`summary.csv` 用于实验表格，不要记录过细的 step-level debug。
+`summary.csv` 只作为本地兼容文件和 MLflow artifact，不作为主实验入口；不要记录过细的 step-level debug。
 
 适合写入 summary：
 

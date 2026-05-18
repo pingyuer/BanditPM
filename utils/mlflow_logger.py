@@ -32,13 +32,13 @@ class MLflowLogger:
         self.run = None
         self.run_id = None
 
-    def start_run(self) -> None:
+    def start_run(self, *, tags: Mapping[str, Any] | None = None) -> None:
         if not self.enabled:
             return
         import mlflow
 
-        tracking_uri = str(self._cfg_get("tracking_uri", "http://172.16.240.77:5000"))
-        experiment_name = str(self._cfg_get("experiment_name", "anchor_ode"))
+        tracking_uri = str(self._cfg_get("tracking_uri", None) or "http://172.16.240.77:5000")
+        experiment_name = str(self._cfg_get("experiment_name", None) or "experiment")
         run_name = self._cfg_get("run_name", None)
         resume_run_id = self._cfg_get("resume_run_id", None)
 
@@ -51,6 +51,29 @@ class MLflowLogger:
             kwargs["run_name"] = str(run_name)
         self.run = mlflow.start_run(**kwargs)
         self.run_id = getattr(getattr(self.run, "info", None), "run_id", None)
+        if tags:
+            self.log_tags(tags)
+
+    def start_eval_run(
+        self,
+        *,
+        source_run_id: str,
+        source_checkpoint: str,
+        eval_mode: str,
+        dataset: str | None = None,
+        protocol: str | None = None,
+    ) -> None:
+        tags = {
+            "run_type": "eval",
+            "source_run_id": source_run_id,
+            "source_checkpoint": source_checkpoint,
+            "eval_mode": eval_mode,
+        }
+        if dataset:
+            tags["dataset"] = dataset
+        if protocol:
+            tags["protocol"] = protocol
+        self.start_run(tags=tags)
 
     def end_run(self, status: str = "FINISHED") -> None:
         if not self.enabled:
@@ -101,6 +124,23 @@ class MLflowLogger:
                         except Exception:
                             continue
 
+    def log_tags(self, tags: Mapping[str, Any]) -> None:
+        if not self.enabled:
+            return
+        import mlflow
+
+        clean = {str(key): str(value) for key, value in tags.items() if value is not None}
+        if not clean:
+            return
+        try:
+            mlflow.set_tags(clean)
+        except Exception:
+            for key, value in clean.items():
+                try:
+                    mlflow.set_tag(key, value)
+                except Exception:
+                    continue
+
     def log_metrics(self, metrics: Mapping[str, Any], *, step: int | None = None, prefix: str | None = None) -> None:
         if not self.enabled:
             return
@@ -135,9 +175,7 @@ class MLflowLogger:
             mlflow.log_artifacts(str(path), artifact_path=artifact_path)
 
     def log_checkpoint(self, path: str | Path, *, name: str | None = None) -> None:
-        path = Path(path)
-        artifact_path = "checkpoints" if name is None else f"checkpoints/{name}"
-        self.log_artifact(path, artifact_path=artifact_path)
+        self.log_artifact(path, artifact_path="checkpoints")
 
     def log_evaluation_result(self, result: Any, *, step: int | None = None) -> None:
         if not self.enabled or result is None:
@@ -189,7 +227,7 @@ class MLflowLogger:
             env["cuda_device_count"] = torch.cuda.device_count()
         except Exception as exc:
             env["torch_error"] = str(exc)
-        self._log_json_artifact(env, "env/runtime.json", artifact_path="env")
+        self._log_json_artifact(env, "runtime.json", artifact_path="env")
 
     def log_git_info(self) -> None:
         if not self.enabled:
@@ -206,7 +244,7 @@ class MLflowLogger:
             info["status_short"] = git("status", "--short")
         except Exception as exc:
             info["error"] = str(exc)
-        self._log_json_artifact(info, "source/git.json", artifact_path="source")
+        self._log_json_artifact(info, "git.json", artifact_path="source")
 
     def _cfg_get(self, key: str, default: Any) -> Any:
         if hasattr(self.cfg, "get"):

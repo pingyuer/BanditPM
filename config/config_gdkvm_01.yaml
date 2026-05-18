@@ -19,7 +19,7 @@ save_checkpoint_interval: 200 # Checkpoint saving interval (iterations)
 mlflow:
   enabled: true
   tracking_uri: "http://172.16.240.77:5000"
-  experiment_name: "anchor_ode"
+  experiment_name: null
   run_name: null
   resume_run_id: null
 

@@ -1505,9 +1505,6 @@ class Trainer:
             if self.main_process:
                 summary_row = self._build_summary_row(mode, global_metrics, epoch, it)
                 self._append_summary_row(summary_row)
-                logger = getattr(self, "mlflow_logger", None)
-                if logger is not None:
-                    logger.log_artifact(self.run_path / "summary.csv", artifact_path="eval")
 
             if self.main_process:
                 self._log_final_metrics(global_metrics, mode, it, epoch)
@@ -1660,6 +1657,14 @@ class Trainer:
         if logger is not None:
             logger.log_artifact(latest_path, artifact_path="checkpoints")
         self.log.info(f"Saved checkpoint: {ckpt_path}")
+
+    def upload_summary_artifact(self) -> None:
+        if not self.main_process:
+            return
+        logger = getattr(self, "mlflow_logger", None)
+        summary_path = self.run_path / "summary.csv"
+        if logger is not None and summary_path.exists():
+            logger.log_artifact(summary_path, artifact_path="eval")
 
     def load_checkpoint(self, path: str):
         self.log.info(f"Loading checkpoint: {path}")

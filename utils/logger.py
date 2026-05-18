@@ -23,7 +23,7 @@ def fix_width_trunc(x):
 
 
 class TrainingLogger:
-    def __init__(self, run_dir, py_logger: logging.Logger, *, enabled_tb=True, git_info_enabled=False):
+    def __init__(self, run_dir, py_logger: logging.Logger, *, git_info_enabled=False, **_ignored):
         """
         """
         self.run_dir = run_dir

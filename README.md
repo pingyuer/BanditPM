@@ -98,13 +98,13 @@ unext_fusion_echo   unext_fusion_camus   unext_fusion_domain
 
 ## 输出与记录
 
-历史实验输出已整理为：
+历史本地实验可用 legacy 工具汇总为：
 
 ```text
 outputs/EXPERIMENT_SUMMARY.csv
 ```
 
-如需重新汇总并清理旧 run：
+正式实验比较以 MLflow UI 为准。如需重新汇总并清理旧 run：
 
 ```bash
 python scripts/summarize_and_clean_outputs.py --clean

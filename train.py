@@ -1,6 +1,9 @@
 import os
 import math
 import logging
+import datetime
+import subprocess
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -31,16 +34,66 @@ def resolve_model_name(cfg: DictConfig) -> str:
     return str(cfg.get("model_name", cfg.model.get("name", "BanditPM")))
 
 
-def resolve_mlflow_run_name(cfg: DictConfig) -> str:
+def resolve_git_short_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            text=True,
+        ).strip()
+    except Exception:
+        return "nogit"
+
+
+def resolve_mlflow_experiment_name(cfg: DictConfig) -> str:
+    mlflow_cfg = cfg.get("mlflow", {})
+    configured = mlflow_cfg.get("experiment_name", None) if hasattr(mlflow_cfg, "get") else None
+    if configured:
+        return str(configured)
+
+    model_name = resolve_model_name(cfg).lower()
+    exp_id = str(cfg.get("exp_id", "")).lower()
+    memory_cfg = cfg.get("model", {}).get("memory_core", {}) if hasattr(cfg.get("model", {}), "get") else {}
+    memory_type = str(memory_cfg.get("type", "")).lower() if hasattr(memory_cfg, "get") else ""
+    unext_cfg = cfg.get("model", {}).get("unext_dynakey", {}) if hasattr(cfg.get("model", {}), "get") else {}
+    unext_uses_dynakey = bool(unext_cfg.get("use_dynakey", False)) if hasattr(unext_cfg, "get") else False
+    uses_dynakey = memory_type == "dynakey" or unext_uses_dynakey
+
+    if model_name.startswith("anchor_ode") or "anchor_ode" in exp_id:
+        return "anchor_ode"
+    if uses_dynakey or "dynakey" in exp_id:
+        return "dynakey"
+    if model_name in {"gdkvm", "banditpm"}:
+        return "gdkvm"
+    if model_name == "kpff":
+        return "kpff"
+    if model_name == "unext_fusion":
+        return "dynakey" if uses_dynakey else "unext_fusion"
+    if model_name == "delay_ode":
+        return "delay_ode"
+    if model_name in {"unext", "unext_only", "baseline_unext"} or "unext_only" in exp_id:
+        return "baseline_unext"
+    return model_name or "experiment"
+
+
+def resolve_mlflow_run_name(
+    cfg: DictConfig,
+    *,
+    timestamp: str | None = None,
+    git_hash: str | None = None,
+) -> str:
     mlflow_cfg = cfg.get("mlflow", {})
     configured = mlflow_cfg.get("run_name", None) if hasattr(mlflow_cfg, "get") else None
     if configured:
         return str(configured)
     model_name = resolve_model_name(cfg)
     dataset_name = str(cfg.get("dataset_name", "dataset"))
+    protocol = str(cfg.get("data", {}).get("protocol_name", "protocol"))
     exp_name = str(cfg.get("exp_id", "experiment"))
     seed = int(cfg.get("seed", 42))
-    return f"{model_name}_{dataset_name}_{exp_name}_seed{seed}"
+    timestamp = timestamp or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    git_hash = git_hash or resolve_git_short_hash()
+    return f"{model_name}_{dataset_name}_{protocol}_{exp_name}_seed{seed}_{timestamp}_{git_hash}"
 
 
 def resolve_dataset_class(cfg: DictConfig):
@@ -57,6 +110,8 @@ def train(cfg: DictConfig):
     main_process = is_main_process()
     run_dir = HydraConfig.get().run.dir
     mlflow_cfg = cfg.get("mlflow", {})
+    if hasattr(mlflow_cfg, "get") and not mlflow_cfg.get("experiment_name", None):
+        mlflow_cfg.experiment_name = resolve_mlflow_experiment_name(cfg)
     if hasattr(mlflow_cfg, "get") and not mlflow_cfg.get("run_name", None):
         mlflow_cfg.run_name = resolve_mlflow_run_name(cfg)
     mlflow_logger = MLflowLogger(
@@ -66,6 +121,7 @@ def train(cfg: DictConfig):
         main_process=main_process,
     )
     mlflow_started = False
+    trainer = None
 
     try:
         mlflow_logger.start_run()
@@ -100,7 +156,7 @@ def train(cfg: DictConfig):
         info_if_rank_zero(f"num_workers(per-GPU)={stage_cfg.num_workers}")
 
         # -------- Logging: Only main process writes to MLflow --------
-        log_writer = TrainingLogger(run_dir, logging.getLogger(), enabled_tb=main_process)
+        log_writer = TrainingLogger(run_dir, logging.getLogger())
 
         # -------- DataLoader Factory (Robust with fallback) --------
         def create_safe_dataloader(
@@ -267,6 +323,8 @@ def train(cfg: DictConfig):
                 )
 
         info_if_rank_zero("Training completed.")
+        if trainer is not None:
+            trainer.upload_summary_artifact()
         if mlflow_started:
             mlflow_logger.end_run()
 

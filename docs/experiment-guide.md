@@ -117,7 +117,7 @@ python scripts/summarize_and_clean_outputs.py
 python scripts/summarize_and_clean_outputs.py --clean
 ```
 
-总表路径：
+legacy 总表路径：
 
 ```text
 outputs/EXPERIMENT_SUMMARY.csv
