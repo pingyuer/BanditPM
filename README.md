@@ -94,7 +94,7 @@ unext_fusion_echo   unext_fusion_camus   unext_fusion_domain
 - 新模型通过 `MODEL_REGISTRY` 注册。
 - 新数据集通过 `DATASET_REGISTRY` 注册。
 - 新实验优先新增 `_base_` 与 canonical config。
-- 新日志指标优先从 model aux 返回，再由 `Trainer` 聚合到 TensorBoard / wandb / `summary.csv`。
+- 新日志指标优先从 model aux 返回，再由 `Trainer`/`Evaluator` 聚合到 MLflow；`summary.csv` 仅作为 artifact 保留。
 
 ## 输出与记录
 

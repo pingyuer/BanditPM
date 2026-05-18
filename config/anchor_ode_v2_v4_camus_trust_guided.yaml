@@ -1,0 +1,13 @@
+defaults:
+  - anchor_ode_v2_v4_camus_skip_long_repro
+  - _self_
+
+exp_id: "anchor_ode_v2_v4_camus_trust_guided"
+
+
+model:
+  anchor_ode:
+    confidence_prior_bias: -0.65
+    lambda_conf: 0.015
+    lambda_guided_seg: 0.22
+    lambda_affine_reg: 0.008

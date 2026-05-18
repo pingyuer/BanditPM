@@ -41,7 +41,6 @@ select_values() {
 run_exp() {
   local name="$1"
   echo "[$(date '+%F %T')] START ${name}"
-  "${UV_BIN}" run python train.py --config-name "${name}" wandb_mode="${WANDB_MODE:-online}" "${EXTRA_ARGS[@]}" 2>&1 | tee "${LOG_DIR}/${name}.log"
   echo "[$(date '+%F %T')] END ${name}"
 }
 

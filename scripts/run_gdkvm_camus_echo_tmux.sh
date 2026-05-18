@@ -29,7 +29,6 @@ COMMON_ARGS=(
   evaluation.exclude_init_frame=true
   evaluation.init_frame_index=0
   evaluation.protocol_version=v3_canonical_no_leak
-  wandb_mode=online
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
@@ -47,13 +46,11 @@ echo_cmd() {
     CUDA_VISIBLE_DEVICES="${gpu}" \
     PYTHONPATH=. \
     HYDRA_FULL_ERROR=1 \
-    WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}" \
     DATASETS_ROOT="${DATASETS_ROOT}" \
     "${UV_BIN}" run python train.py \
     --config-name "${config_name}" \
     "$@" \
     "exp_id=${name}" \
-    "wandb.group=canonical_gdkvm" \
     "hydra.run.dir=outputs/BanditPM/${name}/\${now:%Y-%m-%d}/\${now:%H-%M-%S}"
 }
 
@@ -63,8 +60,7 @@ ECHO_CMD="$(echo_cmd 0 gdkvm_echo gdkvm_echo \
   data.protocol_name=echonet_ed2es_endpoint \
   "data_path=${DATASETS_ROOT}/processed/echonet_png128_10f" \
   main_training.batch_size=20 \
-  main_training.num_workers=10 \
-  "wandb.tags=[canonical,gdkvm,echo,no_leak,rerun]")"
+  main_training.num_workers=10)"
 
 CAMUS_CMD="$(echo_cmd 1 gdkvm_camus gdkvm_camus \
   "${COMMON_ARGS[@]}" \
@@ -72,8 +68,7 @@ CAMUS_CMD="$(echo_cmd 1 gdkvm_camus gdkvm_camus \
   data.protocol_name=camus_short_dense \
   "data_path=${DATASETS_ROOT}/processed/camus_png256_10f" \
   main_training.batch_size=8 \
-  main_training.num_workers=8 \
-  "wandb.tags=[canonical,gdkvm,camus,no_leak,rerun]")"
+  main_training.num_workers=8)"
 
 tmux new-session -d -s "${SESSION_NAME}" -n echo "cd '${PROJECT_DIR}' && echo '[\$(date +%F\\ %T)] START gdkvm_echo' && ${ECHO_CMD} 2>&1 | tee '${LOG_DIR}/gdkvm_echo.log'; echo '[\$(date +%F\\ %T)] END gdkvm_echo'; exec bash"
 tmux new-window -t "${SESSION_NAME}" -n camus "cd '${PROJECT_DIR}' && echo '[\$(date +%F\\ %T)] START gdkvm_camus' && ${CAMUS_CMD} 2>&1 | tee '${LOG_DIR}/gdkvm_camus.log'; echo '[\$(date +%F\\ %T)] END gdkvm_camus'; exec bash"

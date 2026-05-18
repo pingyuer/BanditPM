@@ -33,7 +33,7 @@ model:
 - backbone / encoder 放在 `model/modules/` 或已有模型文件附近。
 - memory/readout/policy 放在 `model/modules/` 或专题子目录。
 - loss 汇总放在 `model/losses.py`，不要让模型直接修改总 loss。
-- logging 只返回 aux，不直接在模块里调用 wandb。
+- logging 只返回 aux，不直接在模块里调用 MLflow。
 
 模块 forward 推荐返回：
 
@@ -61,7 +61,7 @@ out[f"memory_aux_{t}"] = {...}
 
 ## 接入日志
 
-模型或模块不直接写 wandb。新增指标先放入 aux：
+模型或模块不直接写 MLflow。新增指标先放入 aux：
 
 ```python
 memory_aux = {

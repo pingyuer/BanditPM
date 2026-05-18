@@ -8,7 +8,7 @@
 - 解析 dataset class。
 - 构造 dataloader。
 - 初始化 `Trainer`。
-- 初始化 wandb/TensorBoard 输出。
+- 初始化 MLflow/MLflow 输出。
 
 训练循环、eval、checkpoint、summary 写入集中在 `model/trainer.py`。
 

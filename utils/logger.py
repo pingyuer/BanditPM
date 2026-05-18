@@ -1,6 +1,4 @@
-"""
-Dumps things to tensorboard and console
-"""
+"""Lightweight console/file logger facade used by training utilities."""
 
 import os
 import logging
@@ -8,7 +6,6 @@ import datetime
 from typing import Dict
 from PIL import Image
 
-from torch.utils.tensorboard import SummaryWriter
 from utils.time_estimator import TimeEstimator
 
 
@@ -25,13 +22,12 @@ def fix_width_trunc(x):
     return ('{:.9s}'.format('{:0.9f}'.format(x)))
 
 
-class TensorboardLogger:
+class TrainingLogger:
     def __init__(self, run_dir, py_logger: logging.Logger, *, enabled_tb=True, git_info_enabled=False):
         """
         """
         self.run_dir = run_dir
         self.py_log = py_logger
-        self.tb_log = SummaryWriter(run_dir) if enabled_tb else None
 
         # 
         git_info = "disabled"
@@ -72,8 +68,7 @@ class TensorboardLogger:
     # ----------- Logging methods -----------
 
     def log_scalar(self, tag, x, it):
-        if self.tb_log is not None:
-            self.tb_log.add_scalar(tag, x, it)
+        return None
 
     def log_metrics(self, exp_id, prefix, metrics: Dict, it):
         msg = f"{exp_id}-{prefix} - it {it:6d}: "
@@ -109,8 +104,6 @@ class TensorboardLogger:
 
     def log_string(self, tag, x):
         self.py_log.info(f"{tag} - {x}")
-        if self.tb_log is not None:
-            self.tb_log.add_text(tag, x)
 
     def debug(self, x): self.py_log.debug(x)
     def info(self, x): self.py_log.info(x)

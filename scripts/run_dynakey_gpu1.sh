@@ -35,7 +35,6 @@ DYNAKEY_ARGS=(
 run_exp camus_dynakey \
   --config-name config_banditpm_baseline \
   exp_id=camus_dynakey \
-  wandb_mode=online \
   dataset_name=camus \
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
   main_training.batch_size=8 \
@@ -44,14 +43,11 @@ run_exp camus_dynakey \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=camus_dynakey \
-  wandb.tags='[camus,dynakey,kpff,ode_memory]' \
   "${DYNAKEY_ARGS[@]}"
 
 run_exp echonet_pediatric_a4c_full_cycle_dynakey \
   --config-name config_banditpm_baseline \
   exp_id=echonet_pediatric_a4c_full_cycle_dynakey \
-  wandb_mode=online \
   dataset_name=echonet \
   data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
   data.protocol_name=echonet_pediatric_fullcycle_sparse \
@@ -61,14 +57,11 @@ run_exp echonet_pediatric_a4c_full_cycle_dynakey \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=echonet_pediatric_a4c_fullcycle_dynakey \
-  wandb.tags='[echonet_pediatric,a4c,full_cycle,dynakey,kpff,ode_memory]' \
   "${DYNAKEY_ARGS[@]}"
 
 run_exp cardiacuda_a4c_lv_dense_oracle_dynakey \
   --config-name cardiacuda_a4c_lv_dense_oracle \
   exp_id=cardiacuda_a4c_lv_dense_oracle_dynakey \
-  wandb_mode=online \
   dataset_name=cardiacuda \
   data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_dense_png128_10f \
   main_training.batch_size=4 \
@@ -77,6 +70,4 @@ run_exp cardiacuda_a4c_lv_dense_oracle_dynakey \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=cardiacuda_dynakey \
-  wandb.tags='[cardiacuda,a4c,lv,dense,oracle,dynakey,kpff,ode_memory]' \
   "${DYNAKEY_ARGS[@]}"

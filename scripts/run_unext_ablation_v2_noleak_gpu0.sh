@@ -29,7 +29,6 @@ COMMON_ARGS=(
   evaluation.init_mode=pred_or_zero
   evaluation.exclude_init_frame=true
   evaluation.init_frame_index=0
-  wandb_mode=online
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
@@ -39,7 +38,6 @@ COMMON_ARGS=(
   data_path=${DATASETS_ROOT}/processed/echonet_png128_10f
   main_training.batch_size=24
   main_training.num_workers=12
-  wandb.group=unext_dynakey_ablation_v2_no_leak
 )
 
 run_exp echonet_unext_only_v2_noleak config_unext_only \

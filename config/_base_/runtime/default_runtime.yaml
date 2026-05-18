@@ -1,8 +1,12 @@
 # @package _global_
 output_root: "outputs/BanditPM"
 
-wandb:
-  project: "BanditPM"
+mlflow:
+  enabled: true
+  tracking_uri: "http://172.16.240.77:5000"
+  experiment_name: "anchor_ode"
+  run_name: null
+  resume_run_id: null
 
 log_text_interval: 100
 log_image_interval: 500

@@ -30,7 +30,6 @@ COMMON_ARGS=(
   evaluation.exclude_init_frame=true
   evaluation.init_frame_index=0
   evaluation.protocol_version=v2_no_leak_unext_dynakey_spatial_v1
-  wandb_mode=online
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
@@ -40,25 +39,20 @@ COMMON_ARGS=(
   data_path=${DATASETS_ROOT}/processed/echonet_png128_10f
   main_training.batch_size=20
   main_training.num_workers=10
-  wandb.group=unext_dynakey_spatial_v1
 )
 
 run_exp echonet_unext_dynakey_spatial_no_refine_v1 config_unext_dynakey_spatial_no_refine \
   "${COMMON_ARGS[@]}" \
   exp_id=echonet_unext_dynakey_spatial_no_refine_v1 \
-  wandb.tags='[echonet,unext,dynakey,spatial_memory,no_refine,v1,predinit,exclude_init_frame]'
 
 run_exp echonet_unext_dynakey_spatial_full_v1 config_unext_dynakey_spatial \
   "${COMMON_ARGS[@]}" \
   exp_id=echonet_unext_dynakey_spatial_full_v1 \
-  wandb.tags='[echonet,unext,dynakey,spatial_memory,spatial_gate,phase_retrieval,v1,predinit,exclude_init_frame]'
 
 run_exp echonet_unext_dynakey_spatial_qdiag_v1 config_unext_dynakey_spatial_q_diagnostic \
   "${COMMON_ARGS[@]}" \
   exp_id=echonet_unext_dynakey_spatial_qdiag_v1 \
-  wandb.tags='[echonet,unext,dynakey,spatial_memory,q_diagnostic,v1,predinit,exclude_init_frame]'
 
 run_exp echonet_unext_dynakey_spatial_qtrain_v1 config_unext_dynakey_spatial_q_training \
   "${COMMON_ARGS[@]}" \
   exp_id=echonet_unext_dynakey_spatial_qtrain_v1 \
-  wandb.tags='[echonet,unext,dynakey,spatial_memory,q_training,seg_reward,v1,predinit,exclude_init_frame]'

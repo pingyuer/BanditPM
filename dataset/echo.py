@@ -22,10 +22,41 @@ def _infer_protocol_name(filepath: str) -> str:
         return "echonet_fullcycle_sparse"
     return "echonet_ed2es_endpoint"
 
+def _apply_intensity_augmentation(frames_t: torch.Tensor, augmentation_cfg) -> torch.Tensor:
+    if not augmentation_cfg:
+        return frames_t
+    get = augmentation_cfg.get if hasattr(augmentation_cfg, "get") else lambda key, default=None: default
+    if not bool(get("enabled", False)):
+        return frames_t
+    brightness = float(get("brightness", 0.0))
+    contrast = float(get("contrast", 0.0))
+    gamma = float(get("gamma", 0.0))
+    if contrast > 0.0:
+        scale = 1.0 + float(torch.empty((), device=frames_t.device).uniform_(-contrast, contrast).item())
+        frames_t = (frames_t - 0.5) * scale + 0.5
+    if brightness > 0.0:
+        shift = float(torch.empty((), device=frames_t.device).uniform_(-brightness, brightness).item())
+        frames_t = frames_t + shift
+    frames_t = frames_t.clamp(0.0, 1.0)
+    if gamma > 0.0:
+        exponent = 1.0 + float(torch.empty((), device=frames_t.device).uniform_(-gamma, gamma).item())
+        frames_t = frames_t.clamp_min(1.0e-6).pow(exponent)
+    return frames_t.clamp(0.0, 1.0)
+
+
 class EchoDataset(Dataset):
     """EchoNet-style sparse video dataset with keyframe supervision."""
 
-    def __init__(self, filepath: str, mode: str = 'train', seq_length=10, max_num_obj=1, size=128, merge_probability=0.0):
+    def __init__(
+        self,
+        filepath: str,
+        mode: str = 'train',
+        seq_length=10,
+        max_num_obj=1,
+        size=128,
+        merge_probability=0.0,
+        augmentation=None,
+    ):
         super().__init__()
         self.filepath = filepath
         self.mode = mode
@@ -33,6 +64,7 @@ class EchoDataset(Dataset):
         self.max_num_obj = max_num_obj
         self.size = size
         self.merge_probability = merge_probability
+        self.augmentation = augmentation
 
         self.img_root = os.path.join(filepath, mode, 'img')
         self.label_root = os.path.join(filepath, mode, 'label')
@@ -142,6 +174,8 @@ class EchoDataset(Dataset):
 
         frames_t = torch.from_numpy(imgs_np).float().unsqueeze(1) / 255.0
         masks_t = torch.from_numpy(masks_np).long().unsqueeze(1)
+        if self.mode == 'train':
+            frames_t = _apply_intensity_augmentation(frames_t, self.augmentation)
 
         info = {
             'name': sample['subfolder'],

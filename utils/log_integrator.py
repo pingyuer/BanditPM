@@ -1,15 +1,15 @@
 """
 Integrate numerical values for some iterations
-Typically used for loss computation / logging to tensorboard
+Typically used for loss computation / logging to MLflow
 Call finalize and create a new Integrator when you want to display/log
 """
 from typing import Dict, Callable, Tuple
 import torch
-from utils.logger import TensorboardLogger
+from utils.logger import TrainingLogger
 
 
 class Integrator:
-    def __init__(self, logger: TensorboardLogger, distributed: bool = True):
+    def __init__(self, logger: TrainingLogger, distributed: bool = True):
         self.values = {}
         self.counts = {}
         self.hooks = []  # List is used here to maintain insertion order

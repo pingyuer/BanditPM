@@ -1,0 +1,12 @@
+defaults:
+  - anchor_ode_v2_v3_camus_skip_only_tta
+  - _self_
+
+exp_id: "anchor_ode_v2_v3_camus_skip_only_long"
+
+
+main_training:
+  num_iterations: 4000
+  lr_schedule: step
+  lr_schedule_steps: [2000, 3200]
+  lr_schedule_gamma: 0.1

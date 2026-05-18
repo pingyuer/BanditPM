@@ -7,7 +7,3 @@ defaults:
   - _self_
 
 exp_id: "delay_ode_domain"
-
-wandb:
-  group: "canonical_delay_ode"
-  tags: ["canonical", "delay_ode", "domain", "cardiacuda", "no_leak"]

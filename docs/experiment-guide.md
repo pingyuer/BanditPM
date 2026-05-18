@@ -55,7 +55,7 @@ PROJECT_DIR=/home/tahara/GDKVM
 UV_BIN=/home/tahara/miniconda3/bin/uv
 DATASETS_ROOT=$HOME/datasets
 CUDA_VISIBLE_DEVICES=0
-WANDB_MODE=online
+MLFLOW_ENABLED=true
 LOG_DIR=outputs/BanditPM/tmux_logs
 ```
 
@@ -64,10 +64,10 @@ LOG_DIR=outputs/BanditPM/tmux_logs
 修改代码或配置后，先跑 1-iter smoke：
 
 ```bash
-PYTHONPATH=. HYDRA_FULL_ERROR=1 WANDB_MODE=disabled \
+PYTHONPATH=. HYDRA_FULL_ERROR=1 MLFLOW_ENABLED=false \
 /home/tahara/miniconda3/bin/uv run python train.py \
   --config-name unext_fusion_echo \
-  wandb_mode=disabled \
+  mlflow.enabled=false \
   main_training.num_iterations=1 \
   main_training.batch_size=1 \
   main_training.num_workers=0 \
@@ -82,7 +82,7 @@ smoke 通过只能说明入口链路可跑，不代表指标有效。
 
 正式实验建议：
 
-- `wandb_mode=online`。
+- `mlflow.enabled=true`。
 - 保持 `evaluation.exclude_init_frame=true`。
 - 保持 `evaluation.init_mode=pred_or_zero`。
 - 保持 `model.allow_oracle_init_when_requested=false`，除非是 oracle upper-bound。

@@ -12,6 +12,75 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
     embed_weight_decay = stage_cfg.embed_weight_decay
     backbone_lr_ratio = stage_cfg.backbone_lr_ratio
     base_lr = stage_cfg.learning_rate
+    anchor_ode_lr_ratio = stage_cfg.get("anchor_ode_lr_ratio", None)
+    unext_lr_ratio = float(stage_cfg.get("unext_lr_ratio", backbone_lr_ratio))
+
+    if anchor_ode_lr_ratio is not None:
+        anchor_ode_lr_ratio = float(anchor_ode_lr_ratio)
+        unext_params = []
+        anchor_ode_params = []
+        embed_params = []
+        other_params = []
+        embedding_names = ['summary_pos', 'query_init', 'query_emb', 'obj_pe']
+        embedding_names = [e + '.weight' for e in embedding_names]
+
+        memo = set()
+        for name, param in model.named_parameters():
+            if not param.requires_grad or param in memo:
+                continue
+            memo.add(param)
+            if name.startswith('module.'):
+                name = name[7:]
+
+            if name.startswith('backbone.'):
+                unext_params.append(param)
+                if print_log:
+                    log.info(f'{name} counted as a UNeXt/base segmenter parameter.')
+            elif name.startswith((
+                'state_encoder.',
+                'ode_bank.',
+                'affine_regressor.',
+                'geometry_regressor.',
+                'guidance_projs.',
+                'gate_head.',
+                'confidence.',
+            )):
+                anchor_ode_params.append(param)
+                if print_log:
+                    log.info(f'{name} counted as an AnchorODE parameter.')
+            elif any(name.endswith(e) for e in embedding_names):
+                embed_params.append(param)
+                if print_log:
+                    log.info(f'{name} counted as an embedding parameter.')
+            else:
+                other_params.append(param)
+
+        return [
+            {
+                'params': unext_params,
+                'lr': base_lr * unext_lr_ratio,
+                'weight_decay': weight_decay,
+                'name': 'unext_base',
+            },
+            {
+                'params': anchor_ode_params,
+                'lr': base_lr * anchor_ode_lr_ratio,
+                'weight_decay': weight_decay,
+                'name': 'anchor_ode',
+            },
+            {
+                'params': embed_params,
+                'lr': base_lr,
+                'weight_decay': embed_weight_decay,
+                'name': 'embedding',
+            },
+            {
+                'params': other_params,
+                'lr': base_lr,
+                'weight_decay': weight_decay,
+                'name': 'other',
+            },
+        ]
 
     backbone_params = []
     embed_params = []

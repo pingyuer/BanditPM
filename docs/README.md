@@ -8,7 +8,7 @@
 2. [config-guide.md](config-guide.md): 再理解如何组合 canonical config。
 3. [develop-modules.md](develop-modules.md): 添加模型、memory、fusion、loss 或 policy。
 4. [develop-datasets.md](develop-datasets.md): 添加新数据集或新协议。
-5. [logging-guide.md](logging-guide.md): 添加 wandb/TensorBoard/summary 指标。
+5. [logging-guide.md](logging-guide.md): 添加 MLflow/summary 指标。
 6. [experiment-guide.md](experiment-guide.md): 运行三方法 x 三数据集实验矩阵。
 7. [project-guidelines.md](project-guidelines.md): 工程约定和测试策略。
 

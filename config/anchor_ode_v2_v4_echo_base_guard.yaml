@@ -1,0 +1,15 @@
+defaults:
+  - anchor_ode_v2_v4_echo_e2_raw_fine
+  - _self_
+
+exp_id: "anchor_ode_v2_v4_echo_base_guard"
+
+
+model:
+  anchor_ode:
+    gate_init_bias: -2.7
+    confidence_prior_bias: -1.2
+    lambda_base_seg: 0.45
+    lambda_guided_seg: 0.15
+    prior_residual_clip: 1.0
+    lambda_affine_reg: 0.02

@@ -76,7 +76,6 @@ class ExperimentSpec:
             "main_training.lr_schedule_steps=[333,667]",
             "eval_stage.eval_interval=200",
             "save=0",
-            "wandb_mode=offline",
             *self.method_overrides,
         ]
 

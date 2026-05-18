@@ -86,6 +86,7 @@ class LossComputer(nn.Module):
             "unextanchorodeaffine",
         }
         self.lambda_anchor_ode_base_seg = float(anchor_ode_cfg.get("lambda_base_seg", 0.0))
+        self.lambda_anchor_ode_guided_seg = float(anchor_ode_cfg.get("lambda_guided_seg", 0.0))
         self.lambda_anchor_ode_prior = float(anchor_ode_cfg.get("lambda_prior", 0.0))
         self.lambda_anchor_ode_warp_prior = float(anchor_ode_cfg.get("lambda_warp_prior", 0.0))
         self.lambda_anchor_ode_multiscale_prior = float(anchor_ode_cfg.get("lambda_multiscale_prior", 0.0))
@@ -343,6 +344,7 @@ class LossComputer(nn.Module):
         zero = torch.zeros((), device=device, dtype=torch.float32)
         prior_terms = []
         base_terms = []
+        guided_terms = []
         multi_terms = []
         geo_terms = []
         conf_terms = []
@@ -376,6 +378,13 @@ class LossComputer(nn.Module):
                     prior_logits = aggregate(torch.sigmoid(prior_obj), dim=1)
                     ce, dice = self.mask_loss(prior_logits, soft_gt)
                     prior_terms.append(ce + dice)
+
+                guided_obj = aux.get("guided_object_logits")
+                if torch.is_tensor(guided_obj) and self.lambda_anchor_ode_guided_seg > 0:
+                    guided_obj = guided_obj[bi : bi + 1, :curr_num_obj]
+                    guided_logits = aggregate(torch.sigmoid(guided_obj), dim=1)
+                    ce, dice = self.mask_loss(guided_logits, soft_gt)
+                    guided_terms.append(ce + dice)
 
                 warped = aux.get("warped_priors")
                 multi_weight = self.lambda_anchor_ode_multiscale_prior
@@ -417,9 +426,17 @@ class LossComputer(nn.Module):
                 conf = aux.get("confidence_prior")
                 if torch.is_tensor(conf) and torch.is_tensor(prior_obj) and self.lambda_anchor_ode_conf > 0:
                     with torch.no_grad():
-                        prior_prob = torch.sigmoid(aux["prior_logits"][bi : bi + 1, :curr_num_obj])
-                        err = (prior_prob - gt_mask.to(device=prior_prob.device, dtype=prior_prob.dtype)).abs().mean(dim=(-2, -1))
-                        target = torch.exp(-4.0 * err).clamp(0.0, 1.0)
+                        base_for_conf = aux.get("base_object_logits")
+                        guided_for_conf = aux.get("guided_object_logits", aux.get("prior_logits"))
+                        base_prob = torch.sigmoid(base_for_conf[bi : bi + 1, :curr_num_obj]) if torch.is_tensor(base_for_conf) else None
+                        prior_prob = torch.sigmoid(guided_for_conf[bi : bi + 1, :curr_num_obj])
+                        gt_float = gt_mask.to(device=prior_prob.device, dtype=prior_prob.dtype)
+                        prior_err = (prior_prob - gt_float).abs().mean(dim=(-2, -1))
+                        if base_prob is not None:
+                            base_err = (base_prob.to(device=prior_prob.device, dtype=prior_prob.dtype) - gt_float).abs().mean(dim=(-2, -1))
+                            target = torch.sigmoid(8.0 * (base_err - prior_err)).clamp(0.0, 1.0)
+                        else:
+                            target = torch.exp(-4.0 * prior_err).clamp(0.0, 1.0)
                     pred_conf = conf[bi : bi + 1, :curr_num_obj].to(device=target.device, dtype=target.dtype)
                     conf_terms.append(F.smooth_l1_loss(pred_conf, target))
 
@@ -439,6 +456,8 @@ class LossComputer(nn.Module):
             out["aux_anchor_ode_base"] = torch.stack(base_terms).mean() * self.lambda_anchor_ode_base_seg
         if prior_terms:
             out["aux_anchor_ode_prior"] = torch.stack(prior_terms).mean() * self.lambda_anchor_ode_prior
+        if guided_terms:
+            out["aux_anchor_ode_guided"] = torch.stack(guided_terms).mean() * self.lambda_anchor_ode_guided_seg
         if multi_terms:
             weight = max(self.lambda_anchor_ode_multiscale_prior, self.lambda_anchor_ode_warp_prior)
             out["aux_anchor_ode_multiscale_prior"] = torch.stack(multi_terms).mean() * weight

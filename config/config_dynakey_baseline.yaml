@@ -4,9 +4,6 @@ defaults:
 
 exp_id: "dynakey_baseline"
 
-wandb:
-  group: "dynakey"
-  tags: ["dynakey", "kpff", "ode_memory", "q_loss"]
 
 model:
   memory_core:

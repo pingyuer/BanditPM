@@ -21,10 +21,6 @@ evaluation:
   threshold_search_end: 0.70
   threshold_search_step: 0.05
 
-wandb:
-  project: "BanditPM"
-  group: "delay_ode"
-  tags: ["delay_ode", "predict_before_update", "warmup_only", "no_leak"]
 
 model:
   name: "delay_ode"

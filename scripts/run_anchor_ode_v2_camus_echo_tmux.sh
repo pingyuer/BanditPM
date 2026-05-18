@@ -28,8 +28,7 @@ COMMON_ARGS=(
   evaluation.init_mode=pred_or_zero
   evaluation.exclude_init_frame=true
   evaluation.init_frame_index=0
-  evaluation.protocol_version=v3_canonical_no_leak
-  wandb_mode=online
+  evaluation.protocol_version=v3_current_anchor_affine
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
@@ -47,13 +46,11 @@ echo_cmd() {
     CUDA_VISIBLE_DEVICES="${gpu}" \
     PYTHONPATH=. \
     HYDRA_FULL_ERROR=1 \
-    WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}" \
     DATASETS_ROOT="${DATASETS_ROOT}" \
     "${UV_BIN}" run python train.py \
     --config-name "${config_name}" \
     "$@" \
     "exp_id=${name}" \
-    "wandb.group=canonical_anchor_ode_v2" \
     "hydra.run.dir=outputs/BanditPM/${name}/\${now:%Y-%m-%d}/\${now:%H-%M-%S}"
 }
 
@@ -63,8 +60,7 @@ ECHO_CMD="$(echo_cmd 0 anchor_ode_v2_echo anchor_ode_v2_echo \
   data.protocol_name=echonet_ed2es_endpoint \
   "data_path=${DATASETS_ROOT}/processed/echonet_png128_10f" \
   main_training.batch_size=20 \
-  main_training.num_workers=10 \
-  "wandb.tags=[canonical,anchor_ode_v2,current_anchor_affine,echo,no_leak]")"
+  main_training.num_workers=10)"
 
 CAMUS_CMD="$(echo_cmd 1 anchor_ode_v2_camus anchor_ode_v2_camus \
   "${COMMON_ARGS[@]}" \
@@ -72,8 +68,7 @@ CAMUS_CMD="$(echo_cmd 1 anchor_ode_v2_camus anchor_ode_v2_camus \
   data.protocol_name=camus_short_dense \
   "data_path=${DATASETS_ROOT}/processed/camus_png256_10f" \
   main_training.batch_size=8 \
-  main_training.num_workers=8 \
-  "wandb.tags=[canonical,anchor_ode_v2,current_anchor_affine,camus,no_leak]")"
+  main_training.num_workers=8)"
 
 tmux new-session -d -s "${SESSION_NAME}" -n echo "cd '${PROJECT_DIR}' && echo '[\$(date +%F\\ %T)] START anchor_ode_v2_echo' && ${ECHO_CMD} 2>&1 | tee '${LOG_DIR}/anchor_ode_v2_echo.log'; echo '[\$(date +%F\\ %T)] END anchor_ode_v2_echo'; exec bash"
 tmux new-window -t "${SESSION_NAME}" -n camus "cd '${PROJECT_DIR}' && echo '[\$(date +%F\\ %T)] START anchor_ode_v2_camus' && ${CAMUS_CMD} 2>&1 | tee '${LOG_DIR}/anchor_ode_v2_camus.log'; echo '[\$(date +%F\\ %T)] END anchor_ode_v2_camus'; exec bash"

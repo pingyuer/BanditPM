@@ -30,7 +30,6 @@ COMMON_ARGS=(
   evaluation.exclude_init_frame=true
   evaluation.init_frame_index=0
   evaluation.protocol_version=v2_no_leak_unext_dynakey
-  wandb_mode=online
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
@@ -47,9 +46,7 @@ run_exp camus_unext_dynakey_v2_noleak \
   data.protocol_name=camus_short_dense \
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
   main_training.batch_size=10 \
-  main_training.num_workers=8 \
-  wandb.group=unext_dynakey_v2_no_leak \
-  wandb.tags='[camus,unext,dynakey,ode_memory,temporal_refine,v2_no_leak,predinit,exclude_init_frame]'
+  main_training.num_workers=8
 
 run_exp echonet_pediatric_a4c_full_cycle_unext_dynakey_v2_noleak \
   "${COMMON_ARGS[@]}" \
@@ -58,9 +55,7 @@ run_exp echonet_pediatric_a4c_full_cycle_unext_dynakey_v2_noleak \
   data.protocol_name=echonet_pediatric_fullcycle_sparse \
   data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
   main_training.batch_size=24 \
-  main_training.num_workers=12 \
-  wandb.group=unext_dynakey_v2_no_leak \
-  wandb.tags='[echonet_pediatric,a4c,full_cycle,unext,dynakey,ode_memory,temporal_refine,v2_no_leak,predinit,exclude_init_frame]'
+  main_training.num_workers=12
 
 run_exp cardiacuda_a4c_lv_dense_unext_dynakey_v2_noleak \
   "${COMMON_ARGS[@]}" \
@@ -70,5 +65,3 @@ run_exp cardiacuda_a4c_lv_dense_unext_dynakey_v2_noleak \
   data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_dense_png128_10f \
   main_training.batch_size=4 \
   main_training.num_workers=4 \
-  wandb.group=unext_dynakey_v2_no_leak \
-  wandb.tags='[cardiacuda,a4c,lv,dense,unext,dynakey,ode_memory,temporal_refine,v2_no_leak,predinit,exclude_init_frame]'

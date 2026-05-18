@@ -7,7 +7,3 @@ defaults:
   - _self_
 
 exp_id: "anchor_ode_v2_camus"
-
-wandb:
-  group: "canonical_anchor_ode_v2"
-  tags: ["canonical", "anchor_ode_v2", "unext", "current_anchor_affine", "camus", "no_leak"]

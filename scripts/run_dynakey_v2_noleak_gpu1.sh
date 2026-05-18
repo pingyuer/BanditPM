@@ -49,7 +49,6 @@ DYNAKEY_ARGS=(
 run_exp camus_dynakey_qlearn_v2_noleak \
   "${NOLEAK_ARGS[@]}" \
   exp_id=camus_dynakey_qlearn_v2_noleak \
-  wandb_mode=online \
   dataset_name=camus \
   data.protocol_name=camus_short_dense \
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
@@ -59,14 +58,11 @@ run_exp camus_dynakey_qlearn_v2_noleak \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_qlearn_v2_no_leak \
-  wandb.tags='[camus,dynakey,kpff,ode_memory,q_learning,q_loss,v2_no_leak,predinit,exclude_init_frame]' \
   "${QLEARN_ARGS[@]}"
 
 run_exp echonet_pediatric_a4c_full_cycle_dynakey_qlearn_v2_noleak \
   "${NOLEAK_ARGS[@]}" \
   exp_id=echonet_pediatric_a4c_full_cycle_dynakey_qlearn_v2_noleak \
-  wandb_mode=online \
   dataset_name=echonet \
   data.protocol_name=echonet_pediatric_fullcycle_sparse \
   data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
@@ -76,14 +72,11 @@ run_exp echonet_pediatric_a4c_full_cycle_dynakey_qlearn_v2_noleak \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_qlearn_v2_no_leak \
-  wandb.tags='[echonet_pediatric,a4c,full_cycle,dynakey,kpff,ode_memory,q_learning,q_loss,v2_no_leak,predinit,exclude_init_frame]' \
   "${QLEARN_ARGS[@]}"
 
 run_exp cardiacuda_a4c_lv_dense_dynakey_qlearn_v2_noleak \
   "${NOLEAK_ARGS[@]}" \
   exp_id=cardiacuda_a4c_lv_dense_dynakey_qlearn_v2_noleak \
-  wandb_mode=online \
   dataset_name=cardiacuda \
   data.protocol_name=cardiacuda_a4c_lv_dense \
   data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_dense_png128_10f \
@@ -93,14 +86,11 @@ run_exp cardiacuda_a4c_lv_dense_dynakey_qlearn_v2_noleak \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_qlearn_v2_no_leak \
-  wandb.tags='[cardiacuda,a4c,lv,dense,dynakey,kpff,ode_memory,q_learning,q_loss,v2_no_leak,predinit,exclude_init_frame]' \
   "${QLEARN_ARGS[@]}"
 
 run_exp camus_dynakey_v2_noleak \
   "${NOLEAK_ARGS[@]}" \
   exp_id=camus_dynakey_v2_noleak \
-  wandb_mode=online \
   dataset_name=camus \
   data.protocol_name=camus_short_dense \
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
@@ -110,14 +100,11 @@ run_exp camus_dynakey_v2_noleak \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_v2_no_leak \
-  wandb.tags='[camus,dynakey,kpff,ode_memory,v2_no_leak,predinit,exclude_init_frame]' \
   "${DYNAKEY_ARGS[@]}"
 
 run_exp echonet_pediatric_a4c_full_cycle_dynakey_v2_noleak \
   "${NOLEAK_ARGS[@]}" \
   exp_id=echonet_pediatric_a4c_full_cycle_dynakey_v2_noleak \
-  wandb_mode=online \
   dataset_name=echonet \
   data.protocol_name=echonet_pediatric_fullcycle_sparse \
   data_path=${DATASETS_ROOT}/processed/echonet_pediatric_a4c_full_cycle_png128_10f \
@@ -127,14 +114,11 @@ run_exp echonet_pediatric_a4c_full_cycle_dynakey_v2_noleak \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_v2_no_leak \
-  wandb.tags='[echonet_pediatric,a4c,full_cycle,dynakey,kpff,ode_memory,v2_no_leak,predinit,exclude_init_frame]' \
   "${DYNAKEY_ARGS[@]}"
 
 run_exp cardiacuda_a4c_lv_dense_dynakey_v2_noleak \
   "${NOLEAK_ARGS[@]}" \
   exp_id=cardiacuda_a4c_lv_dense_dynakey_v2_noleak \
-  wandb_mode=online \
   dataset_name=cardiacuda \
   data.protocol_name=cardiacuda_a4c_lv_dense \
   data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_dense_png128_10f \
@@ -144,6 +128,4 @@ run_exp cardiacuda_a4c_lv_dense_dynakey_v2_noleak \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_v2_no_leak \
-  wandb.tags='[cardiacuda,a4c,lv,dense,dynakey,kpff,ode_memory,v2_no_leak,predinit,exclude_init_frame]' \
   "${DYNAKEY_ARGS[@]}"

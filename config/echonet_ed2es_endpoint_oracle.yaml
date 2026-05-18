@@ -18,4 +18,3 @@ evaluation:
   frame_scope: "supervised_only"
   init_mode: "oracle_gt"
   metric_space: "original"
-

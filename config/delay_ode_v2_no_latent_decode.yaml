@@ -10,4 +10,3 @@ model:
     delay_ode_lambda_latent_decode_low: 0.0
     delay_ode_lambda_latent_decode_mid: 0.0
     delay_ode_lambda_latent_decode_high: 0.0
-

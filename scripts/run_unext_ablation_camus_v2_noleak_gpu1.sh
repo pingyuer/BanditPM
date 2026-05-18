@@ -30,7 +30,6 @@ COMMON_ARGS=(
   evaluation.exclude_init_frame=true
   evaluation.init_frame_index=0
   evaluation.protocol_version=v2_no_leak_unext_dynakey_p0fix
-  wandb_mode=online
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
@@ -40,25 +39,20 @@ COMMON_ARGS=(
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f
   main_training.batch_size=10
   main_training.num_workers=8
-  wandb.group=unext_dynakey_ablation_v2_no_leak_p0fix
 )
 
 run_exp camus_unext_only_v2_noleak_p0fix config_unext_only \
   "${COMMON_ARGS[@]}" \
   exp_id=camus_unext_only_v2_noleak_p0fix \
-  wandb.tags='[camus,unext,baseline,v2_no_leak,p0fix,predinit,exclude_init_frame]'
 
 run_exp camus_unext_temporal_refine_v2_noleak_p0fix config_unext_temporal_refine \
   "${COMMON_ARGS[@]}" \
   exp_id=camus_unext_temporal_refine_v2_noleak_p0fix \
-  wandb.tags='[camus,unext,temporal_refine_only,v2_no_leak,p0fix,predinit,exclude_init_frame]'
 
 run_exp camus_unext_dynakey_no_refine_v2_noleak_p0fix config_unext_dynakey_no_refine \
   "${COMMON_ARGS[@]}" \
   exp_id=camus_unext_dynakey_no_refine_v2_noleak_p0fix \
-  wandb.tags='[camus,unext,dynakey,no_refine,v2_no_leak,p0fix,predinit,exclude_init_frame]'
 
 run_exp camus_unext_dynakey_full_v2_noleak_p0fix config_unext_dynakey \
   "${COMMON_ARGS[@]}" \
   exp_id=camus_unext_dynakey_full_v2_noleak_p0fix \
-  wandb.tags='[camus,unext,dynakey,temporal_refine,v2_no_leak,p0fix,predinit,exclude_init_frame]'

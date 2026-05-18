@@ -1,8 +1,6 @@
 import os
 import math
-import datetime
 import logging
-import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -15,12 +13,12 @@ from utils.ddp import distributed_setup, info_if_rank_zero, is_main_process, bar
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf, DictConfig
-import wandb
 from tqdm import tqdm
 
 from dataset.registry import resolve_dataset_class_from_cfg
 from model.trainer import Trainer
-from utils.logger import TensorboardLogger
+from utils.mlflow_logger import MLflowLogger
+from utils.logger import TrainingLogger
 from utils.training_setup import (
     scale_stage_for_world_size,
     seed_dataloader_worker,
@@ -33,21 +31,16 @@ def resolve_model_name(cfg: DictConfig) -> str:
     return str(cfg.get("model_name", cfg.model.get("name", "BanditPM")))
 
 
-def resolve_wandb_settings(cfg: DictConfig) -> dict:
-    wandb_cfg = cfg.get("wandb", {})
+def resolve_mlflow_run_name(cfg: DictConfig) -> str:
+    mlflow_cfg = cfg.get("mlflow", {})
+    configured = mlflow_cfg.get("run_name", None) if hasattr(mlflow_cfg, "get") else None
+    if configured:
+        return str(configured)
     model_name = resolve_model_name(cfg)
     dataset_name = str(cfg.get("dataset_name", "dataset"))
     exp_name = str(cfg.get("exp_id", "experiment"))
     seed = int(cfg.get("seed", 42))
-    default_name = f"{model_name}_{dataset_name}_{exp_name}_seed{seed}"
-    entity = os.environ.get("WANDB_ENTITY", str(wandb_cfg.get("entity", ""))).strip()
-    return {
-        "project": os.environ.get("WANDB_PROJECT", str(wandb_cfg.get("project", "BanditPM"))),
-        "entity": entity or None,
-        "group": str(wandb_cfg.get("group", exp_name)),
-        "name": str(wandb_cfg.get("name", "")) or default_name,
-        "tags": list(wandb_cfg.get("tags", [])),
-    }
+    return f"{model_name}_{dataset_name}_{exp_name}_seed{seed}"
 
 
 def resolve_dataset_class(cfg: DictConfig):
@@ -57,34 +50,29 @@ def resolve_dataset_class(cfg: DictConfig):
 
 @hydra.main(version_base="1.3.2", config_path="config", config_name="config_banditpm_baseline.yaml")
 def train(cfg: DictConfig):
-    os.environ.setdefault("WANDB_MODE", cfg.get("wandb_mode", "offline"))
     dataset_name, dataset_cls = resolve_dataset_class(cfg)
-    wandb_mode = str(cfg.get("wandb_mode", os.environ.get("WANDB_MODE", "offline"))).lower()
 
     # -------- DDP Initialization --------
     local_rank, world_size = distributed_setup(backend="nccl")
     main_process = is_main_process()
-
-    # Initialize wandb only on the main process
-    wandb_enabled = main_process and wandb_mode == "online"
-    if wandb_enabled:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        cfg_dict_wandb = OmegaConf.to_container(cfg, resolve=True)
-        wandb_settings = resolve_wandb_settings(cfg)
-        wandb.init(
-            project=wandb_settings["project"],
-            entity=wandb_settings["entity"],
-            group=wandb_settings["group"],
-            name=f"{wandb_settings['name']}_{timestamp}",
-            tags=wandb_settings["tags"],
-            config=cfg_dict_wandb,
-            dir=HydraConfig.get().run.dir,
-            reinit="finish_previous",
-        )
-        wandb.config.update(cfg_dict_wandb, allow_val_change=True)
+    run_dir = HydraConfig.get().run.dir
+    mlflow_cfg = cfg.get("mlflow", {})
+    if hasattr(mlflow_cfg, "get") and not mlflow_cfg.get("run_name", None):
+        mlflow_cfg.run_name = resolve_mlflow_run_name(cfg)
+    mlflow_logger = MLflowLogger(
+        mlflow_cfg,
+        run_dir=run_dir,
+        enabled=bool(mlflow_cfg.get("enabled", True)) if hasattr(mlflow_cfg, "get") else True,
+        main_process=main_process,
+    )
+    mlflow_started = False
 
     try:
-        run_dir = HydraConfig.get().run.dir
+        mlflow_logger.start_run()
+        mlflow_started = True
+        mlflow_logger.log_config(cfg)
+        mlflow_logger.log_env_info()
+        mlflow_logger.log_git_info()
 
         # Ensure configuration is printed only once by the main process
             
@@ -111,8 +99,8 @@ def train(cfg: DictConfig):
         info_if_rank_zero(f"num_workers={original_num_workers}")
         info_if_rank_zero(f"num_workers(per-GPU)={stage_cfg.num_workers}")
 
-        # -------- Logging: Only main process writes to TensorBoard --------
-        log_writer = TensorboardLogger(run_dir, logging.getLogger(), enabled_tb=main_process)
+        # -------- Logging: Only main process writes to MLflow --------
+        log_writer = TrainingLogger(run_dir, logging.getLogger(), enabled_tb=main_process)
 
         # -------- DataLoader Factory (Robust with fallback) --------
         def create_safe_dataloader(
@@ -158,6 +146,7 @@ def train(cfg: DictConfig):
                 seq_length=stage_cfg.seq_length,
                 max_num_obj=stage_cfg.num_objects,
                 size=stage_cfg.crop_size[0],
+                augmentation=cfg.get("augmentation", {}) if mode == "train" else {},
             )
             if world_size > 1 and dist.is_initialized():
                 sampler = DistributedSampler(
@@ -191,6 +180,7 @@ def train(cfg: DictConfig):
             train_loader=train_loader,
             val_loader=val_loader,
             test_loader=test_loader,
+            mlflow_logger=mlflow_logger,
         )
 
         total_iterations = int(stage_cfg.num_iterations)
@@ -277,15 +267,17 @@ def train(cfg: DictConfig):
                 )
 
         info_if_rank_zero("Training completed.")
+        if mlflow_started:
+            mlflow_logger.end_run()
+
+    except Exception:
+        if mlflow_started:
+            mlflow_logger.mark_failed()
+        raise
 
     finally:
         # Synchronize all processes before closing resources
         barrier()
-        if wandb_enabled:
-            try:
-                wandb.finish()
-            except Exception:
-                pass
         if dist.is_initialized():
             dist.destroy_process_group()
 

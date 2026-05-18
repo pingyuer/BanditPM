@@ -42,7 +42,7 @@ defaults:
 
 exp_id: "unext_fusion_echo"
 
-wandb:
+MLflow:
   group: "canonical_unext_fusion"
   tags: ["canonical", "unext_fusion", "echo", "no_leak"]
 ```
@@ -60,12 +60,12 @@ PYTHONPATH=. /home/tahara/miniconda3/bin/uv run python train.py \
   main_training.batch_size=2
 ```
 
-切换 wandb：
+切换 MLflow：
 
 ```bash
-wandb_mode=online
-wandb_mode=offline
-wandb_mode=disabled
+mlflow.enabled=true
+mlflow.enabled=false
+mlflow.enabled=false
 ```
 
 指定输出目录：
@@ -94,7 +94,7 @@ model:
   use_first_frame_gt_init: false
 ```
 
-oracle GT 初始化只能作为 upper bound / sanity check，配置名和 wandb tag 必须显式标记 `oracle`。
+oracle GT 初始化只能作为 upper bound / sanity check，配置名和 MLflow tag 必须显式标记 `oracle`。
 
 ## legacy config
 

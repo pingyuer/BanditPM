@@ -5,10 +5,6 @@ defaults:
 exp_id: "unext_dynakey_spatial_mid_fusion_refine_v2_no_leak"
 model_name: "UNeXtDynaKeySpatialMidFusionRefine"
 
-wandb:
-  project: "BanditPM"
-  group: "unext_dynakey_mid_fusion_ablation"
-  tags: ["unext", "dynakey", "spatial_memory", "mid_fusion", "late_refine", "v2_no_leak"]
 
 model:
   unext_dynakey:

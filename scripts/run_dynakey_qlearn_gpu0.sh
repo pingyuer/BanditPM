@@ -33,7 +33,6 @@ QLEARN_ARGS=(
 run_exp echonet_dynakey_qlearn \
   --config-name config_dynakey_baseline \
   exp_id=echonet_dynakey_qlearn \
-  wandb_mode=online \
   dataset_name=echonet \
   data_path=${DATASETS_ROOT}/processed/echonet_png128_10f \
   main_training.batch_size=20 \
@@ -42,14 +41,11 @@ run_exp echonet_dynakey_qlearn \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_qlearn \
-  wandb.tags='[echonet,dynakey,kpff,ode_memory,q_learning,q_loss]' \
   "${QLEARN_ARGS[@]}"
 
 run_exp echonet_full_cycle_dynakey_qlearn \
   --config-name config_dynakey_baseline \
   exp_id=echonet_full_cycle_dynakey_qlearn \
-  wandb_mode=online \
   dataset_name=echonet \
   data_path=${DATASETS_ROOT}/processed/echonet_full_cycle_png128_10f \
   main_training.batch_size=20 \
@@ -58,14 +54,11 @@ run_exp echonet_full_cycle_dynakey_qlearn \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_qlearn \
-  wandb.tags='[echonet,full_cycle,dynakey,kpff,ode_memory,q_learning,q_loss]' \
   "${QLEARN_ARGS[@]}"
 
 run_exp cardiacuda_a4c_lv_sparse_oracle_dynakey_qlearn \
   --config-name config_dynakey_baseline \
   exp_id=cardiacuda_a4c_lv_sparse_oracle_dynakey_qlearn \
-  wandb_mode=online \
   dataset_name=cardiacuda \
   data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_png128_10f \
   main_training.batch_size=16 \
@@ -74,6 +67,4 @@ run_exp cardiacuda_a4c_lv_sparse_oracle_dynakey_qlearn \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=dynakey_qlearn \
-  wandb.tags='[cardiacuda,a4c,lv,sparse,oracle,dynakey,kpff,ode_memory,q_learning,q_loss]' \
   "${QLEARN_ARGS[@]}"

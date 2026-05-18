@@ -1,0 +1,24 @@
+defaults:
+  - anchor_ode_v2_tuned_camus
+  - _self_
+
+exp_id: "anchor_ode_v2_hparam_camus_c1"
+
+
+model:
+  anchor_ode:
+    confidence_prior_bias: -0.75
+    lambda_conf: 0.02
+
+main_training:
+  unext_lr_ratio: 1.0
+  anchor_ode_lr_ratio: 1.0
+
+augmentation:
+  enabled: false
+
+evaluation:
+  protocol_version: "v3_current_anchor_affine"
+  postprocess:
+    enabled: true
+    min_size: 16

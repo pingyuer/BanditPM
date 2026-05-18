@@ -10,10 +10,10 @@ outputs/BanditPM/<exp_id>/<date>/<time>
 
 每个 run 可包含：
 
-- TensorBoard event。
+- MLflow run。
 - `summary.csv`。
 - checkpoint / weights。
-- wandb local files，取决于 `wandb_mode`。
+- configs / eval / visuals / env / source artifacts。
 
 历史 run 可汇总到：
 
@@ -27,28 +27,27 @@ outputs/EXPERIMENT_SUMMARY.csv
 python scripts/summarize_and_clean_outputs.py --clean
 ```
 
-## wandb 配置
+## MLflow 配置
 
 入口在 `train.py`：
 
-- `wandb_mode`: `online`、`offline`、`disabled`。
-- `wandb.project`: 项目名。
-- `wandb.group`: 实验组。
-- `wandb.name`: run 名，留空时自动生成。
-- `wandb.tags`: 标签列表。
+- `mlflow.enabled`: 是否启用 MLflow。
+- `mlflow.tracking_uri`: tracking server。
+- `mlflow.experiment_name`: 实验名。
+- `mlflow.run_name`: run 名，留空时自动生成。
+- `mlflow.resume_run_id`: 恢复已有 run。
 
-环境变量可覆盖：
+默认 tracking server：
 
 ```bash
-export WANDB_PROJECT=BanditPM
-export WANDB_ENTITY=<your_entity>
+http://172.16.240.77:5000
 ```
 
 ## Trainer 日志流
 
 主要位置：
 
-- `Trainer._wandb_log()`: loss dict。
+- `Trainer._log_train_metrics()`: loss dict。
 - `Trainer._log_dynakey_stats()`: DynaKey / UNeXt-DynaKey aux 指标。
 - `Trainer._log_final_metrics()`: val/test metrics。
 - `Trainer._write_summary_row()`: `summary.csv`。
@@ -57,7 +56,7 @@ export WANDB_ENTITY=<your_entity>
 
 1. 模块 forward 返回 tensor aux，尽量 `.detach()`。
 2. 主模型把 aux 放到 `aux_t` 或 `memory_aux_t`。
-3. `Trainer` 聚合 batch/time 维度，写 TensorBoard 和 wandb。
+3. `Trainer` 聚合 batch/time 维度，写 MLflow。
 4. 如果是最终评估指标，再写入 `summary.csv`。
 
 ## 命名约定
@@ -105,4 +104,4 @@ unext_dynakey/spatial_memory_entropy
 - 每 frame 的 slot id。
 - 大 tensor 或 histogram。
 
-这类信息应写 wandb 或 debug script 输出。
+这类信息应写 MLflow 或 debug script 输出。

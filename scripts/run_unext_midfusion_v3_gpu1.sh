@@ -9,7 +9,6 @@ cd "${PROJECT_DIR}"
 export PYTHONPATH=.
 export HYDRA_FULL_ERROR=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
-export WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}"
 
 LOG_DIR="${LOG_DIR:-outputs/BanditPM/tmux_logs}"
 mkdir -p "${LOG_DIR}"
@@ -31,7 +30,6 @@ COMMON_ARGS=(
   evaluation.exclude_init_frame=true
   evaluation.init_frame_index=0
   evaluation.protocol_version=v3_no_leak_mid_memory_fusion
-  wandb_mode=online
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
@@ -41,20 +39,16 @@ COMMON_ARGS=(
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f
   main_training.batch_size=8
   main_training.num_workers=8
-  wandb.group=unext_mid_memory_fusion_v3
 )
 
 run_exp camus_midfusion_v3 config_unext_dynakey_spatial_mid_fusion \
   "${COMMON_ARGS[@]}" \
   exp_id=camus_midfusion_v3 \
-  wandb.tags='[camus,mid_fusion,spatial_dynakey,v3,no_leak]'
 
 run_exp camus_midfusion_refine_v3 config_unext_dynakey_spatial_mid_fusion_refine \
   "${COMMON_ARGS[@]}" \
   exp_id=camus_midfusion_refine_v3 \
-  wandb.tags='[camus,mid_fusion,late_refine,spatial_dynakey,v3,no_leak]'
 
 run_exp camus_memory_primary_v3 config_unext_dynakey_spatial_memory_primary \
   "${COMMON_ARGS[@]}" \
   exp_id=camus_memory_primary_v3 \
-  wandb.tags='[camus,memory_primary,spatial_dynakey,v3,no_leak]'

@@ -21,10 +21,6 @@ evaluation:
   threshold_search_end: 0.70
   threshold_search_step: 0.05
 
-wandb:
-  project: "BanditPM"
-  group: "unext_dynakey_v2_no_leak"
-  tags: ["unext", "dynakey", "ode_memory", "v2_no_leak", "predinit", "temporal_refine"]
 
 model:
   name: "unext_dynakey"

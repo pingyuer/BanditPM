@@ -7,7 +7,3 @@ defaults:
   - _self_
 
 exp_id: "unext_fusion_echo"
-
-wandb:
-  group: "canonical_unext_fusion"
-  tags: ["canonical", "unext_fusion", "echo", "no_leak"]

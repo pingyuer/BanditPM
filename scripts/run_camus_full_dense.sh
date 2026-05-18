@@ -20,7 +20,6 @@ run_one() {
     'main_training.lr_schedule_steps=[333,667]' \
     eval_stage.eval_interval=200 \
     save=0 \
-    wandb_mode=offline \
     exp_id="${exp_name}" \
     dataset_name=camus \
     data_path=${DATASETS_ROOT}/processed/camus_full_png256_10f \

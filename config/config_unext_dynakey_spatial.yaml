@@ -5,10 +5,6 @@ defaults:
 exp_id: "unext_dynakey_spatial_v2_no_leak"
 model_name: "UNeXtDynaKeySpatial"
 
-wandb:
-  project: "BanditPM"
-  group: "unext_dynakey_spatial_ablation"
-  tags: ["unext", "dynakey", "spatial_memory", "phase_retrieval", "v2_no_leak"]
 
 model:
   unext_dynakey:

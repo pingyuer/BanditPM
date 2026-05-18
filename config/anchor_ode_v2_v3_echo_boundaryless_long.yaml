@@ -1,0 +1,10 @@
+defaults:
+  - anchor_ode_v2_v3_echo_e2_long_raw_tta
+  - _self_
+
+exp_id: "anchor_ode_v2_v3_echo_boundaryless_long"
+
+
+model:
+  anchor_ode:
+    guidance_input_mode: "warp_delta"

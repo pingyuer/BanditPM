@@ -6,7 +6,6 @@ exp_id: "gdkvm_echonet_proto_concat"
 dataset_name: "echonet"
 seed: 42
 debug: false
-wandb_mode: "offline"
 cudnn_benchmark: true
 log_text_interval: 10
 log_image_interval: 50

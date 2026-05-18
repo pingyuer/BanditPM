@@ -6,11 +6,6 @@ exp_id: "banditpm_baseline"
 model_name: "BanditPM"
 output_root: "outputs/BanditPM"
 
-wandb:
-  project: "BanditPM"
-  group: "baseline"
-  name: ""
-  tags: ["baseline", "original_gdr"]
 
 model:
   name: "BanditPM"

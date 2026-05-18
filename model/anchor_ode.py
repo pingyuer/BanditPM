@@ -20,6 +20,24 @@ def _cfg_get(cfg, key: str, default):
     return getattr(cfg, key, default)
 
 
+def _as_list(value, default):
+    if value is None:
+        return list(default)
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return list(value)
+
+
+def _guidance_in_channels(mode: str) -> int:
+    if mode == "warp_delta_boundary":
+        return 3
+    if mode == "warp_delta":
+        return 2
+    if mode == "warp_only":
+        return 1
+    raise ValueError(f"Unsupported guidance_input_mode: {mode}")
+
+
 def mask_geometry_stats(mask_BNHW: torch.Tensor, prev_stats: torch.Tensor | None = None) -> torch.Tensor:
     """Soft LV geometry: area, center, spread, ratio, compactness, entropy, velocity."""
     B, N, H, W = mask_BNHW.shape
@@ -115,7 +133,8 @@ class SkipAwareAnchorBank(nn.Module):
         )
 
     def forward(self, state: torch.Tensor) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        weights = torch.softmax(self.selector(state), dim=-1)
+        motion_score = torch.einsum("bnc,kc->bnk", state, self.motion_embed) / math.sqrt(max(state.shape[-1], 1))
+        weights = torch.softmax(self.selector(state) + motion_score, dim=-1)
         anchors = {
             level: torch.einsum("bnk,kchw->bnchw", weights, self.anchors[level])
             for level in LEVELS
@@ -125,7 +144,7 @@ class SkipAwareAnchorBank(nn.Module):
         geometry_prior = torch.einsum("bnk,kc->bnc", weights, self.geometry_prior)
         slot_confidence = (weights * weights.clamp_min(1.0e-8).log()).sum(dim=-1).neg()
         slot_confidence = 1.0 - slot_confidence / math.log(max(self.num_slots, 2))
-        return anchors, weights, condition, affine_prior, geometry_prior + slot_confidence.unsqueeze(-1) * 0.0
+        return anchors, weights, condition, affine_prior, geometry_prior + 0.01 * slot_confidence.unsqueeze(-1)
 
 
 class AffineOffsetRegressor(nn.Module):
@@ -173,14 +192,34 @@ class ODEResidualRefiner(nn.Module):
 
 
 class ConfidenceAssignment(nn.Module):
-    def __init__(self, state_dim: int) -> None:
+    def __init__(
+        self,
+        state_dim: int,
+        *,
+        prior_bias: float | None = None,
+        base_bias: float | None = None,
+        update_bias: float | None = None,
+        boundary_bias: float | None = None,
+        scale_bias: float | None = None,
+        slot_bias: float | None = None,
+        default_bias: float = -1.5,
+    ) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim + 6, state_dim),
             nn.GELU(),
             nn.Linear(state_dim, 9),
         )
-        nn.init.constant_(self.net[-1].bias, -1.5)
+        nn.init.constant_(self.net[-1].bias, float(default_bias))
+        if any(v is not None for v in (prior_bias, base_bias, update_bias, boundary_bias, scale_bias, slot_bias)):
+            bias = self.net[-1].bias
+            with torch.no_grad():
+                bias[0] = float(default_bias if prior_bias is None else prior_bias)
+                bias[1] = float(default_bias if base_bias is None else base_bias)
+                bias[2] = float(default_bias if update_bias is None else update_bias)
+                bias[3] = float(default_bias if boundary_bias is None else boundary_bias)
+                bias[4:8].fill_(float(default_bias if scale_bias is None else scale_bias))
+                bias[8] = float(default_bias if slot_bias is None else slot_bias)
 
     def forward(
         self,
@@ -398,7 +437,7 @@ class CurrentAnchorStateEncoder(nn.Module):
         super().__init__()
         self.num_slots = int(num_slots)
         self.stats_dim = 11
-        self.prev_dim = self.stats_dim * 2 + self.num_slots + 4 + len(LEVELS) * 6
+        self.prev_dim = self.stats_dim * 2 + self.num_slots + 4 + len(LEVELS) * 6 + 6 + 1
         in_dim = sum(feature_dims.values()) + self.stats_dim + self.prev_dim
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -414,18 +453,26 @@ class CurrentAnchorStateEncoder(nn.Module):
         prev: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         B, N = base_mask.shape[:2]
-        base_geometry = mask_geometry_stats(base_mask, prev.get("base_geometry"))
+        valid = prev.get("valid", torch.ones(B, N, 1, device=base_mask.device, dtype=base_mask.dtype))
+        bootstrap_geometry = mask_geometry_stats(base_mask, None)
+        prev_base_geometry = valid * prev["base_geometry"] + (1.0 - valid) * bootstrap_geometry.detach()
+        prev_final_geometry = valid * prev["final_geometry"] + (1.0 - valid) * bootstrap_geometry.detach()
+        bootstrap_confidence = torch.tensor([0.25, 0.75, 0.4, 0.4], device=base_mask.device, dtype=base_mask.dtype).view(1, 1, 4)
+        prev_confidence = valid * prev["confidence"] + (1.0 - valid) * bootstrap_confidence
+        base_geometry = mask_geometry_stats(base_mask, prev_base_geometry)
         pooled = []
         for level in LEVELS:
             f = feats[level]
             pooled.append(f.mean(dim=(-2, -1)).unsqueeze(1).expand(-1, N, -1))
         prev_vec = torch.cat(
             [
-                prev["base_geometry"],
-                prev["final_geometry"],
+                prev_base_geometry,
+                prev_final_geometry,
                 prev["slot_weights"],
-                prev["confidence"],
+                prev_confidence,
                 prev["affine"].flatten(start_dim=-2),
+                prev["geometry_delta"],
+                prev["valid"],
             ],
             dim=-1,
         )
@@ -440,19 +487,25 @@ class TemporalAffineODEBank(nn.Module):
         self.condition = nn.Parameter(torch.randn(num_slots, condition_dim) * 0.02)
         self.motion_embed = nn.Parameter(torch.randn(num_slots, state_dim) * 0.02)
         self.affine_velocity = nn.Parameter(torch.zeros(num_slots, num_levels, 6))
-        self.geometry_velocity = nn.Parameter(torch.zeros(num_slots, 6))
+        self.geometry_delta = nn.Parameter(torch.zeros(num_slots, 6))
         self.selector = nn.Sequential(
             nn.Linear(state_dim, state_dim),
             nn.GELU(),
             nn.Linear(state_dim, num_slots),
         )
+        nn.init.normal_(self.selector[-1].weight, mean=0.0, std=1.0e-3)
+        nn.init.zeros_(self.selector[-1].bias)
 
-    def forward(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        weights = torch.softmax(self.selector(state), dim=-1)
+    def forward(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        motion_score = torch.einsum("bnc,kc->bnk", state, self.motion_embed) / math.sqrt(max(state.shape[-1], 1))
+        weights = torch.softmax(self.selector(state) + motion_score, dim=-1)
         condition = torch.einsum("bnk,kc->bnc", weights, self.condition)
+        selected_motion_embed = torch.einsum("bnk,kc->bnc", weights, self.motion_embed)
         affine_velocity = torch.einsum("bnk,klp->bnlp", weights, self.affine_velocity)
-        geometry_velocity = torch.einsum("bnk,kc->bnc", weights, self.geometry_velocity)
-        return weights, condition, affine_velocity, geometry_velocity
+        geometry_delta = torch.einsum("bnk,kc->bnc", weights, self.geometry_delta)
+        entropy = -(weights * weights.clamp_min(1.0e-8).log()).sum(dim=-1)
+        slot_confidence = 1.0 - entropy / math.log(max(self.num_slots, 2))
+        return weights, condition, selected_motion_embed, affine_velocity, geometry_delta, slot_confidence
 
 
 class ODEAffineMicroRegressor(nn.Module):
@@ -513,6 +566,17 @@ class UNeXtAnchorODEAffineSegmenter(nn.Module):
         self.ode_gamma = float(_cfg_get(method_cfg, "ode_gamma", 0.1))
         self.prior_residual_clip = float(_cfg_get(method_cfg, "prior_residual_clip", 2.0))
         self.gate_warmup_iters = int(_cfg_get(method_cfg, "gate_warmup_iters", 500))
+        self.gate_init_bias = float(_cfg_get(method_cfg, "gate_init_bias", -4.0))
+        self.guidance_input_mode = str(_cfg_get(method_cfg, "guidance_input_mode", "warp_delta_boundary"))
+        self.guidance_fusion_mode = str(_cfg_get(method_cfg, "guidance_fusion_mode", "residual_add"))
+        self.decoder_guidance_enabled = bool(_cfg_get(method_cfg, "decoder_guidance_enabled", True))
+        self.skip_guidance_levels = tuple(_as_list(_cfg_get(method_cfg, "skip_guidance_levels", LEVELS), LEVELS))
+        self.guidance_proj_hidden_dim = int(_cfg_get(method_cfg, "guidance_proj_hidden_dim", 0))
+        if self.guidance_fusion_mode not in {"residual_add", "residual_concat"}:
+            raise ValueError(f"Unsupported guidance_fusion_mode: {self.guidance_fusion_mode}")
+        for level in self.skip_guidance_levels:
+            if level not in LEVELS:
+                raise ValueError(f"Unsupported skip guidance level: {level}")
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -543,26 +607,57 @@ class UNeXtAnchorODEAffineSegmenter(nn.Module):
             nn.GELU(),
             nn.Linear(self.hidden_dim, 6),
         )
-        self.guidance_projs = nn.ModuleDict({level: nn.Conv2d(3, feature_dims[level], kernel_size=1) for level in LEVELS})
+        nn.init.zeros_(self.geometry_regressor[-1].weight)
+        nn.init.zeros_(self.geometry_regressor[-1].bias)
+        guidance_channels = _guidance_in_channels(self.guidance_input_mode)
+        self.guidance_projs = nn.ModuleDict()
+        self.guidance_concat_projs = nn.ModuleDict()
+        for level in LEVELS:
+            if self.guidance_proj_hidden_dim > 0:
+                self.guidance_projs[level] = nn.Sequential(
+                    nn.Conv2d(guidance_channels, self.guidance_proj_hidden_dim, kernel_size=1),
+                    nn.GELU(),
+                    nn.Conv2d(self.guidance_proj_hidden_dim, feature_dims[level], kernel_size=1),
+                )
+            else:
+                self.guidance_projs[level] = nn.Conv2d(guidance_channels, feature_dims[level], kernel_size=1)
+            if self.guidance_fusion_mode == "residual_concat":
+                self.guidance_concat_projs[level] = nn.Sequential(
+                    nn.Conv2d(feature_dims[level] * 2, feature_dims[level], kernel_size=1),
+                    nn.GELU(),
+                    nn.Conv2d(feature_dims[level], feature_dims[level], kernel_size=1),
+                )
         self.gate_head = nn.Sequential(
             nn.Linear(self.state_dim, self.hidden_dim),
             nn.GELU(),
             nn.Linear(self.hidden_dim, len(LEVELS)),
         )
         nn.init.zeros_(self.gate_head[-1].weight)
-        nn.init.constant_(self.gate_head[-1].bias, -4.0)
-        self.confidence = ConfidenceAssignment(self.state_dim)
+        nn.init.constant_(self.gate_head[-1].bias, self.gate_init_bias)
+        self.confidence = ConfidenceAssignment(
+            self.state_dim,
+            prior_bias=_cfg_get(method_cfg, "confidence_prior_bias", None),
+            base_bias=_cfg_get(method_cfg, "confidence_base_bias", None),
+            update_bias=_cfg_get(method_cfg, "confidence_update_bias", None),
+            boundary_bias=_cfg_get(method_cfg, "confidence_boundary_bias", None),
+            scale_bias=_cfg_get(method_cfg, "confidence_scale_bias", None),
+            slot_bias=_cfg_get(method_cfg, "confidence_slot_bias", None),
+        )
 
     def _normalize(self, image: torch.Tensor) -> torch.Tensor:
         return (image - 0.5) / 0.5
 
     def _empty_prev(self, batch_size: int, num_objects: int, device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+        affine = torch.zeros(batch_size, num_objects, len(LEVELS), 6, device=device, dtype=dtype)
+        affine[..., 2:4] = 1.0
         return {
             "base_geometry": torch.zeros(batch_size, num_objects, 11, device=device, dtype=dtype),
             "final_geometry": torch.zeros(batch_size, num_objects, 11, device=device, dtype=dtype),
             "slot_weights": torch.full((batch_size, num_objects, self.num_slots), 1.0 / self.num_slots, device=device, dtype=dtype),
             "confidence": torch.zeros(batch_size, num_objects, 4, device=device, dtype=dtype),
-            "affine": torch.zeros(batch_size, num_objects, len(LEVELS), 6, device=device, dtype=dtype),
+            "affine": affine,
+            "geometry_delta": torch.zeros(batch_size, num_objects, 6, device=device, dtype=dtype),
+            "valid": torch.zeros(batch_size, num_objects, 1, device=device, dtype=dtype),
         }
 
     def _affine_matrix(self, params: torch.Tensor) -> torch.Tensor:
@@ -595,11 +690,63 @@ class UNeXtAnchorODEAffineSegmenter(nn.Module):
         logits = aggregate(masks, dim=1)
         return logits, torch.softmax(logits, dim=1)[:, 1:]
 
+    def _fuse_logits(self, base_object_logits: torch.Tensor, guided_logits: torch.Tensor, prior_confidence: torch.Tensor) -> torch.Tensor:
+        residual = (guided_logits - base_object_logits).clamp(min=-self.prior_residual_clip, max=self.prior_residual_clip)
+        return base_object_logits + prior_confidence.unsqueeze(-1).unsqueeze(-1) * residual
+
     def _warmup_scale(self, data: Dict, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         if not self.training or self.gate_warmup_iters <= 0:
             return torch.ones((), device=device, dtype=dtype)
         current_iter = int(data.get("current_iter", self.gate_warmup_iters))
         return torch.tensor(min(max(current_iter / max(self.gate_warmup_iters, 1), 0.0), 1.0), device=device, dtype=dtype)
+
+    def _build_guidance(
+        self,
+        warped_level: torch.Tensor,
+        anchor_level: torch.Tensor,
+        boundary_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        pieces = [warped_level]
+        if self.guidance_input_mode in {"warp_delta_boundary", "warp_delta"}:
+            pieces.append(warped_level - anchor_level)
+        if self.guidance_input_mode == "warp_delta_boundary":
+            pieces.append(self._boundary(warped_level) * boundary_scale.unsqueeze(-1).unsqueeze(-1))
+        return torch.stack(pieces, dim=2).flatten(0, 1)
+
+    def _fuse_guided_feature(
+        self,
+        level: str,
+        feature: torch.Tensor,
+        guidance: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        if level not in self.skip_guidance_levels:
+            return feature
+        gated = gate * guidance
+        if self.guidance_fusion_mode == "residual_add":
+            return feature + gated.mean(dim=1)
+        concat_guidance = gated.mean(dim=1)
+        return self.guidance_concat_projs[level](torch.cat([feature, concat_guidance], dim=1))
+
+    def _gated_history_update(
+        self,
+        prev: dict[str, torch.Tensor],
+        candidate: dict[str, torch.Tensor],
+        update_confidence: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        out = {}
+        for key, value in candidate.items():
+            cand = value.detach()
+            if key == "valid":
+                out[key] = cand
+                continue
+            update_gate = torch.where(prev["valid"].squeeze(-1) > 0.0, update_confidence.detach(), torch.ones_like(update_confidence))
+            gate = update_gate.unsqueeze(-1)
+            prev_value = prev[key]
+            while gate.dim() < cand.dim():
+                gate = gate.unsqueeze(-1)
+            out[key] = (1.0 - gate) * prev_value + gate * cand
+        return out
 
     def _anchor_step(
         self,
@@ -611,34 +758,40 @@ class UNeXtAnchorODEAffineSegmenter(nn.Module):
         features = {"low": feat["low"], "mid": feat["mid"], "high": feat["high"], "dec": feat["decoder_feature"]}
         base_prob = torch.sigmoid(base_object_logits)
         state, base_geometry = self.state_encoder(features, base_prob.detach(), prev)
-        slot_weights, condition, affine_velocity, geometry_velocity = self.ode_bank(state)
+        slot_weights, condition, selected_motion_embed, affine_velocity, geometry_delta_prior, slot_confidence = self.ode_bank(state)
         affine = self.affine_regressor(state, condition, prev["affine"], affine_velocity)
-        geometry_offset = self.geometry_regressor(torch.cat([state, geometry_velocity], dim=-1))
-        geometry_pred = base_geometry[..., :6] + geometry_offset
+        geometry_delta = geometry_delta_prior + self.geometry_regressor(torch.cat([state, geometry_delta_prior], dim=-1))
+        history_geometry = prev["final_geometry"][..., :6] + geometry_delta
+        base_geometry_delta = base_geometry[..., :6] + geometry_delta
+        geometry_pred = prev["valid"] * history_geometry + (1.0 - prev["valid"]) * base_geometry_delta
 
         anchors = {}
         warped = {}
-        guided_features = {}
-        gates = torch.sigmoid(self.gate_head(state)) * self._warmup_scale(data, base_prob.device, base_prob.dtype)
         for idx, level in enumerate(LEVELS):
             target_size = features[level].shape[-2:]
             anchors[level] = F.interpolate(base_prob.flatten(0, 1).unsqueeze(1), size=target_size, mode="bilinear", align_corners=False).view(
                 *base_prob.shape[:2], *target_size
             )
             warped[level] = self._warp_anchor(anchors[level], affine[..., idx, :], target_size)
-            guidance = torch.stack(
-                [
-                    warped[level],
-                    warped[level] - anchors[level],
-                    self._boundary(warped[level]),
-                ],
-                dim=2,
-            ).flatten(0, 1)
+
+        prior_prob = warped["dec"].clamp(1.0e-4, 1.0 - 1.0e-4)
+        conf = self.confidence(state, base_prob, prior_prob, geometry_delta, affine)
+        effective_slot_confidence = 0.5 * (conf["slot"] + slot_confidence)
+        effective_prior_confidence = conf["prior"] * (0.5 + 0.5 * effective_slot_confidence)
+        boundary_scale = 0.5 + conf["boundary"]
+        scale_confidence = conf["scale"]
+        gates = torch.sigmoid(self.gate_head(state)) * self._warmup_scale(data, base_prob.device, base_prob.dtype)
+        gates = gates * (0.5 + scale_confidence)
+
+        guided_features = {}
+        for idx, level in enumerate(LEVELS):
+            target_size = features[level].shape[-2:]
+            guidance = self._build_guidance(warped[level], anchors[level], boundary_scale)
             guidance = self.guidance_projs[level](guidance)
             B, N = base_prob.shape[:2]
             guidance = guidance.view(B, N, -1, *target_size)
             gate = gates[..., idx].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-            guided_features[level] = features[level] + (gate * guidance).mean(dim=1)
+            guided_features[level] = self._fuse_guided_feature(level, features[level], guidance, gate)
 
         decoded = self.backbone.decode(
             guided_features["low"],
@@ -646,35 +799,31 @@ class UNeXtAnchorODEAffineSegmenter(nn.Module):
             guided_features["high"],
             base_object_logits.shape[-2:],
         )
-        dec_guidance = torch.stack(
-            [
-                warped["dec"],
-                warped["dec"] - anchors["dec"],
-                self._boundary(warped["dec"]),
-            ],
-            dim=2,
-        ).flatten(0, 1)
-        dec_guidance = self.guidance_projs["dec"](dec_guidance)
-        B, N = base_prob.shape[:2]
-        dec_guidance = dec_guidance.view(B, N, -1, *base_object_logits.shape[-2:])
-        dec_gate = gates[..., LEVELS.index("dec")].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        guided_decoder = decoded["decoder_feature"] + (dec_gate * dec_guidance).mean(dim=1)
+        guided_decoder = decoded["decoder_feature"]
+        if self.decoder_guidance_enabled and "dec" in self.skip_guidance_levels:
+            dec_guidance = self._build_guidance(warped["dec"], anchors["dec"], boundary_scale)
+            dec_guidance = self.guidance_projs["dec"](dec_guidance)
+            B, N = base_prob.shape[:2]
+            dec_guidance = dec_guidance.view(B, N, -1, *base_object_logits.shape[-2:])
+            dec_gate = gates[..., LEVELS.index("dec")].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            guided_decoder = self._fuse_guided_feature("dec", guided_decoder, dec_guidance, dec_gate)
         guided_logits = self.backbone.logits_from_decoder_feature(guided_decoder)[:, 1:2].expand_as(base_object_logits)
-        residual = (guided_logits - base_object_logits).clamp(min=-self.prior_residual_clip, max=self.prior_residual_clip)
 
-        prior_prob = warped["dec"].clamp(1.0e-4, 1.0 - 1.0e-4)
-        conf = self.confidence(state, base_prob, torch.sigmoid(guided_logits), geometry_offset, affine)
-        object_logits = base_object_logits + conf["prior"].unsqueeze(-1).unsqueeze(-1) * residual
+        object_logits = self._fuse_logits(base_object_logits, guided_logits, effective_prior_confidence)
         final_prob = torch.sigmoid(object_logits)
         final_geometry = mask_geometry_stats(final_prob, prev.get("final_geometry"))
 
-        next_prev = {
+        confidence_vec = torch.stack([conf["prior"], conf["base"], conf["update"], conf["boundary"]], dim=-1)
+        candidate_prev = {
             "base_geometry": base_geometry.detach(),
             "final_geometry": final_geometry.detach(),
             "slot_weights": slot_weights.detach(),
-            "confidence": torch.stack([conf["prior"], conf["base"], conf["update"], conf["boundary"]], dim=-1).detach(),
+            "confidence": confidence_vec.detach(),
             "affine": affine.detach(),
+            "geometry_delta": geometry_delta.detach(),
+            "valid": torch.ones_like(prev["valid"]),
         }
+        next_prev = self._gated_history_update(prev, candidate_prev, conf["update"])
         aux = {
             "method": "anchor_ode_v2",
             "memory_type": "anchor_ode_v2",
@@ -684,7 +833,10 @@ class UNeXtAnchorODEAffineSegmenter(nn.Module):
                 "prior_logits": self._logit(prior_prob),
                 "guided_object_logits": guided_logits,
                 "final_object_logits": object_logits,
+                "selected_motion_embed": selected_motion_embed,
                 "slot_weights": slot_weights,
+                "slot_confidence": slot_confidence,
+                "effective_slot_confidence": effective_slot_confidence,
                 "affine": affine,
                 "affine_low": affine[..., 0, :],
                 "affine_mid": affine[..., 1, :],
@@ -697,23 +849,37 @@ class UNeXtAnchorODEAffineSegmenter(nn.Module):
                 "warped_anchor_high": warped["high"],
                 "warped_anchor_dec": warped["dec"],
                 "skip_gates": gates,
+                "raw_skip_gates": torch.sigmoid(self.gate_head(state)),
+                "guidance_input_mode": self.guidance_input_mode,
+                "guidance_fusion_mode": self.guidance_fusion_mode,
+                "decoder_guidance_enabled": torch.tensor(float(self.decoder_guidance_enabled), device=base_prob.device, dtype=base_prob.dtype),
                 "geometry_pred": geometry_pred,
-                "geometry_offset": geometry_offset,
+                "geometry_offset": geometry_delta,
+                "geometry_delta": geometry_delta,
+                "geometry_delta_prior": geometry_delta_prior,
                 "base_geometry": base_geometry,
                 "final_geometry": final_geometry,
-                "confidence": torch.stack([conf["prior"], conf["base"], conf["update"], conf["boundary"]], dim=-1),
-                "confidence_prior": conf["prior"],
+                "confidence": confidence_vec,
+                "confidence_prior": effective_prior_confidence,
+                "raw_confidence_prior": conf["prior"],
                 "confidence_base": conf["base"],
                 "confidence_update": conf["update"],
                 "confidence_boundary": conf["boundary"],
+                "confidence_scale": scale_confidence,
+                "confidence_slot": conf["slot"],
                 "base_prior_disagreement": conf["disagreement"],
                 "mask_entropy": conf["entropy"],
+                "guided_base_residual_abs_mean": (guided_logits - base_object_logits).detach().abs().mean(),
+                "final_base_residual_abs_mean": (object_logits - base_object_logits).detach().abs().mean(),
+                "memory_update_rate": conf["update"].detach().mean(),
+                "gate_mean": gates.detach().mean(),
+                "residual_abs_mean": (object_logits - base_object_logits).detach().abs().mean(),
                 "affine_reg": (affine[..., 0:2].pow(2).mean() + (affine[..., 2:4] - 1.0).pow(2).mean() + affine[..., 4:6].pow(2).mean()),
                 "dynamics_monitor": {
                     "area": final_geometry[..., 0],
                     "slot_usage": slot_weights.detach().mean(dim=(0, 1)),
                     "affine_abs_mean": affine.detach().abs().mean(dim=(-1, -2)),
-                    "confidence_prior": conf["prior"].detach(),
+                    "confidence_prior": effective_prior_confidence.detach(),
                 },
             },
         }

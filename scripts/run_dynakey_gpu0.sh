@@ -35,7 +35,6 @@ DYNAKEY_ARGS=(
 run_exp echonet_dynakey \
   --config-name config_banditpm_baseline \
   exp_id=echonet_dynakey \
-  wandb_mode=online \
   dataset_name=echonet \
   data_path=${DATASETS_ROOT}/processed/echonet_png128_10f \
   main_training.batch_size=20 \
@@ -44,14 +43,11 @@ run_exp echonet_dynakey \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=echonet_dynakey \
-  wandb.tags='[echonet,dynakey,kpff,ode_memory]' \
   "${DYNAKEY_ARGS[@]}"
 
 run_exp echonet_full_cycle_dynakey \
   --config-name config_banditpm_baseline \
   exp_id=echonet_full_cycle_dynakey \
-  wandb_mode=online \
   dataset_name=echonet \
   data_path=${DATASETS_ROOT}/processed/echonet_full_cycle_png128_10f \
   main_training.batch_size=20 \
@@ -60,14 +56,11 @@ run_exp echonet_full_cycle_dynakey \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=echonet_fullcycle_dynakey \
-  wandb.tags='[echonet,full_cycle,dynakey,kpff,ode_memory]' \
   "${DYNAKEY_ARGS[@]}"
 
 run_exp cardiacuda_a4c_lv_sparse_oracle_dynakey \
   --config-name cardiacuda_a4c_lv_oracle \
   exp_id=cardiacuda_a4c_lv_sparse_oracle_dynakey \
-  wandb_mode=online \
   dataset_name=cardiacuda \
   data_path=${DATASETS_ROOT}/processed/cardiacuda_a4c_lv_png128_10f \
   main_training.batch_size=16 \
@@ -76,6 +69,4 @@ run_exp cardiacuda_a4c_lv_sparse_oracle_dynakey \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=cardiacuda_dynakey \
-  wandb.tags='[cardiacuda,a4c,lv,sparse,oracle,dynakey,kpff,ode_memory]' \
   "${DYNAKEY_ARGS[@]}"

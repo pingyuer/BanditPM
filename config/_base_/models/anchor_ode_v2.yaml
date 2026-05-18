@@ -36,6 +36,7 @@ model:
     affine_max_rotate: 0.15
     gate_warmup_iters: 500
     lambda_base_seg: 0.5
+    lambda_guided_seg: 0.2
     lambda_prior: 0.1
     lambda_warp_prior: 0.1
     lambda_multiscale_prior: 0.02

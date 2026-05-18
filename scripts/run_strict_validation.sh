@@ -26,7 +26,6 @@ run_and_log logs/smoke_camus.log \
   main_training.num_iterations=1 \
   eval_stage.eval_interval=1 \
   save=0 \
-  wandb_mode=offline
 
 run_and_log logs/smoke_echonet_endpoint.log \
   "${PYTHON_BIN}" train.py \
@@ -36,7 +35,6 @@ run_and_log logs/smoke_echonet_endpoint.log \
   main_training.num_iterations=1 \
   eval_stage.eval_interval=1 \
   save=0 \
-  wandb_mode=offline
 
 run_and_log logs/smoke_echonet_fullcycle.log \
   "${PYTHON_BIN}" train.py \
@@ -46,7 +44,6 @@ run_and_log logs/smoke_echonet_fullcycle.log \
   main_training.num_iterations=1 \
   eval_stage.eval_interval=1 \
   save=0 \
-  wandb_mode=offline
 
 run_and_log logs/full_validation.log \
   "${PYTHON_BIN}" scripts/run_all_proto_ablation.py

@@ -1,0 +1,24 @@
+defaults:
+  - anchor_ode_v2_tuned_echo
+  - _self_
+
+exp_id: "anchor_ode_v2_hparam_echo_e3"
+
+
+model:
+  anchor_ode:
+    guidance_input_mode: "warp_delta"
+    gate_init_bias: -2.5
+
+main_training:
+  unext_lr_ratio: 1.0
+  anchor_ode_lr_ratio: 1.0
+
+augmentation:
+  enabled: false
+
+evaluation:
+  protocol_version: "v3_current_anchor_affine"
+  postprocess:
+    enabled: true
+    min_size: 16

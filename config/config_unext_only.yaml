@@ -5,10 +5,6 @@ defaults:
 exp_id: "unext_only_v2_no_leak"
 model_name: "UNeXtOnly"
 
-wandb:
-  project: "BanditPM"
-  group: "unext_dynakey_ablation_v2_no_leak"
-  tags: ["unext", "baseline", "v2_no_leak", "predinit", "exclude_init_frame"]
 
 model:
   memory_core:

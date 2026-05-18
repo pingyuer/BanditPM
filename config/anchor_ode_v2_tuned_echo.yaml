@@ -1,0 +1,31 @@
+defaults:
+  - echonet_ed2es_endpoint_predinit
+  - _base_/datasets/echo
+  - _base_/models/anchor_ode_v2
+  - _base_/runtime/default_runtime
+  - _base_/schedules/default_3k
+  - _self_
+
+exp_id: "anchor_ode_v2_tuned_echo"
+
+
+model:
+  anchor_ode:
+    gate_init_bias: -2.5
+    confidence_prior_bias: -1.0
+    confidence_base_bias: 1.0
+    confidence_update_bias: -0.5
+    confidence_boundary_bias: -0.5
+    confidence_scale_bias: -1.0
+    confidence_slot_bias: 0.0
+    gate_warmup_iters: 400
+    lambda_base_seg: 0.3
+    lambda_guided_seg: 0.2
+    lambda_prior: 0.10
+    lambda_warp_prior: 0.05
+    lambda_multiscale_prior: 0.02
+    lambda_geo: 0.05
+    lambda_temp_geo: 0.02
+    lambda_conf: 0.03
+    lambda_slot_balance: 0.0003
+    lambda_affine_reg: 0.01

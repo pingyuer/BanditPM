@@ -24,7 +24,6 @@ run_exp() {
 run_exp echonet_kpff \
   --config-name config_banditpm_baseline \
   exp_id=echonet_kpff \
-  wandb_mode=online \
   dataset_name=echonet \
   data_path=${DATASETS_ROOT}/processed/echonet_png128_10f \
   main_training.batch_size=24 \
@@ -35,13 +34,10 @@ run_exp echonet_kpff \
   save_checkpoint_interval=0 \
   model.memory_core.type=none \
   model.temporal_memory.type=none \
-  wandb.group=echonet_baselines \
-  wandb.tags='[echonet,kpff,no_gdr]'
 
 run_exp echonet_bpm_rl \
   --config-name config_banditpm_baseline \
   exp_id=echonet_bpm_rl \
-  wandb_mode=online \
   dataset_name=echonet \
   data_path=${DATASETS_ROOT}/processed/echonet_png128_10f \
   main_training.batch_size=20 \
@@ -59,13 +55,10 @@ run_exp echonet_bpm_rl \
   model.temporal_memory.bpm.ENABLE_POLICY_LOSS=true \
   model.temporal_memory.bpm.ENABLE_POLICY_CE_LOSS=true \
   model.temporal_memory.bpm.ENABLE_RL_LOSS=true \
-  wandb.group=echonet_baselines \
-  wandb.tags='[echonet,bpm_rl,kpff,bpm,rl]'
 
 run_exp camus_gdkvm \
   --config-name config_banditpm_baseline \
   exp_id=camus_gdkvm \
-  wandb_mode=online \
   dataset_name=camus \
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
   main_training.batch_size=10 \
@@ -74,13 +67,10 @@ run_exp camus_gdkvm \
   save=1 \
   save_weights_interval=500 \
   save_checkpoint_interval=0 \
-  wandb.group=camus_baselines \
-  wandb.tags='[camus,gdkvm,kpff,gdr]'
 
 run_exp camus_bpm_rule \
   --config-name config_banditpm_baseline \
   exp_id=camus_bpm_rule \
-  wandb_mode=online \
   dataset_name=camus \
   data_path=${DATASETS_ROOT}/processed/camus_png256_10f \
   main_training.batch_size=8 \
@@ -98,5 +88,3 @@ run_exp camus_bpm_rule \
   model.temporal_memory.bpm.ENABLE_POLICY_LOSS=false \
   model.temporal_memory.bpm.ENABLE_POLICY_CE_LOSS=false \
   model.temporal_memory.bpm.ENABLE_RL_LOSS=false \
-  wandb.group=camus_baselines \
-  wandb.tags='[camus,bpm_rule,kpff,bpm]'

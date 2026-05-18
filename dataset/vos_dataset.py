@@ -19,7 +19,16 @@ def _infer_camus_protocol(filepath: str) -> str:
     return "camus_short_dense"
 
 class TenCamusDataset(Dataset):
-    def __init__(self, filepath: str, mode: str = 'train', seq_length=10, max_num_obj=1, size=256, merge_probability=0.0):
+    def __init__(
+        self,
+        filepath: str,
+        mode: str = 'train',
+        seq_length=10,
+        max_num_obj=1,
+        size=256,
+        merge_probability=0.0,
+        augmentation=None,
+    ):
         super().__init__()
         self.filepath = filepath
         self.mode = mode
@@ -27,6 +36,7 @@ class TenCamusDataset(Dataset):
         self.max_num_obj = max_num_obj
         self.size = size
         self.merge_probability = merge_probability
+        self.augmentation = augmentation
 
         json_path = os.path.join(filepath, 'camus_public_datasplit_20250706.json')
         if not os.path.isfile(json_path):
@@ -108,6 +118,18 @@ class TenCamusDataset(Dataset):
         masks_t = torch.from_numpy(masks_np).long().unsqueeze(1)
 
         if self.mode == 'train':
+            if self.augmentation and bool(self.augmentation.get("enabled", False)):
+                brightness = float(self.augmentation.get("brightness", 0.0))
+                contrast = float(self.augmentation.get("contrast", 0.0))
+                gamma = float(self.augmentation.get("gamma", 0.0))
+                if contrast > 0.0:
+                    frames_t = (frames_t - 0.5) * random.uniform(1.0 - contrast, 1.0 + contrast) + 0.5
+                if brightness > 0.0:
+                    frames_t = frames_t + random.uniform(-brightness, brightness)
+                frames_t = frames_t.clamp(0.0, 1.0)
+                if gamma > 0.0:
+                    frames_t = frames_t.clamp_min(1.0e-6).pow(random.uniform(1.0 - gamma, 1.0 + gamma))
+                frames_t = frames_t.clamp(0.0, 1.0)
             if random.random() < 0.5:
                 frames_t = TF.hflip(frames_t)
                 masks_t = TF.hflip(masks_t)

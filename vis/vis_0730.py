@@ -13,7 +13,7 @@ def visualize_sequence(rgb_seq, cls_gt_seq, out_dict, run_path, batch_idx_str, i
     num_frames = len(logits_keys)
     if num_frames == 0:
         print("No frames to visualize.")
-        return
+        return None
 
     if num_frames > 15:
         frames_per_row = min(15, num_frames)
@@ -113,3 +113,4 @@ def visualize_sequence(rgb_seq, cls_gt_seq, out_dict, run_path, batch_idx_str, i
     plt.close(fig)
     
     print(f"Successfully saved sequence visualization with {num_frames} frames to {save_path}")
+    return save_path
