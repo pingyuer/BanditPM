@@ -7,4 +7,15 @@ exp_id: "functional_anchor_echo_joint_residual"
 model:
   functional_anchor:
     training_stage: "joint_residual"
-    prediction_mode: "anchor_primary"
+    prediction_mode: "base_primary"
+    lambda_anchor: 0.3
+    lambda_base_seg: 0.5
+    lambda_residual_smallness: 0.05
+    lambda_boundary_residual: 0.1
+    lambda_phase_consistency: 0.005
+    lambda_anchor_temporal: 0.05
+    lambda_slot_area_order: 0.005
+    lambda_phase_slot_correlation: 0.002
+    temporal_state:
+      detach_state: true
+      detach_every: 3

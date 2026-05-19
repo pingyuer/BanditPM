@@ -5,7 +5,7 @@ Call finalize and create a new Integrator when you want to display/log
 """
 from typing import Dict, Callable, Tuple
 import torch
-from utils.logger import TrainingLogger
+from training.logging import TrainingLogger
 
 
 class Integrator:

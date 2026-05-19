@@ -12,7 +12,7 @@ class PhaseEncoder(nn.Module):
     def __init__(self, num_slots: int, phase_dim: int, hidden_dim: int) -> None:
         super().__init__()
         self.num_slots = int(num_slots)
-        self.input_dim = 8 + self.num_slots
+        self.input_dim = 12 + self.num_slots
         self.net = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
             nn.GELU(),
@@ -26,6 +26,8 @@ class PhaseEncoder(nn.Module):
         *,
         prev_area: torch.Tensor,
         area_velocity: torch.Tensor,
+        area_acceleration: torch.Tensor,
+        phase_reliability: torch.Tensor,
         slot_history: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         norm_time = norm_time.clamp(0.0, 1.0)
@@ -35,6 +37,8 @@ class PhaseEncoder(nn.Module):
         es_flag = (norm_time - 0.5).abs().le(0.125).to(norm_time.dtype)
         diastole_flag = (norm_time > 0.5).to(norm_time.dtype)
         trend = torch.sign(area_velocity)
+        contracting = (area_velocity < 0).to(norm_time.dtype)
+        expanding = (area_velocity > 0).to(norm_time.dtype)
         descriptor = torch.cat(
             [
                 norm_time.unsqueeze(-1),
@@ -42,9 +46,13 @@ class PhaseEncoder(nn.Module):
                 cos_phase.unsqueeze(-1),
                 prev_area.unsqueeze(-1),
                 area_velocity.unsqueeze(-1),
+                area_acceleration.unsqueeze(-1),
                 trend.unsqueeze(-1),
+                contracting.unsqueeze(-1),
+                expanding.unsqueeze(-1),
                 ed_flag.unsqueeze(-1),
                 es_flag.unsqueeze(-1),
+                phase_reliability.unsqueeze(-1),
                 slot_history,
             ],
             dim=-1,

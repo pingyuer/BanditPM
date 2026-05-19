@@ -4,7 +4,8 @@ import torch
 from omegaconf import OmegaConf
 
 from model.functional_anchor import FunctionalAnchorSegmenter
-from model.losses import LossComputer
+from model.functional_anchor.anchor_bank import FunctionalAnchorBank
+from losses import LossComputer
 
 
 def _cfg():
@@ -26,7 +27,7 @@ def _cfg():
                     "hidden_dim": 32,
                     "anchor_size": 8,
                     "residual_clip": 1.0,
-                    "prediction_mode": "anchor_primary",
+                    "prediction_mode": "base_primary",
                     "lambda_anchor": 0.5,
                     "lambda_base_seg": 0.1,
                     "lambda_residual_smallness": 0.02,
@@ -101,13 +102,24 @@ class FunctionalAnchorLossTests(unittest.TestCase):
                 "residual_logits": torch.zeros(2, 1, 32, 32),
                 "slot_area_order_violation": violation,
                 "slot_weights": torch.full((2, 1, 5), 0.2),
-                "phase_descriptor": torch.zeros(2, 1, 13),
+                "phase_descriptor": torch.zeros(2, 1, 17),
             }
         }
         data["logits_0"] = torch.zeros(2, 2, 32, 32)
         terms = loss_computer._compute_functional_anchor_losses(data, torch.ones(2, 1, dtype=torch.bool))
         self.assertIn("aux_functional_anchor_slot_area_order", terms)
         self.assertGreater(float(terms["aux_functional_anchor_slot_area_order"]), 0.0)
+
+    def test_slot_order_is_cardiac_cycle_structured_not_global_monotonic(self):
+        bank = FunctionalAnchorBank(num_slots=5, state_dim=8, phase_dim=4, hidden_dim=12)
+        with torch.no_grad():
+            areas = torch.tensor([0.85, 0.62, 0.30, 0.58, 0.95])
+            bank.area_bias.copy_(torch.logit(areas))
+        z = torch.zeros(1, 1, 8)
+        phase = torch.zeros(1, 1, 4)
+        _, aux = bank(z, phase, torch.zeros(1, 1))
+        self.assertLess(float(aux["slot_order_loss"]), 1.0e-6)
+        self.assertGreater(float(aux["slot_area_uncertain"]), float(aux["slot_area_ed"]))
 
 
 if __name__ == "__main__":

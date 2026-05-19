@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from model.losses import LossComputer
+from losses import LossComputer
 from dataset.frame_index import build_label_map, parse_frame_index
 from model.memory_readout import MaskAwareMemoryReadout
 from model.modules.memory_core import MemoryCore

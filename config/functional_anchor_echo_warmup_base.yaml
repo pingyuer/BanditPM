@@ -8,12 +8,17 @@ model:
   functional_anchor:
     training_stage: "warmup_base"
     prediction_mode: "base_primary"
-    lambda_anchor: 0.1
-    lambda_base_seg: 0.5
-    lambda_residual_smallness: 0.05
+    lambda_anchor: 0.0
+    lambda_base_seg: 1.0
+    lambda_residual_smallness: 0.0
     lambda_boundary_residual: 0.0
     lambda_phase_consistency: 0.0
     lambda_anchor_temporal: 0.0
+    lambda_slot_area_order: 0.0
+    lambda_phase_slot_correlation: 0.0
+    temporal_state:
+      detach_state: true
+      detach_every: 1
 
 main_training:
   unext_lr_ratio: 1.0

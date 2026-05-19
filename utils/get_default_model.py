@@ -8,7 +8,7 @@ import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import DictConfig
 
-from model.trainer import build_model_from_cfg
+from training.trainer import build_model_from_cfg
 
 
 def get_default_model(

@@ -7,22 +7,32 @@
 - 读取 Hydra config。
 - 解析 dataset class。
 - 构造 dataloader。
-- 初始化 `Trainer`。
-- 初始化 MLflow/MLflow 输出。
+- 初始化 `training.Trainer`。
+- 初始化 `experiment.MLflowLogger` 并管理 run 生命周期。
 
-训练循环、eval、checkpoint、summary 写入集中在 `model/trainer.py`。
+训练循环位于 `training/`，评估入口位于 `evaluation/`，loss 聚合位于 `losses/`，MLflow 实验档案位于 `experiment/`。旧迁移 shim 已移除，新代码只使用这些公共包边界。
+
+## 模块边界
+
+- `training/`: `Trainer`、EMA、参数组、训练期本地日志和 checkpoint 触发。
+- `evaluation/`: validation/test 入口、`EvaluationResult`、指标聚合和后续 sweep/postprocess 承载点。
+- `losses/`: 公共 segmentation loss 与方法族 loss facade，`LossComputer` 仍保持统一调用面。
+- `experiment/`: MLflow API 封装、experiment/run 命名、metadata tags/params、env/source/config artifact。
+- `models/`: 模型 registry 公共入口；现有实现文件仍在 `model/` 下，逐步迁移。
+- `visualization/`: sequence/sample 可视化与方法族诊断面板。
 
 ## Registry 边界
 
 本项目保留 Hydra/YAML，但用轻量 registry 替代硬编码 if/else。
 
 - `utils/registry.py`: 最小 `Registry` 实现。
-- `model/registry.py`: `MODEL_REGISTRY`，注册 `gdkvm`、`kpff`、`unext_fusion` 和 legacy aliases。
+- `models/registry.py`: `MODEL_REGISTRY`，注册 `gdkvm`、`kpff`、`unext_fusion`、`functional_anchor` 和 legacy aliases。
 - `dataset/registry.py`: `DATASET_REGISTRY`，注册 `echo/echonet`、`camus`、`domain/cardiacuda`。
 
-兼容 facade 仍然存在：
+公共 facade：
 
-- `model.trainer.build_model_from_cfg(cfg, device)`
+- `training.build_model_from_cfg(cfg, device)`
+- `models.registry.build_model(cfg, device=device)`
 - `train.resolve_dataset_class(cfg)`
 
 二次开发时应扩展 registry，而不是继续扩展这些 facade。
@@ -70,12 +80,14 @@ aux_0, aux_1, ...
 memory_aux_0, memory_aux_1, ...
 ```
 
-`LossComputer` 读取 logits、GT 和 supervision mask。`Trainer` 读取 loss dict、model aux、memory aux 并写日志。
+`losses.LossComputer` 读取 logits、GT 和 supervision mask。`training.Trainer` 读取 loss dict、model aux、memory aux，交给训练期 logger / evaluator / MLflow facade 记录。
 
 ## 方法线
 
 - `gdkvm`: `model/gdkvm01.py`，保留原 GDKVM/KPFF/GDR 路径。
 - `kpff`: 仍由 `GDKVM` 构建，但 `memory_core` 与 `temporal_memory` 设为 `none`。
 - `unext_fusion`: `model/unext_dynakey.py`，使用 UNeXt、DynaKey/spatial memory、mid-level fusion、可选 Q policy。
+- `anchor_ode`: `model/anchor_ode.py`，作为 Anchor-ODE 对照方法族保留。
+- `functional_anchor`: `model/functional_anchor/`，以模块化方式实现 phase/state/anchor/residual/fusion。
 
 legacy/global DynaKey 和 spatial-phase DynaKey 都应通过配置切换，不应破坏旧路径。

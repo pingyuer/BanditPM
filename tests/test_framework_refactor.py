@@ -9,7 +9,7 @@ from dataset.echo import EchoDataset
 from dataset.vos_dataset import TenCamusDataset
 from model.delay_ode import DelayODEKeyMapSegmenter
 from model.gdkvm01 import GDKVM
-from model.trainer import build_model_from_cfg
+from training import build_model_from_cfg
 from model.unext_dynakey import UNeXtDynaKeySegmenter
 from train import resolve_dataset_class
 

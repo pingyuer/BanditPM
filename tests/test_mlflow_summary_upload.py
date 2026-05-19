@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+import csv
 from pathlib import Path
 
-from model.trainer import Trainer
+from training import Trainer
+from scripts.summarize_and_clean_outputs import FIELDS, summarize
 
 
 class _Logger:
@@ -36,6 +38,26 @@ class MLflowSummaryUploadTests(unittest.TestCase):
             trainer.upload_summary_artifact()
 
         self.assertEqual(logger.calls, [])
+
+    def test_legacy_experiment_summary_has_no_version_column(self):
+        self.assertNotIn("version", FIELDS)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "summary.csv").write_text(
+                "mode,experiment_name,dataset,protocol_name,protocol_version,iteration,dice_frame_mean\n"
+                "test,exp,echo,ed2es,old_version,3,0.8\n",
+                encoding="utf-8",
+            )
+            output = root / "EXPERIMENT_SUMMARY.csv"
+            rows = summarize(root, output)
+
+            self.assertEqual(len(rows), 1)
+            self.assertNotIn("version", rows[0])
+            with output.open(newline="", encoding="utf-8") as handle:
+                header = next(csv.reader(handle))
+            self.assertNotIn("version", header)
 
 
 if __name__ == "__main__":

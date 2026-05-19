@@ -7,7 +7,7 @@ from unittest import mock
 
 from omegaconf import OmegaConf
 
-from utils.mlflow_logger import MLflowLogger
+from experiment import MLflowLogger
 from evaluation import EvaluationResult
 
 

@@ -29,13 +29,22 @@ model:
     hidden_dim: 128
     anchor_size: 32
     residual_clip: 1.5
-    prediction_mode: "anchor_primary"
+    prediction_mode: "base_primary"
     training_stage: "joint_residual"
-    lambda_anchor: 0.6
-    lambda_base_seg: 0.1
-    lambda_residual_smallness: 0.02
+    use_anchor_features_in_residual: true
+    temporal_state:
+      detach_state: true
+      detach_every: 3
+    phase:
+      source_priority: ["metadata_ed_es", "area_curve", "normalized_time"]
+      normalized_time_weight: 1.0
+      normalized_time_weight_echo: 0.1
+      area_curve_weight_echo: 1.0
+    lambda_anchor: 0.3
+    lambda_base_seg: 0.5
+    lambda_residual_smallness: 0.05
     lambda_boundary_residual: 0.1
     lambda_phase_consistency: 0.02
-    lambda_anchor_temporal: 0.02
-    lambda_slot_area_order: 0.01
+    lambda_anchor_temporal: 0.05
+    lambda_slot_area_order: 0.02
     lambda_phase_slot_correlation: 0.01

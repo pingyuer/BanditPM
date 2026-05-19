@@ -3,8 +3,8 @@ import unittest
 import torch
 from omegaconf import OmegaConf
 
-from model.losses import LossComputer
-from model.trainer import Trainer
+from losses import LossComputer
+from training import Trainer
 from tests.factories import make_cls_gt_from_frame_labels, make_frame_valid_mask, make_video_batch
 
 
@@ -102,7 +102,7 @@ class SupervisionIndexTests(unittest.TestCase):
         idx = Trainer._resolve_eval_indices(trainer, data)
         self.assertFalse(idx.any())
 
-    def test_summary_row_records_no_leak_protocol(self):
+    def test_summary_row_omits_protocol_version_from_experiment_summary(self):
         trainer = Trainer.__new__(Trainer)
         trainer.exp_id = "unit_no_leak"
         trainer.commit_hash = "test"
@@ -124,7 +124,7 @@ class SupervisionIndexTests(unittest.TestCase):
         row = Trainer._build_summary_row(trainer, "test", {}, epoch=0, it=0)
         self.assertEqual(row["init_mode"], "pred_or_zero")
         self.assertTrue(row["exclude_init_frame"])
-        self.assertEqual(row["protocol_version"], "v2_no_leak")
+        self.assertNotIn("protocol_version", row)
 
     def test_loss_computer_accepts_per_sample_supervision_masks(self):
         cfg = OmegaConf.create(

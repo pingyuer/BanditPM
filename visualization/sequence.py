@@ -24,7 +24,7 @@ def visualize_sequence(rgb_seq, cls_gt_seq, out_dict, run_path, batch_idx_str, i
     has_functional_anchor = any(aux is not None for aux in functional_aux_by_t)
     panel_names = ["Original", "Overlay", "Final heatmap"]
     if has_functional_anchor:
-        panel_names.extend(["Base aux", "Anchor only", "Residual"])
+        panel_names.extend(["Base aux", "Anchor only", "Residual", "Trust", "Slot/area"])
     panels_per_frame = len(panel_names)
 
     if num_frames > 15:
@@ -90,6 +90,9 @@ def visualize_sequence(rgb_seq, cls_gt_seq, out_dict, run_path, batch_idx_str, i
                 base_logits = aux.get("base_object_logits")
                 anchor_logits = aux.get("anchor_logits")
                 residual_logits = aux.get("residual_logits")
+                confidence = aux.get("confidence")
+                slot_weights = aux.get("slot_weights")
+                slot_area = aux.get("slot_area")
                 if torch.is_tensor(base_logits):
                     base_prob = torch.sigmoid(base_logits[0, 0]).detach().cpu().numpy()
                     axes[3].imshow(base_prob, cmap='magma', alpha=0.55, interpolation='nearest', norm=norm)
@@ -100,6 +103,19 @@ def visualize_sequence(rgb_seq, cls_gt_seq, out_dict, run_path, batch_idx_str, i
                     residual = residual_logits[0, 0].detach().cpu().numpy()
                     vmax = max(float(np.abs(residual).max()), 1.0e-6)
                     axes[5].imshow(residual, cmap='coolwarm', alpha=0.65, interpolation='nearest', vmin=-vmax, vmax=vmax)
+                if torch.is_tensor(confidence):
+                    trust = confidence[0, 3].detach().cpu().numpy()
+                    axes[6].imshow(trust, cmap='plasma', alpha=0.65, interpolation='nearest', norm=norm)
+                if torch.is_tensor(slot_weights):
+                    axes[7].clear()
+                    weights = slot_weights[0, 0].detach().cpu().numpy()
+                    x = np.arange(len(weights))
+                    axes[7].bar(x, weights, color='tab:blue', alpha=0.75)
+                    if torch.is_tensor(slot_area):
+                        areas = slot_area.detach().cpu().numpy()
+                        axes[7].plot(x, areas[: len(weights)], color='tab:red', marker='o', linewidth=1)
+                    axes[7].set_ylim(0, 1)
+                    axes[7].set_xticks([])
 
     if num_frames > 15:
         for i in range(num_rows_per_type):

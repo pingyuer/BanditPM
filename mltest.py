@@ -2,7 +2,7 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from utils.mlflow_logger import MLflowLogger
+from experiment import MLflowLogger
 
 
 cfg = OmegaConf.create(

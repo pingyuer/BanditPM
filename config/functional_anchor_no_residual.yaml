@@ -1,0 +1,12 @@
+defaults:
+  - functional_anchor_echo
+  - _self_
+
+exp_id: "functional_anchor_no_residual"
+
+model:
+  functional_anchor:
+    residual_clip: 0.0
+    lambda_residual_smallness: 0.0
+    lambda_boundary_residual: 0.0
+

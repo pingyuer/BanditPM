@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
-from model.losses import LossComputer
+from losses import LossComputer
 from model.spatial_dynakey import SpatialDynaKeyMemory, segmentation_gain_reward
 from model.unext_dynakey import UNeXtDynaKeySegmenter
 

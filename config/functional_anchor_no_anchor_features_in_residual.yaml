@@ -1,0 +1,10 @@
+defaults:
+  - functional_anchor_echo
+  - _self_
+
+exp_id: "functional_anchor_no_anchor_features_in_residual"
+
+model:
+  functional_anchor:
+    use_anchor_features_in_residual: false
+

@@ -15,13 +15,13 @@ from torch.utils.data.distributed import DistributedSampler
 from omegaconf import DictConfig
 
 from evaluation import EvaluationResult, Evaluator
-from utils.logger import TrainingLogger
+from training.logging import TrainingLogger
 from utils.log_integrator import Integrator
 from utils.time_estimator import TimeEstimator
-from model.registry import build_model
-from model.utils.parameter_groups import get_parameter_groups
-from model.losses import LossComputer
-from vis.vis_0730 import visualize_sequence
+from models.registry import build_model
+from training.parameter_groups import get_parameter_groups
+from losses import LossComputer
+from visualization import visualize_sequence
 from utils.frame_validity import (
     mask_to_frame_ids,
     normalize_frame_validity_mask,
@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 
 
 def build_model_from_cfg(cfg: DictConfig, device: torch.device | str):
-    """Backward-compatible facade around the model registry."""
+    """Build a model through the public model registry."""
     return build_model(cfg, device=device)
 
 
@@ -430,7 +430,6 @@ class Trainer:
             "frame_scope": str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only")),
             "exclude_init_frame": bool(self.cfg.get("evaluation", {}).get("exclude_init_frame", False)),
             "init_frame_index": int(self.cfg.get("evaluation", {}).get("init_frame_index", 0)),
-            "protocol_version": str(self.cfg.get("evaluation", {}).get("protocol_version", "v1_oracle_init")),
             "postprocess_enabled": self._postprocess_enabled(),
             "ema_enabled": getattr(self, "ema_enabled", False),
             "ema_eval": getattr(self, "ema_eval", False),
@@ -957,14 +956,34 @@ class Trainer:
                 "ed_slot_usage": [],
                 "es_slot_usage": [],
                 "slot_area_order_violation": [],
+                "slot_order_loss": [],
+                "slot_area_ed": [],
+                "slot_area_early_systole": [],
+                "slot_area_es": [],
+                "slot_area_early_diastole": [],
+                "slot_area_uncertain": [],
                 "phase_entropy": [],
+                "phase_source": [],
+                "phase_reliability": [],
+                "state_norm": [],
+                "state_delta_norm": [],
+                "ode_update_norm": [],
                 "gate_mean_low": [],
                 "gate_mean_mid": [],
                 "gate_mean_high": [],
+                "inject_gate_low": [],
+                "inject_gate_mid": [],
+                "inject_gate_high": [],
+                "inject_gate_dec": [],
                 "confidence_mean": [],
                 "confidence_std": [],
+                "trust_mean": [],
+                "trust_std": [],
                 "anchor_trust_ratio": [],
                 "image_trust_ratio": [],
+                "residual_abs_mean": [],
+                "residual_abs_max": [],
+                "delta_abs_mean": [],
             }
             for key in memory_keys:
                 aux = data.get(key)
@@ -1278,7 +1297,6 @@ class Trainer:
                             f"uses_oracle_gt={uses_oracle_gt} | "
                             f"metric_space={str(self.cfg.get('evaluation', {}).get('metric_space', 'original'))} | "
                             f"exclude_init_frame={bool(self.cfg.get('evaluation', {}).get('exclude_init_frame', False))} | "
-                            f"protocol_version={str(self.cfg.get('evaluation', {}).get('protocol_version', 'v1_oracle_init'))} | "
                             f"supervised_indices={self._format_frame_mask(supervised_indices)} | "
                             f"eval_indices={self._format_frame_mask(eval_indices)} | "
                             f"valid_mask_frame_counts={valid_mask_counts}"
@@ -1354,6 +1372,26 @@ class Trainer:
                             "functional_anchor_confidence_std_sum": 0.0,
                             "functional_anchor_anchor_trust_ratio_sum": 0.0,
                             "functional_anchor_image_trust_ratio_sum": 0.0,
+                            "functional_anchor_trust_mean_sum": 0.0,
+                            "functional_anchor_trust_std_sum": 0.0,
+                            "functional_anchor_residual_abs_mean_sum": 0.0,
+                            "functional_anchor_residual_abs_max_sum": 0.0,
+                            "functional_anchor_delta_abs_mean_sum": 0.0,
+                            "functional_anchor_slot_order_loss_sum": 0.0,
+                            "functional_anchor_slot_area_ed_sum": 0.0,
+                            "functional_anchor_slot_area_early_systole_sum": 0.0,
+                            "functional_anchor_slot_area_es_sum": 0.0,
+                            "functional_anchor_slot_area_early_diastole_sum": 0.0,
+                            "functional_anchor_slot_area_uncertain_sum": 0.0,
+                            "functional_anchor_phase_source_sum": 0.0,
+                            "functional_anchor_phase_reliability_sum": 0.0,
+                            "functional_anchor_state_norm_sum": 0.0,
+                            "functional_anchor_state_delta_norm_sum": 0.0,
+                            "functional_anchor_ode_update_norm_sum": 0.0,
+                            "functional_anchor_inject_gate_low_sum": 0.0,
+                            "functional_anchor_inject_gate_mid_sum": 0.0,
+                            "functional_anchor_inject_gate_high_sum": 0.0,
+                            "functional_anchor_inject_gate_dec_sum": 0.0,
                             "functional_anchor_aux_count": 0.0,
                             "aux_count": 0.0,
                         }
@@ -1433,11 +1471,31 @@ class Trainer:
                                     ("ed_slot_usage", "functional_anchor_ed_slot_usage_sum"),
                                     ("es_slot_usage", "functional_anchor_es_slot_usage_sum"),
                                     ("slot_area_order_violation", "functional_anchor_slot_area_order_violation_sum"),
+                                    ("slot_order_loss", "functional_anchor_slot_order_loss_sum"),
+                                    ("slot_area_ed", "functional_anchor_slot_area_ed_sum"),
+                                    ("slot_area_early_systole", "functional_anchor_slot_area_early_systole_sum"),
+                                    ("slot_area_es", "functional_anchor_slot_area_es_sum"),
+                                    ("slot_area_early_diastole", "functional_anchor_slot_area_early_diastole_sum"),
+                                    ("slot_area_uncertain", "functional_anchor_slot_area_uncertain_sum"),
+                                    ("phase_source", "functional_anchor_phase_source_sum"),
+                                    ("phase_reliability", "functional_anchor_phase_reliability_sum"),
+                                    ("state_norm", "functional_anchor_state_norm_sum"),
+                                    ("state_delta_norm", "functional_anchor_state_delta_norm_sum"),
+                                    ("ode_update_norm", "functional_anchor_ode_update_norm_sum"),
                                     ("gate_mean_low", "functional_anchor_gate_low_sum"),
                                     ("gate_mean_mid", "functional_anchor_gate_mid_sum"),
                                     ("gate_mean_high", "functional_anchor_gate_high_sum"),
+                                    ("inject_gate_low", "functional_anchor_inject_gate_low_sum"),
+                                    ("inject_gate_mid", "functional_anchor_inject_gate_mid_sum"),
+                                    ("inject_gate_high", "functional_anchor_inject_gate_high_sum"),
+                                    ("inject_gate_dec", "functional_anchor_inject_gate_dec_sum"),
                                     ("confidence_mean", "functional_anchor_confidence_mean_sum"),
                                     ("confidence_std", "functional_anchor_confidence_std_sum"),
+                                    ("trust_mean", "functional_anchor_trust_mean_sum"),
+                                    ("trust_std", "functional_anchor_trust_std_sum"),
+                                    ("residual_abs_mean", "functional_anchor_residual_abs_mean_sum"),
+                                    ("residual_abs_max", "functional_anchor_residual_abs_max_sum"),
+                                    ("delta_abs_mean", "functional_anchor_delta_abs_mean_sum"),
                                     ("anchor_trust_ratio", "functional_anchor_anchor_trust_ratio_sum"),
                                     ("image_trust_ratio", "functional_anchor_image_trust_ratio_sum"),
                                 ):
@@ -1649,6 +1707,26 @@ class Trainer:
                     "functional_anchor_confidence_std_sum": 0.0,
                     "functional_anchor_anchor_trust_ratio_sum": 0.0,
                     "functional_anchor_image_trust_ratio_sum": 0.0,
+                    "functional_anchor_trust_mean_sum": 0.0,
+                    "functional_anchor_trust_std_sum": 0.0,
+                    "functional_anchor_residual_abs_mean_sum": 0.0,
+                    "functional_anchor_residual_abs_max_sum": 0.0,
+                    "functional_anchor_delta_abs_mean_sum": 0.0,
+                    "functional_anchor_slot_order_loss_sum": 0.0,
+                    "functional_anchor_slot_area_ed_sum": 0.0,
+                    "functional_anchor_slot_area_early_systole_sum": 0.0,
+                    "functional_anchor_slot_area_es_sum": 0.0,
+                    "functional_anchor_slot_area_early_diastole_sum": 0.0,
+                    "functional_anchor_slot_area_uncertain_sum": 0.0,
+                    "functional_anchor_phase_source_sum": 0.0,
+                    "functional_anchor_phase_reliability_sum": 0.0,
+                    "functional_anchor_state_norm_sum": 0.0,
+                    "functional_anchor_state_delta_norm_sum": 0.0,
+                    "functional_anchor_ode_update_norm_sum": 0.0,
+                    "functional_anchor_inject_gate_low_sum": 0.0,
+                    "functional_anchor_inject_gate_mid_sum": 0.0,
+                    "functional_anchor_inject_gate_high_sum": 0.0,
+                    "functional_anchor_inject_gate_dec_sum": 0.0,
                     "functional_anchor_aux_count": 0.0,
                     "aux_count": 0.0,
                 }
@@ -1796,11 +1874,33 @@ class Trainer:
             "functional_anchor/confidence_std": mean("functional_anchor_confidence_std_sum", "functional_anchor_aux_count"),
             "functional_anchor/anchor_trust_ratio": mean("functional_anchor_anchor_trust_ratio_sum", "functional_anchor_aux_count"),
             "functional_anchor/image_trust_ratio": mean("functional_anchor_image_trust_ratio_sum", "functional_anchor_aux_count"),
+            "functional_anchor/trust_mean": mean("functional_anchor_trust_mean_sum", "functional_anchor_aux_count"),
+            "functional_anchor/trust_std": mean("functional_anchor_trust_std_sum", "functional_anchor_aux_count"),
+            "functional_anchor/residual_abs_mean": mean("functional_anchor_residual_abs_mean_sum", "functional_anchor_aux_count"),
+            "functional_anchor/residual_abs_max": mean("functional_anchor_residual_abs_max_sum", "functional_anchor_aux_count"),
+            "functional_anchor/delta_abs_mean": mean("functional_anchor_delta_abs_mean_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_order_loss": mean("functional_anchor_slot_order_loss_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_area_ed": mean("functional_anchor_slot_area_ed_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_area_early_systole": mean("functional_anchor_slot_area_early_systole_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_area_es": mean("functional_anchor_slot_area_es_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_area_early_diastole": mean("functional_anchor_slot_area_early_diastole_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_area_uncertain": mean("functional_anchor_slot_area_uncertain_sum", "functional_anchor_aux_count"),
+            "functional_anchor/phase_source": mean("functional_anchor_phase_source_sum", "functional_anchor_aux_count"),
+            "functional_anchor/phase_reliability": mean("functional_anchor_phase_reliability_sum", "functional_anchor_aux_count"),
+            "functional_anchor/state_norm": mean("functional_anchor_state_norm_sum", "functional_anchor_aux_count"),
+            "functional_anchor/state_delta_norm": mean("functional_anchor_state_delta_norm_sum", "functional_anchor_aux_count"),
+            "functional_anchor/ode_update_norm": mean("functional_anchor_ode_update_norm_sum", "functional_anchor_aux_count"),
+            "functional_anchor/inject_gate_low": mean("functional_anchor_inject_gate_low_sum", "functional_anchor_aux_count"),
+            "functional_anchor/inject_gate_mid": mean("functional_anchor_inject_gate_mid_sum", "functional_anchor_aux_count"),
+            "functional_anchor/inject_gate_high": mean("functional_anchor_inject_gate_high_sum", "functional_anchor_aux_count"),
+            "functional_anchor/inject_gate_dec": mean("functional_anchor_inject_gate_dec_sum", "functional_anchor_aux_count"),
         }
         metrics["anchor_ode/final_dice"] = metrics["dice_frame_mean"]
         metrics["anchor_ode/base_dice"] = metrics["base_only_dice_frame_mean"]
         metrics["anchor_ode/guided_dice"] = metrics["guided_only_dice_frame_mean"]
         metrics["anchor_ode/prior_dice"] = metrics["prior_only_dice_frame_mean"]
+        metrics["area_acceleration"] = metrics["area_smoothness"]
+        metrics["temporal_jitter"] = metrics["temporal_drift"]
         if reduced.get("functional_anchor_aux_count", 0.0) > 0:
             metrics["functional_anchor/final_dice"] = metrics["dice_frame_mean"]
             metrics["functional_anchor/final_minus_base"] = metrics["dice_frame_mean"] - metrics["functional_anchor/base_dice"]

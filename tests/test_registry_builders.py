@@ -9,7 +9,7 @@ from dataset.vos_dataset import TenCamusDataset
 from model.anchor_ode import UNeXtAnchorODEAffineSegmenter, UNeXtAnchorODESegmenter
 from model.delay_ode import DelayODEKeyMapSegmenter
 from model.gdkvm01 import GDKVM
-from model.registry import MODEL_REGISTRY
+from models.registry import MODEL_REGISTRY
 from model.unext_dynakey import UNeXtDynaKeySegmenter
 from utils.registry import Registry
 

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from model.delay_ode import DelayODEKeyMapSegmenter
-from model.losses import LossComputer
+from losses import LossComputer
 
 
 def _cfg(

@@ -8,10 +8,10 @@ from omegaconf import OmegaConf
 
 from dataset.echo import _apply_intensity_augmentation
 from model.anchor_ode import UNeXtAnchorODEAffineSegmenter, UNeXtAnchorODESegmenter
-from model.losses import LossComputer
-from model.trainer import ModelEMA, Trainer
+from losses import LossComputer
+from training import ModelEMA, Trainer
 from model.utils.parameter_groups import get_parameter_groups
-from train import resolve_mlflow_experiment_name
+from experiment.metadata import resolve_mlflow_experiment_name
 
 
 def _cfg():

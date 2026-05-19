@@ -3,7 +3,7 @@ import unittest
 
 from omegaconf import OmegaConf
 
-from train import resolve_mlflow_experiment_name, resolve_mlflow_run_name
+from experiment.metadata import resolve_mlflow_experiment_name, resolve_mlflow_run_name
 
 
 def _cfg(model_name, *, exp_id="exp", memory_type="none", use_dynakey=False):

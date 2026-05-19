@@ -3,7 +3,7 @@ import unittest
 import torch
 from omegaconf import OmegaConf
 
-from model.losses import LossComputer
+from losses import LossComputer
 from model.modules.dynakey import DynaKeyMemoryCore
 from model.modules.dynakey.counterfactual import compute_counterfactual_returns
 from model.modules.dynakey.ode_key_dictionary import ODEKeyDictionary

@@ -18,6 +18,16 @@ main_training:
   use_ema: false
   ema_eval: false
 
+model:
+  functional_anchor:
+    phase:
+      normalized_time_weight: 0.1
+      normalized_time_weight_echo: 0.1
+      area_curve_weight_echo: 1.0
+    lambda_phase_consistency: 0.005
+    lambda_slot_area_order: 0.005
+    lambda_phase_slot_correlation: 0.002
+
 evaluation:
   protocol_version: "v3_functional_anchor"
   threshold_search_start: 0.30

@@ -8,12 +8,17 @@ model:
   functional_anchor:
     training_stage: "anchor_pretrain"
     prediction_mode: "anchor_primary"
-    lambda_anchor: 0.8
-    lambda_base_seg: 0.05
-    lambda_residual_smallness: 0.08
+    lambda_anchor: 1.0
+    lambda_base_seg: 0.2
+    lambda_residual_smallness: 0.1
     lambda_boundary_residual: 0.02
-    lambda_phase_consistency: 0.04
+    lambda_phase_consistency: 0.1
     lambda_anchor_temporal: 0.04
+    lambda_slot_area_order: 0.05
+    lambda_phase_slot_correlation: 0.01
+    temporal_state:
+      detach_state: true
+      detach_every: 1
 
 main_training:
   unext_lr_ratio: 0.2
