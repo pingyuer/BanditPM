@@ -244,6 +244,8 @@ class MLflowLogger:
                 out[mapping[key_str]] = value
             elif key_str.startswith("loss/"):
                 out[key_str] = value
+            elif key_str.startswith("aux_functional_anchor_"):
+                out[f"functional_anchor/{key_str.removeprefix('aux_functional_anchor_')}"] = value
         self.log_metrics(out, step=step, prefix="train")
 
     def log_eval_summary(self, metrics: Mapping[str, Any], *, mode: str, step: int | None = None) -> None:
@@ -298,6 +300,50 @@ class MLflowLogger:
             if guided is not None and base is not None:
                 out["guided_minus_base_dice"] = guided - base
         self.log_metrics(out, step=step, prefix="anchor_ode")
+
+    def log_functional_anchor_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
+        aliases = {
+            "base_dice": ("base_dice", "base_only_dice_frame_mean", "functional_anchor/base_dice"),
+            "anchor_only_dice": ("anchor_only_dice", "anchor_only_dice_frame_mean", "functional_anchor/anchor_only_dice"),
+            "final_dice": ("final_dice", "dice_frame_mean", "dice", "functional_anchor/final_dice"),
+            "final_minus_base": ("final_minus_base", "functional_anchor/final_minus_base"),
+            "final_minus_anchor": ("final_minus_anchor", "functional_anchor/final_minus_anchor"),
+            "residual_l1": ("residual_l1", "functional_anchor/residual_l1"),
+            "residual_l2": ("residual_l2", "functional_anchor/residual_l2"),
+            "residual_boundary_ratio": ("residual_boundary_ratio", "functional_anchor/residual_boundary_ratio"),
+            "shape_residual_norm": ("shape_residual_norm", "functional_anchor/shape_residual_norm"),
+            "boundary_residual_norm": ("boundary_residual_norm", "functional_anchor/boundary_residual_norm"),
+            "area_curve_smoothness": ("area_curve_smoothness", "functional_anchor/area_curve_smoothness"),
+            "anchor_temporal_consistency": ("anchor_temporal_consistency", "functional_anchor/anchor_temporal_consistency"),
+            "slot_entropy": ("slot_entropy", "functional_anchor/slot_entropy"),
+            "ED_slot_usage": ("ed_slot_usage", "ED_slot_usage", "functional_anchor/ED_slot_usage"),
+            "ES_slot_usage": ("es_slot_usage", "ES_slot_usage", "functional_anchor/ES_slot_usage"),
+            "slot_area_order_violation": ("slot_area_order_violation", "functional_anchor/slot_area_order_violation"),
+            "gate_mean_low": ("gate_mean_low", "functional_anchor/gate_mean_low"),
+            "gate_mean_mid": ("gate_mean_mid", "functional_anchor/gate_mean_mid"),
+            "gate_mean_high": ("gate_mean_high", "functional_anchor/gate_mean_high"),
+            "confidence_mean": ("confidence_mean", "functional_anchor/confidence_mean"),
+            "confidence_std": ("confidence_std", "functional_anchor/confidence_std"),
+            "anchor_trust_ratio": ("anchor_trust_ratio", "functional_anchor/anchor_trust_ratio"),
+            "image_trust_ratio": ("image_trust_ratio", "functional_anchor/image_trust_ratio"),
+        }
+        out = {}
+        for dst, keys in aliases.items():
+            for key in keys:
+                if key in metrics:
+                    out[dst] = metrics[key]
+                    break
+        if "final_minus_base" not in out and "final_dice" in out and "base_dice" in out:
+            final = self._to_float(out["final_dice"])
+            base = self._to_float(out["base_dice"])
+            if final is not None and base is not None:
+                out["final_minus_base"] = final - base
+        if "final_minus_anchor" not in out and "final_dice" in out and "anchor_only_dice" in out:
+            final = self._to_float(out["final_dice"])
+            anchor = self._to_float(out["anchor_only_dice"])
+            if final is not None and anchor is not None:
+                out["final_minus_anchor"] = final - anchor
+        self.log_metrics(out, step=step, prefix="functional_anchor")
 
     def log_artifact(self, path: str | Path, *, artifact_path: str | None = None) -> None:
         if not self.enabled:
@@ -355,6 +401,7 @@ class MLflowLogger:
         summary_metrics = dict(getattr(result, "summary_metrics", {}) or {})
         self.log_eval_summary(summary_metrics, mode=mode, step=step)
         self.log_anchor_ode_diagnostics(summary_metrics, step=step)
+        self.log_functional_anchor_diagnostics(summary_metrics, step=step)
 
         if not log_artifacts:
             return

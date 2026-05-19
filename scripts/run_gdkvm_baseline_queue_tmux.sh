@@ -37,7 +37,13 @@ COMMON_ARGS=(
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
-  eval_stage.eval_interval=200
+  eval_stage.eval_interval=1000
+  eval_stage.final_eval=true
+  eval_stage.final_test=true
+  eval_stage.test_every_eval=true
+  eval_stage.test_interval=0
+  evaluation.threshold_search_during_training=true
+  evaluation.threshold_search_interval=2000
 )
 
 wait_for_session() {

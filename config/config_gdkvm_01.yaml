@@ -48,6 +48,8 @@ evaluation:
   report_frame_mean: true
   save_summary: true
   best_ckpt_rule: "max_eval_dice_observed_no_reload"
+  threshold_search_during_training: true
+  threshold_search_interval: 2000
 
 # data_path: "${processed_root}/camus_png256_10f"
 data_path: "${processed_root}/echonet_png128_10f"
@@ -98,6 +100,10 @@ val:
 eval_stage:
   name: "eval_stage"
   amp: false
+  final_eval: true
+  final_test: true
+  test_every_eval: true
+  test_interval: 0
   # batch_size:
   # num_workers:
   eval_interval: 20

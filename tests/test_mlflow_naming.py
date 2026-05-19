@@ -28,6 +28,7 @@ class MLflowNamingTests(unittest.TestCase):
     def test_experiment_name_method_families(self):
         cases = [
             (_cfg("anchor_ode_v2"), "anchor_ode"),
+            (_cfg("functional_anchor"), "functional_anchor"),
             (_cfg("gdkvm"), "gdkvm"),
             (_cfg("BanditPM"), "gdkvm"),
             (_cfg("kpff"), "kpff"),

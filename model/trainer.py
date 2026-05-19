@@ -603,6 +603,7 @@ class Trainer:
                 self._log_bpm_stats(data, it)
                 self._log_dynakey_stats(data, it)
                 self._log_anchor_ode_stats(data, it)
+                self._log_functional_anchor_stats(data, it)
 
         return loss.detach()
 
@@ -942,38 +943,97 @@ class Trainer:
         except Exception:
             pass
 
+    def _log_functional_anchor_stats(self, data, it: int) -> None:
+        memory_keys = sorted(k for k in data.keys() if k.startswith("memory_aux_"))
+        if not memory_keys:
+            return
+        try:
+            buckets = {
+                "residual_l1": [],
+                "residual_l2": [],
+                "shape_residual_norm": [],
+                "boundary_residual_norm": [],
+                "slot_entropy": [],
+                "ed_slot_usage": [],
+                "es_slot_usage": [],
+                "slot_area_order_violation": [],
+                "phase_entropy": [],
+                "gate_mean_low": [],
+                "gate_mean_mid": [],
+                "gate_mean_high": [],
+                "confidence_mean": [],
+                "confidence_std": [],
+                "anchor_trust_ratio": [],
+                "image_trust_ratio": [],
+            }
+            for key in memory_keys:
+                aux = data.get(key)
+                fa = aux.get("functional_anchor_aux") if isinstance(aux, dict) else None
+                if not isinstance(fa, dict):
+                    continue
+                for name in buckets:
+                    value = fa.get(name)
+                    if torch.is_tensor(value):
+                        buckets[name].append(value.float().detach().flatten())
+            metrics = {}
+            for name, tensors in buckets.items():
+                if not tensors:
+                    continue
+                value = torch.cat(tensors).mean().item()
+                self.log.log_scalar(f"functional_anchor/{name}", value, it)
+                metrics[name] = value
+            if metrics:
+                logger = getattr(self, "mlflow_logger", None)
+                if logger is not None:
+                    logger.log_functional_anchor_diagnostics(metrics, step=it)
+        except Exception:
+            pass
+
     def evaluate(
-        self, val_loader, epoch, run_path, it, local_rank=None, world_size=None
+        self, val_loader, epoch, run_path, it, local_rank=None, world_size=None, full_eval: bool = False
     ):
-        result = self.evaluator.evaluate(val_loader, "val", epoch, run_path, it)
+        result = self.evaluator.evaluate(val_loader, "val", epoch, run_path, it, full_eval=full_eval)
         logger = getattr(self, "mlflow_logger", None)
         if self.main_process and logger is not None:
-            logger.log_evaluation_result(result, step=it, log_artifacts=False)
+            logger.log_evaluation_result(result, step=it, log_artifacts=full_eval)
         return result.summary_metrics
 
-    def test(self, test_loader, epoch, run_path, it, local_rank=None, world_size=None):
-        result = self.evaluator.evaluate(test_loader, "test", epoch, run_path, it)
+    def test(self, test_loader, epoch, run_path, it, local_rank=None, world_size=None, full_eval: bool = False):
+        result = self.evaluator.evaluate(test_loader, "test", epoch, run_path, it, full_eval=full_eval)
         logger = getattr(self, "mlflow_logger", None)
         if self.main_process and logger is not None:
-            logger.log_evaluation_result(result, step=it, log_artifacts=False)
+            logger.log_evaluation_result(result, step=it, log_artifacts=full_eval)
         return result.summary_metrics
 
     def _reset_metrics(self):
         self.conf_metric.reset()
 
-    def _threshold_candidates(self) -> list[float]:
+    def _threshold_candidates(self, mode: str | None = None, it: int | None = None, *, full_eval: bool = False) -> list[float]:
         eval_cfg = self.cfg.get("evaluation", {})
+        mode_norm = str(mode or "").lower()
+        default_threshold = float(eval_cfg.get("default_threshold", 0.5))
+        active_threshold = (
+            float(self.best_val_threshold)
+            if mode_norm == "test" or self._best_val_threshold_ready
+            else default_threshold
+        )
+        if not full_eval:
+            if not bool(eval_cfg.get("threshold_search_during_training", True)):
+                return [round(active_threshold, 2)]
+            interval = int(eval_cfg.get("threshold_search_interval", 0) or 0)
+            if interval > 0 and (it is None or int(it) % interval != 0):
+                return [round(active_threshold, 2)]
         start = float(eval_cfg.get("threshold_search_start", 0.30))
         end = float(eval_cfg.get("threshold_search_end", 0.70))
         step = float(eval_cfg.get("threshold_search_step", 0.05))
         if step <= 0:
-            return [0.5]
+            return [round(active_threshold, 2)]
         values = []
         current = start
         while current <= end + 1.0e-8:
             values.append(round(current, 2))
             current += step
-        return values or [0.5]
+        return values or [round(active_threshold, 2)]
 
     @staticmethod
     def _threshold_key(threshold: float) -> str:
@@ -1169,7 +1229,7 @@ class Trainer:
             logger.log_checkpoint(self.run_path / "best_summary.json", artifact_name="best_summary.json")
         self.log.info(f"Saved best checkpoint set at iter {it}: {metric_name}={metric:.6f}")
 
-    def _run_evaluation_impl(self, data_loader, mode, epoch, run_path, it) -> EvaluationResult:
+    def _run_evaluation_impl(self, data_loader, mode, epoch, run_path, it, *, full_eval: bool = False) -> EvaluationResult:
         if self.is_distributed:
             dist.barrier()
 
@@ -1182,7 +1242,7 @@ class Trainer:
         self.model.eval()
         raw_state_for_restore = self._swap_to_ema_for_eval()
         self._reset_metrics()
-        threshold_candidates = self._threshold_candidates()
+        threshold_candidates = self._threshold_candidates(mode, it, full_eval=full_eval)
         active_threshold = 0.5
         if mode == "test":
             if not self._best_val_threshold_ready and self.main_process:
@@ -1274,6 +1334,27 @@ class Trainer:
                             "guided_only_dice_count": 0.0,
                             "prior_only_dice_sum": 0.0,
                             "prior_only_dice_count": 0.0,
+                            "functional_anchor_base_dice_sum": 0.0,
+                            "functional_anchor_base_dice_count": 0.0,
+                            "functional_anchor_anchor_dice_sum": 0.0,
+                            "functional_anchor_anchor_dice_count": 0.0,
+                            "functional_anchor_residual_l1_sum": 0.0,
+                            "functional_anchor_residual_l2_sum": 0.0,
+                            "functional_anchor_residual_boundary_ratio_sum": 0.0,
+                            "functional_anchor_shape_residual_norm_sum": 0.0,
+                            "functional_anchor_boundary_residual_norm_sum": 0.0,
+                            "functional_anchor_slot_entropy_sum": 0.0,
+                            "functional_anchor_ed_slot_usage_sum": 0.0,
+                            "functional_anchor_es_slot_usage_sum": 0.0,
+                            "functional_anchor_slot_area_order_violation_sum": 0.0,
+                            "functional_anchor_gate_low_sum": 0.0,
+                            "functional_anchor_gate_mid_sum": 0.0,
+                            "functional_anchor_gate_high_sum": 0.0,
+                            "functional_anchor_confidence_mean_sum": 0.0,
+                            "functional_anchor_confidence_std_sum": 0.0,
+                            "functional_anchor_anchor_trust_ratio_sum": 0.0,
+                            "functional_anchor_image_trust_ratio_sum": 0.0,
+                            "functional_anchor_aux_count": 0.0,
                             "aux_count": 0.0,
                         }
                         for thr in threshold_candidates:
@@ -1318,6 +1399,52 @@ class Trainer:
                                         aux_dice, _ = self._binary_overlap_metrics(aux_bin, gt_frame)
                                         metric_totals[f"{prefix}_dice_sum"] += aux_dice
                                         metric_totals[f"{prefix}_dice_count"] += 1.0
+                            functional_aux = memory_aux.get("functional_anchor_aux") if isinstance(memory_aux, dict) else None
+                            if isinstance(functional_aux, dict):
+                                for src, prefix in (
+                                    ("base_object_logits", "functional_anchor_base"),
+                                    ("anchor_logits", "functional_anchor_anchor"),
+                                ):
+                                    aux_logits = functional_aux.get(src)
+                                    if torch.is_tensor(aux_logits) and aux_logits.shape[0] > bi:
+                                        aux_prob = torch.sigmoid(aux_logits[bi : bi + 1, :1])
+                                        aux_bin = self._postprocess_binary_mask((aux_prob > active_threshold).float())
+                                        aux_dice, _ = self._binary_overlap_metrics(aux_bin, gt_frame)
+                                        metric_totals[f"{prefix}_dice_sum"] += aux_dice
+                                        metric_totals[f"{prefix}_dice_count"] += 1.0
+                                residual = functional_aux.get("residual_logits")
+                                boundary = functional_aux.get("boundary_residual_logits")
+                                shape = functional_aux.get("shape_residual_logits")
+                                if torch.is_tensor(residual):
+                                    item = residual[bi : bi + 1].float()
+                                    metric_totals["functional_anchor_residual_l1_sum"] += float(item.abs().mean().item())
+                                    metric_totals["functional_anchor_residual_l2_sum"] += float(item.pow(2).mean().sqrt().item())
+                                if torch.is_tensor(boundary):
+                                    item = boundary[bi : bi + 1].float()
+                                    metric_totals["functional_anchor_boundary_residual_norm_sum"] += float(item.abs().mean().item())
+                                if torch.is_tensor(shape):
+                                    item = shape[bi : bi + 1].float()
+                                    metric_totals["functional_anchor_shape_residual_norm_sum"] += float(item.abs().mean().item())
+                                if torch.is_tensor(boundary) and torch.is_tensor(residual):
+                                    ratio = boundary[bi : bi + 1].float().abs().mean() / residual[bi : bi + 1].float().abs().mean().clamp_min(1.0e-6)
+                                    metric_totals["functional_anchor_residual_boundary_ratio_sum"] += float(ratio.item())
+                                for src, dst in (
+                                    ("slot_entropy", "functional_anchor_slot_entropy_sum"),
+                                    ("ed_slot_usage", "functional_anchor_ed_slot_usage_sum"),
+                                    ("es_slot_usage", "functional_anchor_es_slot_usage_sum"),
+                                    ("slot_area_order_violation", "functional_anchor_slot_area_order_violation_sum"),
+                                    ("gate_mean_low", "functional_anchor_gate_low_sum"),
+                                    ("gate_mean_mid", "functional_anchor_gate_mid_sum"),
+                                    ("gate_mean_high", "functional_anchor_gate_high_sum"),
+                                    ("confidence_mean", "functional_anchor_confidence_mean_sum"),
+                                    ("confidence_std", "functional_anchor_confidence_std_sum"),
+                                    ("anchor_trust_ratio", "functional_anchor_anchor_trust_ratio_sum"),
+                                    ("image_trust_ratio", "functional_anchor_image_trust_ratio_sum"),
+                                ):
+                                    value = functional_aux.get(src)
+                                    if torch.is_tensor(value):
+                                        metric_totals[dst] += float(value.float().mean().item())
+                                metric_totals["functional_anchor_aux_count"] += 1.0
 
                             dice_t, iou_t = self._binary_overlap_metrics(pred_bin, gt_frame)
                             metric_totals["dice_frame_sum"] += dice_t
@@ -1502,6 +1629,27 @@ class Trainer:
                     "guided_only_dice_count": 0.0,
                     "prior_only_dice_sum": 0.0,
                     "prior_only_dice_count": 0.0,
+                    "functional_anchor_base_dice_sum": 0.0,
+                    "functional_anchor_base_dice_count": 0.0,
+                    "functional_anchor_anchor_dice_sum": 0.0,
+                    "functional_anchor_anchor_dice_count": 0.0,
+                    "functional_anchor_residual_l1_sum": 0.0,
+                    "functional_anchor_residual_l2_sum": 0.0,
+                    "functional_anchor_residual_boundary_ratio_sum": 0.0,
+                    "functional_anchor_shape_residual_norm_sum": 0.0,
+                    "functional_anchor_boundary_residual_norm_sum": 0.0,
+                    "functional_anchor_slot_entropy_sum": 0.0,
+                    "functional_anchor_ed_slot_usage_sum": 0.0,
+                    "functional_anchor_es_slot_usage_sum": 0.0,
+                    "functional_anchor_slot_area_order_violation_sum": 0.0,
+                    "functional_anchor_gate_low_sum": 0.0,
+                    "functional_anchor_gate_mid_sum": 0.0,
+                    "functional_anchor_gate_high_sum": 0.0,
+                    "functional_anchor_confidence_mean_sum": 0.0,
+                    "functional_anchor_confidence_std_sum": 0.0,
+                    "functional_anchor_anchor_trust_ratio_sum": 0.0,
+                    "functional_anchor_image_trust_ratio_sum": 0.0,
+                    "functional_anchor_aux_count": 0.0,
                     "aux_count": 0.0,
                 }
                 for thr in threshold_candidates:
@@ -1630,11 +1778,33 @@ class Trainer:
             "base_only_dice_frame_mean": mean("base_only_dice_sum", "base_only_dice_count"),
             "guided_only_dice_frame_mean": mean("guided_only_dice_sum", "guided_only_dice_count"),
             "prior_only_dice_frame_mean": mean("prior_only_dice_sum", "prior_only_dice_count"),
+            "functional_anchor/base_dice": mean("functional_anchor_base_dice_sum", "functional_anchor_base_dice_count"),
+            "functional_anchor/anchor_only_dice": mean("functional_anchor_anchor_dice_sum", "functional_anchor_anchor_dice_count"),
+            "functional_anchor/residual_l1": mean("functional_anchor_residual_l1_sum", "functional_anchor_aux_count"),
+            "functional_anchor/residual_l2": mean("functional_anchor_residual_l2_sum", "functional_anchor_aux_count"),
+            "functional_anchor/residual_boundary_ratio": mean("functional_anchor_residual_boundary_ratio_sum", "functional_anchor_aux_count"),
+            "functional_anchor/shape_residual_norm": mean("functional_anchor_shape_residual_norm_sum", "functional_anchor_aux_count"),
+            "functional_anchor/boundary_residual_norm": mean("functional_anchor_boundary_residual_norm_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_entropy": mean("functional_anchor_slot_entropy_sum", "functional_anchor_aux_count"),
+            "functional_anchor/ED_slot_usage": mean("functional_anchor_ed_slot_usage_sum", "functional_anchor_aux_count"),
+            "functional_anchor/ES_slot_usage": mean("functional_anchor_es_slot_usage_sum", "functional_anchor_aux_count"),
+            "functional_anchor/slot_area_order_violation": mean("functional_anchor_slot_area_order_violation_sum", "functional_anchor_aux_count"),
+            "functional_anchor/gate_mean_low": mean("functional_anchor_gate_low_sum", "functional_anchor_aux_count"),
+            "functional_anchor/gate_mean_mid": mean("functional_anchor_gate_mid_sum", "functional_anchor_aux_count"),
+            "functional_anchor/gate_mean_high": mean("functional_anchor_gate_high_sum", "functional_anchor_aux_count"),
+            "functional_anchor/confidence_mean": mean("functional_anchor_confidence_mean_sum", "functional_anchor_aux_count"),
+            "functional_anchor/confidence_std": mean("functional_anchor_confidence_std_sum", "functional_anchor_aux_count"),
+            "functional_anchor/anchor_trust_ratio": mean("functional_anchor_anchor_trust_ratio_sum", "functional_anchor_aux_count"),
+            "functional_anchor/image_trust_ratio": mean("functional_anchor_image_trust_ratio_sum", "functional_anchor_aux_count"),
         }
         metrics["anchor_ode/final_dice"] = metrics["dice_frame_mean"]
         metrics["anchor_ode/base_dice"] = metrics["base_only_dice_frame_mean"]
         metrics["anchor_ode/guided_dice"] = metrics["guided_only_dice_frame_mean"]
         metrics["anchor_ode/prior_dice"] = metrics["prior_only_dice_frame_mean"]
+        if reduced.get("functional_anchor_aux_count", 0.0) > 0:
+            metrics["functional_anchor/final_dice"] = metrics["dice_frame_mean"]
+            metrics["functional_anchor/final_minus_base"] = metrics["dice_frame_mean"] - metrics["functional_anchor/base_dice"]
+            metrics["functional_anchor/final_minus_anchor"] = metrics["dice_frame_mean"] - metrics["functional_anchor/anchor_only_dice"]
         for key in reduced:
             if key.startswith("thr_") and key.endswith("_dice_sum"):
                 prefix = key[: -len("_dice_sum")]
@@ -1653,6 +1823,7 @@ class Trainer:
         if logger is not None:
             logger.log_eval_summary(metrics, mode=mode, step=it)
             logger.log_anchor_ode_diagnostics(metrics, step=it)
+            logger.log_functional_anchor_diagnostics(metrics, step=it)
 
     def save_weights(self, it: int):
         if not self.main_process:

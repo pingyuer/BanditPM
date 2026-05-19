@@ -16,3 +16,15 @@ mlflow:
 
 log_text_interval: 100
 log_image_interval: 500
+
+evaluation:
+  # Keep train-run eval meaningful, but avoid repeating dense threshold grids at
+  # every validation. Postprocess/test still run on the active threshold.
+  threshold_search_during_training: true
+  threshold_search_interval: 2000
+
+eval_stage:
+  final_eval: true
+  final_test: true
+  test_every_eval: true
+  test_interval: 0

@@ -4,7 +4,7 @@ from evaluation import EvaluationResult, Evaluator
 
 
 class _TrainerStub:
-    def _run_evaluation_impl(self, data_loader, mode, epoch, run_path, it):
+    def _run_evaluation_impl(self, data_loader, mode, epoch, run_path, it, *, full_eval=False):
         return EvaluationResult(
             mode=mode,
             epoch=epoch,

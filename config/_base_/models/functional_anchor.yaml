@@ -1,0 +1,41 @@
+# @package _global_
+model_name: "FunctionalAnchor"
+
+model:
+  name: "functional_anchor"
+  allow_oracle_init_when_requested: false
+  use_first_frame_gt_init: false
+  use_kpff: false
+  memory_core:
+    type: "none"
+    dynakey: {}
+  temporal_memory:
+    type: "none"
+    bpm:
+      ENABLE: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0
+  functional_anchor:
+    in_channels: 1
+    num_classes: 2
+    base_dim: 32
+    value_dim: 128
+    num_slots: 5
+    state_dim: 128
+    phase_dim: 32
+    hidden_dim: 128
+    anchor_size: 32
+    residual_clip: 1.5
+    prediction_mode: "anchor_primary"
+    training_stage: "joint_residual"
+    lambda_anchor: 0.6
+    lambda_base_seg: 0.1
+    lambda_residual_smallness: 0.02
+    lambda_boundary_residual: 0.1
+    lambda_phase_consistency: 0.02
+    lambda_anchor_temporal: 0.02
+    lambda_slot_area_order: 0.01
+    lambda_phase_slot_correlation: 0.01

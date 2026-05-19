@@ -95,6 +95,16 @@ class LossComputer(nn.Module):
         self.lambda_anchor_ode_conf = float(anchor_ode_cfg.get("lambda_conf", 0.0))
         self.lambda_anchor_ode_slot_balance = float(anchor_ode_cfg.get("lambda_slot_balance", 0.0))
         self.lambda_anchor_ode_affine_reg = float(anchor_ode_cfg.get("lambda_affine_reg", 0.0))
+        functional_cfg = cfg.model.get("functional_anchor", {})
+        self.is_functional_anchor = str(cfg.model.get("name", "")).lower() == "functional_anchor"
+        self.lambda_functional_anchor_anchor = float(functional_cfg.get("lambda_anchor", 0.5))
+        self.lambda_functional_anchor_base = float(functional_cfg.get("lambda_base_seg", 0.1))
+        self.lambda_functional_anchor_residual_l1 = float(functional_cfg.get("lambda_residual_smallness", 0.02))
+        self.lambda_functional_anchor_boundary = float(functional_cfg.get("lambda_boundary_residual", 0.1))
+        self.lambda_functional_anchor_phase = float(functional_cfg.get("lambda_phase_consistency", 0.02))
+        self.lambda_functional_anchor_temp = float(functional_cfg.get("lambda_anchor_temporal", 0.02))
+        self.lambda_functional_anchor_slot_order = float(functional_cfg.get("lambda_slot_area_order", 0.01))
+        self.lambda_functional_anchor_phase_slot = float(functional_cfg.get("lambda_phase_slot_correlation", 0.01))
 
     def _default_supervision_mask(
         self,
@@ -250,6 +260,9 @@ class LossComputer(nn.Module):
             losses[k] += v
         anchor_ode_terms = self._compute_anchor_ode_losses(data, supervised_mask)
         for k, v in anchor_ode_terms.items():
+            losses[k] += v
+        functional_anchor_terms = self._compute_functional_anchor_losses(data, supervised_mask)
+        for k, v in functional_anchor_terms.items():
             losses[k] += v
 
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
@@ -473,6 +486,112 @@ class LossComputer(nn.Module):
             out["aux_anchor_ode_affine_reg"] = torch.stack(affine_reg_terms).mean() * self.lambda_anchor_ode_affine_reg
         if not out:
             out["aux_anchor_ode_zero"] = zero
+        return out
+
+    def _boundary_weight(self, gt_mask: torch.Tensor) -> torch.Tensor:
+        dilated = F.max_pool2d(gt_mask.float(), kernel_size=3, stride=1, padding=1)
+        eroded = -F.max_pool2d(-gt_mask.float(), kernel_size=3, stride=1, padding=1)
+        return (dilated - eroded).clamp(0.0, 1.0)
+
+    def _compute_functional_anchor_losses(
+        self,
+        data: Dict[str, torch.Tensor],
+        supervised_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if not self.is_functional_anchor or "cls_gt" not in data:
+            return {}
+
+        batch_size, num_frames = data["rgb"].shape[:2]
+        out: Dict[str, torch.Tensor] = {}
+        device = data["rgb"].device
+        zero = torch.zeros((), device=device, dtype=torch.float32)
+        anchor_terms = []
+        base_terms = []
+        residual_terms = []
+        boundary_terms = []
+        phase_terms = []
+        temporal_terms = []
+        slot_order_terms = []
+        phase_slot_terms = []
+
+        for bi in range(batch_size):
+            curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
+            frame_ids = self._frame_ids_for_sample(supervised_mask, bi)
+            prev_anchor_prob = None
+            prev_anchor_area = None
+            for ti in frame_ids:
+                memory_aux = data.get(f"memory_aux_{ti}")
+                aux = memory_aux.get("functional_anchor_aux") if isinstance(memory_aux, dict) else None
+                if not isinstance(aux, dict):
+                    continue
+                gt_mask = self._gt_object_masks(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+                soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+
+                anchor_obj = aux.get("anchor_logits")
+                if torch.is_tensor(anchor_obj) and self.lambda_functional_anchor_anchor > 0:
+                    anchor_obj = anchor_obj[bi : bi + 1, :curr_num_obj]
+                    anchor_logits = aggregate(torch.sigmoid(anchor_obj), dim=1)
+                    ce, dice = self.mask_loss(anchor_logits, soft_gt)
+                    anchor_terms.append(ce + dice)
+                    anchor_prob = torch.sigmoid(anchor_obj)
+                    anchor_area = anchor_prob.mean(dim=(-2, -1))
+                    if prev_anchor_prob is not None and self.lambda_functional_anchor_temp > 0:
+                        temporal_terms.append((anchor_prob - prev_anchor_prob).abs().mean())
+                    if prev_anchor_area is not None and self.lambda_functional_anchor_phase > 0:
+                        phase_terms.append((anchor_area - prev_anchor_area).abs().mean())
+                    prev_anchor_prob = anchor_prob
+                    prev_anchor_area = anchor_area
+
+                base_obj = aux.get("base_object_logits")
+                if torch.is_tensor(base_obj) and self.lambda_functional_anchor_base > 0:
+                    base_obj = base_obj[bi : bi + 1, :curr_num_obj]
+                    base_logits = aggregate(torch.sigmoid(base_obj), dim=1)
+                    ce, dice = self.mask_loss(base_logits, soft_gt)
+                    base_terms.append(ce + dice)
+
+                residual = aux.get("residual_logits")
+                if torch.is_tensor(residual) and self.lambda_functional_anchor_residual_l1 > 0:
+                    residual_terms.append(residual[bi : bi + 1, :curr_num_obj].abs().mean())
+
+                final_obj = aux.get("final_object_logits")
+                if torch.is_tensor(final_obj) and self.lambda_functional_anchor_boundary > 0:
+                    final_obj = final_obj[bi : bi + 1, :curr_num_obj]
+                    final_logits = aggregate(torch.sigmoid(final_obj), dim=1)
+                    fg = final_logits[:, 1:2]
+                    gt_fg = gt_mask[:, :1].to(device=fg.device, dtype=fg.dtype)
+                    weight = 1.0 + 4.0 * self._boundary_weight(gt_fg)
+                    boundary_terms.append(F.binary_cross_entropy_with_logits(fg, gt_fg, weight=weight))
+
+                slot_violation = aux.get("slot_area_order_violation")
+                if torch.is_tensor(slot_violation) and self.lambda_functional_anchor_slot_order > 0:
+                    slot_order_terms.append(slot_violation.float().mean())
+                slot_weights = aux.get("slot_weights")
+                phase_descriptor = aux.get("phase_descriptor")
+                if torch.is_tensor(slot_weights) and torch.is_tensor(phase_descriptor) and self.lambda_functional_anchor_phase_slot > 0:
+                    norm_time = phase_descriptor[bi : bi + 1, :curr_num_obj, 0]
+                    ed_target = (norm_time <= 0.125).float()
+                    es_target = ((norm_time - 0.5).abs() <= 0.125).float()
+                    phase_slot_terms.append(F.mse_loss(slot_weights[bi : bi + 1, :curr_num_obj, 0], ed_target))
+                    phase_slot_terms.append(F.mse_loss(slot_weights[bi : bi + 1, :curr_num_obj, 2], es_target))
+
+        if anchor_terms:
+            out["aux_functional_anchor_anchor"] = torch.stack(anchor_terms).mean() * self.lambda_functional_anchor_anchor
+        if base_terms:
+            out["aux_functional_anchor_base"] = torch.stack(base_terms).mean() * self.lambda_functional_anchor_base
+        if residual_terms:
+            out["aux_functional_anchor_residual_l1"] = torch.stack(residual_terms).mean() * self.lambda_functional_anchor_residual_l1
+        if boundary_terms:
+            out["aux_functional_anchor_boundary_residual"] = torch.stack(boundary_terms).mean() * self.lambda_functional_anchor_boundary
+        if phase_terms:
+            out["aux_functional_anchor_phase_consistency"] = torch.stack(phase_terms).mean() * self.lambda_functional_anchor_phase
+        if temporal_terms:
+            out["aux_functional_anchor_anchor_temporal"] = torch.stack(temporal_terms).mean() * self.lambda_functional_anchor_temp
+        if slot_order_terms:
+            out["aux_functional_anchor_slot_area_order"] = torch.stack(slot_order_terms).mean() * self.lambda_functional_anchor_slot_order
+        if phase_slot_terms:
+            out["aux_functional_anchor_phase_slot_correlation"] = torch.stack(phase_slot_terms).mean() * self.lambda_functional_anchor_phase_slot
+        if not out:
+            out["aux_functional_anchor_zero"] = zero
         return out
 
     def _compute_delay_ode_decode_losses(self, data: Dict[str, torch.Tensor], latest_aux: Dict) -> Dict[str, torch.Tensor]:

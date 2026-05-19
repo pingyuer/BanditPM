@@ -1,0 +1,20 @@
+defaults:
+  - functional_anchor_camus
+  - _self_
+
+exp_id: "functional_anchor_camus_warmup_base"
+
+model:
+  functional_anchor:
+    training_stage: "warmup_base"
+    prediction_mode: "base_primary"
+    lambda_anchor: 0.1
+    lambda_base_seg: 0.5
+    lambda_residual_smallness: 0.05
+    lambda_boundary_residual: 0.0
+    lambda_phase_consistency: 0.0
+    lambda_anchor_temporal: 0.0
+
+main_training:
+  unext_lr_ratio: 1.0
+  functional_anchor_lr_ratio: 0.3

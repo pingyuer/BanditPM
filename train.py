@@ -76,6 +76,8 @@ def resolve_mlflow_experiment_name(cfg: DictConfig) -> str:
     unext_uses_dynakey = bool(unext_cfg.get("use_dynakey", False)) if hasattr(unext_cfg, "get") else False
     uses_dynakey = memory_type == "dynakey" or unext_uses_dynakey
 
+    if model_name == "functional_anchor" or "functional_anchor" in exp_id:
+        return "functional_anchor"
     if model_name.startswith("anchor_ode") or "anchor_ode" in exp_id:
         return "anchor_ode"
     if uses_dynakey or "dynakey" in exp_id:
@@ -138,6 +140,10 @@ def build_mlflow_metadata(cfg: DictConfig, *, world_size: int) -> tuple[dict, di
     loss_cfg = cfg.get("loss", cfg.get("losses", {}))
     model_cfg = cfg.get("model", {})
     anchor_cfg = model_cfg.get("anchor_ode", model_cfg.get("memory_core", {})) if hasattr(model_cfg, "get") else {}
+    functional_cfg = model_cfg.get("functional_anchor", {}) if hasattr(model_cfg, "get") else {}
+    if method_family == "functional_anchor" and hasattr(functional_cfg, "get"):
+        tags["prediction_mode"] = str(functional_cfg.get("prediction_mode", "anchor_primary"))
+        tags["training_stage"] = str(functional_cfg.get("training_stage", stage_cfg.get("training_stage", "joint_residual") if hasattr(stage_cfg, "get") else "joint_residual"))
     params = {
         "model.name": model_name,
         "model.version": model_cfg.get("version", cfg.get("model_version", "")) if hasattr(model_cfg, "get") else "",
@@ -158,6 +164,11 @@ def build_mlflow_metadata(cfg: DictConfig, *, world_size: int) -> tuple[dict, di
         "anchor_ode.prior_residual_clip": anchor_cfg.get("prior_residual_clip", None) if hasattr(anchor_cfg, "get") else None,
         "anchor_ode.affine_max_translate": anchor_cfg.get("affine_max_translate", None) if hasattr(anchor_cfg, "get") else None,
         "anchor_ode.affine_max_scale": anchor_cfg.get("affine_max_scale", None) if hasattr(anchor_cfg, "get") else None,
+        "functional_anchor.state_dim": functional_cfg.get("state_dim", None) if hasattr(functional_cfg, "get") else None,
+        "functional_anchor.num_slots": functional_cfg.get("num_slots", None) if hasattr(functional_cfg, "get") else None,
+        "functional_anchor.phase_dim": functional_cfg.get("phase_dim", None) if hasattr(functional_cfg, "get") else None,
+        "functional_anchor.prediction_mode": functional_cfg.get("prediction_mode", None) if hasattr(functional_cfg, "get") else None,
+        "functional_anchor.residual_clip": functional_cfg.get("residual_clip", None) if hasattr(functional_cfg, "get") else None,
         "postprocess.enabled": tags["has_postprocess"],
         "postprocess.min_area": post_cfg.get("min_area", None) if hasattr(post_cfg, "get") else None,
         "eval.threshold": eval_cfg.get("threshold", eval_cfg.get("default_threshold", 0.5)) if hasattr(eval_cfg, "get") else 0.5,
@@ -401,7 +412,12 @@ def train(cfg: DictConfig):
                 pbar.set_postfix({"iter": it + 1, "loss": f"{loss_val:.4f}"})
 
             # ----- Periodic Evaluation/Testing: Fix eval shard before evaluation -----
-            if eval_interval and (it + 1) % eval_interval == 0:
+            is_final_iter = it + 1 == total_iterations
+            final_eval = bool(getattr(cfg.eval_stage, "final_eval", True))
+            periodic_eval = bool(eval_interval and (it + 1) % eval_interval == 0)
+            should_eval = periodic_eval or (final_eval and is_final_iter)
+            full_eval = bool(final_eval and is_final_iter)
+            if should_eval:
                 if pbar is not None:
                     print()
                 eval_seed = epoch  # Or fixed to 0
@@ -417,16 +433,27 @@ def train(cfg: DictConfig):
                     world_size=world_size,
                     run_path=run_dir,
                     it=it + 1,
+                    full_eval=full_eval,
                 )
 
-                trainer.test(
-                    test_loader=test_loader,
-                    epoch=epoch + 1,
-                    local_rank=local_rank,
-                    world_size=world_size,
-                    run_path=run_dir,
-                    it=it + 1,
+                test_interval = int(getattr(cfg.eval_stage, "test_interval", 0) or 0)
+                test_every_eval = bool(getattr(cfg.eval_stage, "test_every_eval", False))
+                final_test = bool(getattr(cfg.eval_stage, "final_test", True))
+                should_test = (
+                    test_every_eval
+                    or bool(test_interval and (it + 1) % test_interval == 0)
+                    or bool(full_eval and final_test)
                 )
+                if should_test:
+                    trainer.test(
+                        test_loader=test_loader,
+                        epoch=epoch + 1,
+                        local_rank=local_rank,
+                        world_size=world_size,
+                        run_path=run_dir,
+                        it=it + 1,
+                        full_eval=full_eval,
+                    )
 
         info_if_rank_zero("Training completed.")
         if trainer is not None:

@@ -13,12 +13,14 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
     backbone_lr_ratio = stage_cfg.backbone_lr_ratio
     base_lr = stage_cfg.learning_rate
     anchor_ode_lr_ratio = stage_cfg.get("anchor_ode_lr_ratio", None)
+    functional_anchor_lr_ratio = stage_cfg.get("functional_anchor_lr_ratio", None)
     unext_lr_ratio = float(stage_cfg.get("unext_lr_ratio", backbone_lr_ratio))
 
-    if anchor_ode_lr_ratio is not None:
-        anchor_ode_lr_ratio = float(anchor_ode_lr_ratio)
+    if anchor_ode_lr_ratio is not None or functional_anchor_lr_ratio is not None:
+        method_lr_ratio = float(functional_anchor_lr_ratio if functional_anchor_lr_ratio is not None else anchor_ode_lr_ratio)
+        method_group_name = "functional_anchor" if functional_anchor_lr_ratio is not None else "anchor_ode"
         unext_params = []
-        anchor_ode_params = []
+        temporal_params = []
         embed_params = []
         other_params = []
         embedding_names = ['summary_pos', 'query_init', 'query_emb', 'obj_pe']
@@ -44,10 +46,17 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'guidance_projs.',
                 'gate_head.',
                 'confidence.',
+                'phase_encoder.',
+                'state_ode.',
+                'anchor_bank.',
+                'anchor_decoder.',
+                'residual_heads.',
+                'injector.',
+                'fusion.',
             )):
-                anchor_ode_params.append(param)
+                temporal_params.append(param)
                 if print_log:
-                    log.info(f'{name} counted as an AnchorODE parameter.')
+                    log.info(f'{name} counted as a {method_group_name} parameter.')
             elif any(name.endswith(e) for e in embedding_names):
                 embed_params.append(param)
                 if print_log:
@@ -63,10 +72,10 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'name': 'unext_base',
             },
             {
-                'params': anchor_ode_params,
-                'lr': base_lr * anchor_ode_lr_ratio,
+                'params': temporal_params,
+                'lr': base_lr * method_lr_ratio,
                 'weight_decay': weight_decay,
-                'name': 'anchor_ode',
+                'name': method_group_name,
             },
             {
                 'params': embed_params,

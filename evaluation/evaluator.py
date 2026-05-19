@@ -24,5 +24,21 @@ class Evaluator:
     def __init__(self, trainer: Any) -> None:
         self.trainer = trainer
 
-    def evaluate(self, data_loader, mode: str, epoch: int, run_path: str | Path, it: int) -> EvaluationResult:
-        return self.trainer._run_evaluation_impl(data_loader, mode, epoch, run_path, it)
+    def evaluate(
+        self,
+        data_loader,
+        mode: str,
+        epoch: int,
+        run_path: str | Path,
+        it: int,
+        *,
+        full_eval: bool = False,
+    ) -> EvaluationResult:
+        return self.trainer._run_evaluation_impl(
+            data_loader,
+            mode,
+            epoch,
+            run_path,
+            it,
+            full_eval=full_eval,
+        )

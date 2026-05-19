@@ -1,0 +1,10 @@
+defaults:
+  - functional_anchor_echo
+  - _self_
+
+exp_id: "functional_anchor_ablate_residual_only"
+
+model:
+  functional_anchor:
+    prediction_mode: "residual_only"
+    lambda_residual_smallness: 0.08
