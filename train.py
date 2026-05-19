@@ -69,8 +69,10 @@ def train(cfg: DictConfig):
         mlflow_required = bool(mlflow_cfg.get("required", True)) if hasattr(mlflow_cfg, "get") else True
         if main_process and stage in {"full", "final"} and mlflow_required and not mlflow_enabled:
             raise RuntimeError("Formal full/final runs require mlflow.enabled=true.")
-        info_if_rank_zero("MLflow: preflight...")
-        mlflow_logger.preflight()
+        mlflow_preflight = bool(mlflow_cfg.get("preflight", False)) if hasattr(mlflow_cfg, "get") else False
+        if main_process and mlflow_enabled and mlflow_required and mlflow_preflight and stage in {"full", "final"}:
+            info_if_rank_zero("MLflow: preflight...")
+            mlflow_logger.preflight()
         info_if_rank_zero("MLflow: starting run...")
         mlflow_logger.start_run()
         mlflow_started = True
