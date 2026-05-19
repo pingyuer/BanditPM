@@ -400,7 +400,7 @@ class AnchorODEV2Tests(unittest.TestCase):
                 it=200,
                 raw_state=raw_state,
             )
-            self.assertTrue((Path(tmpdir) / "raw_at_best_ema.pth").exists())
+            self.assertTrue((Path(tmpdir) / "best_raw.pth").exists())
             self.assertTrue((Path(tmpdir) / "best_ema.pth").exists())
             self.assertTrue((Path(tmpdir) / "best_summary.json").exists())
 

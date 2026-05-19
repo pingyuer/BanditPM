@@ -3,6 +3,12 @@ output_root: "outputs/BanditPM"
 
 mlflow:
   enabled: true
+  artifacts_enabled: true
+  required: true
+  artifacts_required: true
+  preflight: true
+  stage: "full"
+  timeout_seconds: 30
   tracking_uri: "http://172.16.240.77:5000"
   experiment_name: null
   run_name: null

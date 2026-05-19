@@ -35,7 +35,7 @@ class MLflowNamingTests(unittest.TestCase):
             (_cfg("delay_ode"), "delay_ode"),
             (_cfg("unext_fusion", memory_type="dynakey"), "dynakey"),
             (_cfg("gdkvm", memory_type="dynakey"), "dynakey"),
-            (_cfg("unext_only"), "baseline_unext"),
+            (_cfg("unext_only"), "unext_baseline"),
         ]
         for cfg, expected in cases:
             with self.subTest(expected=expected):
@@ -48,12 +48,12 @@ class MLflowNamingTests(unittest.TestCase):
 
     def test_run_name_includes_protocol_timestamp_and_git(self):
         cfg = _cfg("gdkvm", exp_id="gdkvm_echo")
-        run_name = resolve_mlflow_run_name(cfg, timestamp="20260518_123456", git_hash="abc1234")
+        run_name = resolve_mlflow_run_name(cfg, timestamp="0519-1032", git_hash="abc1234")
         self.assertEqual(
             run_name,
-            "gdkvm_echonet_ed2es_gdkvm_echo_seed7_20260518_123456_abc1234",
+            "gdkvm_echonet_ed2es_train_s7_0519-1032_abc1234",
         )
-        self.assertRegex(run_name, re.compile(r".*_seed7_\d{8}_\d{6}_[0-9a-z]+$"))
+        self.assertRegex(run_name, re.compile(r".*_s7_\d{4}-\d{4}_[0-9a-z]+$"))
 
 
 if __name__ == "__main__":

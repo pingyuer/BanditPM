@@ -5,9 +5,13 @@ import json
 import math
 import os
 import platform
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,6 +20,20 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 
 class MLflowLogger:
     """Single MLflow access layer for experiment tracking."""
+
+    PARAM_ROOTS = {
+        "model",
+        "data",
+        "evaluation",
+        "main_training",
+        "loss",
+        "losses",
+        "dataset_name",
+        "data_path",
+        "exp_id",
+        "model_name",
+        "seed",
+    }
 
     def __init__(
         self,
@@ -29,30 +47,61 @@ class MLflowLogger:
         self.run_dir = Path(run_dir)
         self.enabled = bool(enabled) and bool(main_process)
         self.main_process = bool(main_process)
+        self.required = bool(self._cfg_get("required", True))
+        self.artifacts_required = bool(self._cfg_get("artifacts_required", True))
+        self.artifacts_enabled = bool(self._cfg_get("artifacts_enabled", True))
+        self.timeout_seconds = int(self._cfg_get("timeout_seconds", 30) or 30)
         self.run = None
         self.run_id = None
 
     def start_run(self, *, tags: Mapping[str, Any] | None = None) -> None:
         if not self.enabled:
             return
-        import mlflow
+        def _start():
+            import mlflow
 
-        tracking_uri = str(self._cfg_get("tracking_uri", None) or "http://172.16.240.77:5000")
-        experiment_name = str(self._cfg_get("experiment_name", None) or "experiment")
-        run_name = self._cfg_get("run_name", None)
-        resume_run_id = self._cfg_get("resume_run_id", None)
+            tracking_uri = str(self._cfg_get("tracking_uri", None) or "http://172.16.240.77:5000")
+            experiment_name = str(self._cfg_get("experiment_name", None) or "experiment")
+            run_name = self._cfg_get("run_name", None)
+            resume_run_id = self._cfg_get("resume_run_id", None)
 
-        mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment(experiment_name)
-        kwargs: dict[str, Any] = {}
-        if resume_run_id:
-            kwargs["run_id"] = str(resume_run_id)
-        elif run_name:
-            kwargs["run_name"] = str(run_name)
-        self.run = mlflow.start_run(**kwargs)
-        self.run_id = getattr(getattr(self.run, "info", None), "run_id", None)
-        if tags:
-            self.log_tags(tags)
+            mlflow.set_tracking_uri(tracking_uri)
+            mlflow.set_experiment(experiment_name)
+            kwargs: dict[str, Any] = {}
+            if resume_run_id:
+                kwargs["run_id"] = str(resume_run_id)
+            elif run_name:
+                kwargs["run_name"] = str(run_name)
+            self.run = mlflow.start_run(**kwargs)
+            self.run_id = getattr(getattr(self.run, "info", None), "run_id", None)
+            if tags:
+                self.log_tags(tags)
+
+        self._call(_start, "start_run", required=self.required)
+
+    def preflight(self) -> None:
+        if not self.enabled or not bool(self._cfg_get("preflight", True)):
+            return
+
+        def _probe():
+            import mlflow
+
+            tracking_uri = str(self._cfg_get("tracking_uri", None) or "http://172.16.240.77:5000")
+            experiment_name = str(self._cfg_get("experiment_name", None) or "experiment")
+            mlflow.set_tracking_uri(tracking_uri)
+            mlflow.set_experiment(experiment_name)
+            run_name = f"preflight_{int(time.time())}"
+            with mlflow.start_run(run_name=run_name):
+                mlflow.set_tag("run_type", "preflight")
+                mlflow.set_tag("stage", str(self._cfg_get("stage", "full")))
+                mlflow.log_metric("preflight/alive", 1.0, step=0)
+                if self.artifacts_enabled or self.artifacts_required:
+                    with tempfile.TemporaryDirectory(prefix="mlflow_preflight_") as tmp:
+                        path = Path(tmp) / "preflight.txt"
+                        path.write_text("ok\n", encoding="utf-8")
+                        mlflow.log_artifact(str(path), artifact_path="env")
+
+        self._call(_probe, "preflight", required=True)
 
     def start_eval_run(
         self,
@@ -78,74 +127,84 @@ class MLflowLogger:
     def end_run(self, status: str = "FINISHED") -> None:
         if not self.enabled:
             return
-        import mlflow
+        def _end():
+            import mlflow
 
-        mlflow.end_run(status=status)
+            mlflow.end_run(status=status)
+
+        self._call(_end, "end_run", required=False)
 
     def mark_failed(self) -> None:
         self.end_run(status="FAILED")
 
-    def log_config(self, cfg: DictConfig | Mapping[str, Any]) -> None:
+    def log_config(self, cfg: DictConfig | Mapping[str, Any], *, overrides: list[str] | None = None) -> None:
         if not self.enabled:
             return
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        config_path = self.run_dir / "resolved_config.yaml"
         if isinstance(cfg, (DictConfig, ListConfig)):
-            content = OmegaConf.to_yaml(cfg, resolve=True)
-            container = OmegaConf.to_container(cfg, resolve=True)
+            raw_content = OmegaConf.to_yaml(cfg, resolve=False)
+            resolved_content = OmegaConf.to_yaml(cfg, resolve=True)
         else:
-            content = json.dumps(cfg, indent=2, sort_keys=True, default=str)
-            container = cfg
-        config_path.write_text(content, encoding="utf-8")
+            raw_content = json.dumps(cfg, indent=2, sort_keys=True, default=str)
+            resolved_content = raw_content
+        config_path = self.run_dir / "config.yaml"
+        resolved_path = self.run_dir / "config_resolved.yaml"
+        overrides_path = self.run_dir / "overrides.txt"
+        config_path.write_text(raw_content, encoding="utf-8")
+        resolved_path.write_text(resolved_content, encoding="utf-8")
+        overrides_path.write_text("\n".join(overrides or []) + ("\n" if overrides else ""), encoding="utf-8")
         self.log_artifact(config_path, artifact_path="configs")
-        self.log_params(self._flatten(container))
+        self.log_artifact(resolved_path, artifact_path="configs")
+        self.log_artifact(overrides_path, artifact_path="configs")
+
+    def log_run_metadata(
+        self,
+        *,
+        tags: Mapping[str, Any] | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> None:
+        if tags:
+            self.log_tags(tags)
+        if params:
+            self.log_params(params)
 
     def log_params(self, params: Mapping[str, Any]) -> None:
         if not self.enabled:
             return
-        import mlflow
+        def _params():
+            import mlflow
 
-        clean = {}
-        for key, value in params.items():
-            if value is None:
-                continue
-            if isinstance(value, (dict, list, tuple, set)):
-                value = json.dumps(value, sort_keys=True, default=str)
-            clean[str(key)] = str(value)[:500]
-        for start in range(0, len(clean), 100):
-            chunk = dict(list(clean.items())[start : start + 100])
-            if chunk:
-                try:
+            clean = {}
+            for key, value in params.items():
+                if value is None:
+                    continue
+                if isinstance(value, (dict, list, tuple, set)):
+                    value = json.dumps(value, sort_keys=True, default=str)
+                clean[str(key)] = str(value)[:500]
+            for start in range(0, len(clean), 100):
+                chunk = dict(list(clean.items())[start : start + 100])
+                if chunk:
                     mlflow.log_params(chunk)
-                except Exception:
-                    for key, value in chunk.items():
-                        try:
-                            mlflow.log_param(key, value)
-                        except Exception:
-                            continue
+
+        self._call(_params, "log_params", required=self.required)
 
     def log_tags(self, tags: Mapping[str, Any]) -> None:
         if not self.enabled:
             return
-        import mlflow
-
         clean = {str(key): str(value) for key, value in tags.items() if value is not None}
         if not clean:
             return
-        try:
+
+        def _tags():
+            import mlflow
+
             mlflow.set_tags(clean)
-        except Exception:
-            for key, value in clean.items():
-                try:
-                    mlflow.set_tag(key, value)
-                except Exception:
-                    continue
+
+        self._call(_tags, "log_tags", required=self.required)
 
     def log_metrics(self, metrics: Mapping[str, Any], *, step: int | None = None, prefix: str | None = None) -> None:
         if not self.enabled:
             return
-        import mlflow
-
         clean = {}
         for key, value in metrics.items():
             scalar = self._to_float(value)
@@ -154,51 +213,167 @@ class MLflowLogger:
             name = f"{prefix}/{key}" if prefix else str(key)
             clean[name] = scalar
         if clean:
-            mlflow.log_metrics(clean, step=step)
+            def _metrics():
+                import mlflow
+
+                mlflow.log_metrics(clean, step=step)
+
+            self._call(_metrics, "log_metrics", required=self.required)
+
+    def log_train_step(self, metrics: Mapping[str, Any], *, step: int) -> None:
+        mapping = {
+            "total_loss": "loss/total",
+            "loss": "loss/total",
+            "seg_loss": "loss/seg",
+            "dice_loss": "loss/dice",
+            "bce_loss": "loss/bce",
+            "base_loss": "loss/base",
+            "base_seg_loss": "loss/base",
+            "guided_loss": "loss/guided",
+            "guided_seg_loss": "loss/guided",
+            "prior_loss": "loss/prior",
+            "prior_seg_loss": "loss/prior",
+            "conf_loss": "loss/conf",
+            "confidence_loss": "loss/conf",
+            "lr": "lr",
+        }
+        out = {}
+        for key, value in metrics.items():
+            key_str = str(key)
+            if key_str in mapping:
+                out[mapping[key_str]] = value
+            elif key_str.startswith("loss/"):
+                out[key_str] = value
+        self.log_metrics(out, step=step, prefix="train")
+
+    def log_eval_summary(self, metrics: Mapping[str, Any], *, mode: str, step: int | None = None) -> None:
+        out = self._standard_eval_metrics(metrics)
+        self.log_metrics(out, step=step, prefix=mode)
+
+    def log_best(self, metrics: Mapping[str, Any], *, epoch: int, iteration: int) -> None:
+        best = {
+            "val_dice": metrics.get("dice", metrics.get("dice_frame_mean")),
+            "val_iou": metrics.get("iou", metrics.get("iou_frame_mean")),
+            "val_hd95": metrics.get("hd95", metrics.get("hd95_original", metrics.get("hd95_resized"))),
+            "epoch": epoch,
+            "iter": iteration,
+        }
+        self.log_metrics(best, step=iteration, prefix="best")
+
+    def log_anchor_ode_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
+        out = {}
+        aliases = {
+            "base_dice": ("base_dice", "base_only_dice_frame_mean", "anchor_ode/base_dice"),
+            "guided_dice": ("guided_dice", "guided_only_dice_frame_mean", "anchor_ode/guided_dice"),
+            "final_dice": ("final_dice", "dice_frame_mean", "dice", "anchor_ode/final_dice"),
+            "prior_dice": ("prior_dice", "prior_only_dice_frame_mean", "anchor_ode/prior_dice"),
+            "gate_mean": ("gate_mean", "anchor_ode/gate_mean"),
+            "gate_std": ("gate_std", "anchor_ode/gate_std"),
+            "confidence_prior_mean": ("confidence_prior_mean", "confidence_prior", "anchor_ode/confidence_prior"),
+            "confidence_update_mean": ("confidence_update_mean", "confidence_update", "anchor_ode/confidence_update"),
+            "residual_abs_mean": ("residual_abs_mean", "anchor_ode/residual_abs_mean"),
+            "final_base_residual_abs_mean": ("final_base_residual_abs_mean", "anchor_ode/final_base_residual_abs_mean"),
+            "guided_base_residual_abs_mean": ("guided_base_residual_abs_mean", "anchor_ode/guided_base_residual_abs_mean"),
+            "affine_abs_mean": ("affine_abs_mean", "anchor_ode/affine_abs_mean"),
+            "translate_abs_mean": ("translate_abs_mean", "anchor_ode/translate_abs_mean"),
+            "scale_abs_mean": ("scale_abs_mean", "anchor_ode/scale_abs_mean"),
+            "rotate_abs_mean": ("rotate_abs_mean", "anchor_ode/rotate_abs_mean"),
+            "shear_abs_mean": ("shear_abs_mean", "anchor_ode/shear_abs_mean"),
+            "slot_entropy": ("slot_entropy", "anchor_ode/slot_entropy"),
+            "slot_max_prob": ("slot_max_prob", "anchor_ode/slot_max_prob"),
+        }
+        for dst, keys in aliases.items():
+            for key in keys:
+                if key in metrics:
+                    out[dst] = metrics[key]
+                    break
+        if "final_dice" in out and "base_dice" in out:
+            final = self._to_float(out["final_dice"])
+            base = self._to_float(out["base_dice"])
+            if final is not None and base is not None:
+                out["final_minus_base_dice"] = final - base
+        if "guided_dice" in out and "base_dice" in out:
+            guided = self._to_float(out["guided_dice"])
+            base = self._to_float(out["base_dice"])
+            if guided is not None and base is not None:
+                out["guided_minus_base_dice"] = guided - base
+        self.log_metrics(out, step=step, prefix="anchor_ode")
 
     def log_artifact(self, path: str | Path, *, artifact_path: str | None = None) -> None:
         if not self.enabled:
             return
-        import mlflow
-
+        if not self.artifacts_enabled:
+            if self.artifacts_required:
+                raise RuntimeError(f"MLflow artifact logging is disabled but required: {path}")
+            return
         path = Path(path)
         if path.exists() and path.is_file():
-            mlflow.log_artifact(str(path), artifact_path=artifact_path)
+            def _artifact():
+                import mlflow
+
+                mlflow.log_artifact(str(path), artifact_path=artifact_path)
+
+            self._call(_artifact, "log_artifact", required=self.artifacts_required)
 
     def log_artifacts(self, path: str | Path, *, artifact_path: str | None = None) -> None:
         if not self.enabled:
             return
-        import mlflow
-
+        if not self.artifacts_enabled:
+            if self.artifacts_required:
+                raise RuntimeError(f"MLflow artifact logging is disabled but required: {path}")
+            return
         path = Path(path)
         if path.exists() and path.is_dir():
-            mlflow.log_artifacts(str(path), artifact_path=artifact_path)
+            def _artifacts():
+                import mlflow
 
-    def log_checkpoint(self, path: str | Path, *, name: str | None = None) -> None:
+                mlflow.log_artifacts(str(path), artifact_path=artifact_path)
+
+            self._call(_artifacts, "log_artifacts", required=self.artifacts_required)
+
+    def log_checkpoint(self, path: str | Path, *, artifact_name: str | None = None, name: str | None = None) -> None:
+        path = Path(path)
+        artifact_name = artifact_name or name
+        if artifact_name and path.name != artifact_name:
+            with tempfile.TemporaryDirectory(prefix="mlflow_ckpt_") as tmp:
+                tmp_path = Path(tmp) / artifact_name
+                shutil.copy2(path, tmp_path)
+                self.log_artifact(tmp_path, artifact_path="checkpoints")
+            return
         self.log_artifact(path, artifact_path="checkpoints")
 
-    def log_evaluation_result(self, result: Any, *, step: int | None = None) -> None:
+    def log_evaluation_result(
+        self,
+        result: Any,
+        *,
+        step: int | None = None,
+        log_artifacts: bool = False,
+    ) -> None:
         if not self.enabled or result is None:
             return
         mode = str(getattr(result, "mode", "eval"))
         summary_metrics = dict(getattr(result, "summary_metrics", {}) or {})
-        self.log_metrics(summary_metrics, step=step, prefix=mode)
+        self.log_eval_summary(summary_metrics, mode=mode, step=step)
+        self.log_anchor_ode_diagnostics(summary_metrics, step=step)
+
+        if not log_artifacts:
+            return
 
         with tempfile.TemporaryDirectory(prefix="mlflow_eval_") as tmp:
             tmp_path = Path(tmp)
-            summary_path = tmp_path / f"{mode}_summary.json"
+            summary_path = tmp_path / "summary.json"
             summary_path.write_text(json.dumps(summary_metrics, indent=2, sort_keys=True), encoding="utf-8")
             self.log_artifact(summary_path, artifact_path="eval")
 
             threshold_sweep = dict(getattr(result, "threshold_sweep", {}) or {})
             if threshold_sweep:
-                sweep_path = tmp_path / f"{mode}_threshold_sweep.json"
-                sweep_path.write_text(json.dumps(threshold_sweep, indent=2, sort_keys=True), encoding="utf-8")
+                sweep_path = tmp_path / "threshold_sweep.csv"
+                self._write_csv(sweep_path, [{"threshold": key, "dice": value} for key, value in threshold_sweep.items()])
                 self.log_artifact(sweep_path, artifact_path="eval")
 
             for attr, filename in (
-                ("per_video_metrics", f"{mode}_per_video.csv"),
-                ("per_frame_metrics", f"{mode}_per_frame.csv"),
+                ("per_video_metrics", "per_video_metrics.csv"),
+                ("per_frame_metrics", "per_frame_metrics.csv"),
             ):
                 rows = list(getattr(result, attr, []) or [])
                 if rows:
@@ -228,6 +403,10 @@ class MLflowLogger:
         except Exception as exc:
             env["torch_error"] = str(exc)
         self._log_json_artifact(env, "runtime.json", artifact_path="env")
+        self._log_text_artifact(self._run_command(["pip", "freeze"]), "pip_freeze.txt", artifact_path="env")
+        self._log_text_artifact(self._run_command(["nvidia-smi"]), "nvidia_smi.txt", artifact_path="env")
+        torch_info = {key: env[key] for key in env if key.startswith("torch") or key.startswith("cuda")}
+        self._log_json_artifact(torch_info, "torch_info.json", artifact_path="env")
 
     def log_git_info(self) -> None:
         if not self.enabled:
@@ -238,13 +417,19 @@ class MLflowLogger:
             return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
 
         info: dict[str, Any] = {}
+        status = ""
+        diff = ""
         try:
             info["commit"] = git("rev-parse", "HEAD")
             info["branch"] = git("rev-parse", "--abbrev-ref", "HEAD")
-            info["status_short"] = git("status", "--short")
+            status = git("status", "--short")
+            diff = git("diff", "--")
+            info["status_short"] = status
         except Exception as exc:
             info["error"] = str(exc)
         self._log_json_artifact(info, "git.json", artifact_path="source")
+        self._log_text_artifact(status, "git_status.txt", artifact_path="source")
+        self._log_text_artifact(diff, "git_diff.patch", artifact_path="source")
 
     def _cfg_get(self, key: str, default: Any) -> Any:
         if hasattr(self.cfg, "get"):
@@ -257,6 +442,56 @@ class MLflowLogger:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
         self.log_artifact(path, artifact_path=artifact_path)
+
+    def _log_text_artifact(self, payload: str, filename: str, *, artifact_path: str) -> None:
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        path = self.run_dir / filename
+        path.write_text(payload or "", encoding="utf-8")
+        self.log_artifact(path, artifact_path=artifact_path)
+
+    def _call(self, fn, action: str, *, required: bool) -> Any:
+        try:
+            with self._timeout(self.timeout_seconds):
+                return fn()
+        except Exception as exc:
+            if required:
+                raise RuntimeError(f"MLflow {action} failed: {exc}") from exc
+            return None
+
+    @staticmethod
+    @contextmanager
+    def _timeout(seconds: int):
+        if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+            yield
+            return
+        previous = signal.getsignal(signal.SIGALRM)
+
+        def _handler(signum, frame):
+            raise TimeoutError(f"operation exceeded {seconds}s")
+
+        signal.signal(signal.SIGALRM, _handler)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+
+    @staticmethod
+    def _run_command(cmd: list[str]) -> str:
+        try:
+            return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT, timeout=20)
+        except Exception as exc:
+            return str(exc)
+
+    @staticmethod
+    def _standard_eval_metrics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "dice": metrics.get("dice", metrics.get("dice_frame_mean")),
+            "iou": metrics.get("iou", metrics.get("iou_frame_mean")),
+            "hd95": metrics.get("hd95", metrics.get("hd95_original", metrics.get("hd95_resized"))),
+            "assd": metrics.get("assd", metrics.get("assd_original", metrics.get("assd_resized"))),
+        }
 
     @staticmethod
     def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
@@ -271,6 +506,40 @@ class MLflowLogger:
         if isinstance(value, (list, tuple)):
             return {prefix: json.dumps(value, default=str)}
         return {prefix: value}
+
+    @classmethod
+    def _extract_config_params(cls, value: Any, prefix: str = "") -> dict[str, Any]:
+        if isinstance(value, (DictConfig, ListConfig)):
+            value = OmegaConf.to_container(value, resolve=True)
+        root = prefix.split(".", 1)[0] if prefix else ""
+        if prefix and root not in cls.PARAM_ROOTS:
+            return {}
+        if isinstance(value, Mapping):
+            out = {}
+            for key, item in value.items():
+                next_key = f"{prefix}.{key}" if prefix else str(key)
+                out.update(cls._extract_config_params(item, next_key))
+            return out
+        normalized = cls._param_value(value)
+        if normalized is None:
+            return {}
+        return {prefix: normalized}
+
+    @staticmethod
+    def _param_value(value: Any) -> Any | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value if math.isfinite(float(value)) else None
+        if isinstance(value, str):
+            return value if len(value) <= 200 else None
+        if isinstance(value, (list, tuple)) and len(value) <= 8:
+            if all(isinstance(item, (str, int, float, bool)) for item in value):
+                text = ",".join(str(item) for item in value)
+                return text if len(text) <= 200 else None
+        return None
 
     @staticmethod
     def _to_float(value: Any) -> float | None:

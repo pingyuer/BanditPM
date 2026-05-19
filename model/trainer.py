@@ -609,13 +609,15 @@ class Trainer:
     def _log_train_metrics(self, losses, total_loss, it):
         try:
             log_dict = {
-                "loss": total_loss,
+                "total_loss": total_loss,
                 "lr": self.scheduler.get_last_lr()[0],
             }
             for k, v in losses.items():
                 if isinstance(v, torch.Tensor):
                     log_dict[k] = v.item()
-            self._log_metrics(log_dict, step=it, prefix="train")
+            logger = getattr(self, "mlflow_logger", None)
+            if logger is not None:
+                logger.log_train_step(log_dict, step=it)
         except Exception:
             pass
 
@@ -861,6 +863,12 @@ class Trainer:
             guided_base_residual = []
             affine_abs = []
             slot_entropy = []
+            slot_max_prob = []
+            gate_values = []
+            translate_abs = []
+            scale_abs = []
+            rotate_abs = []
+            shear_abs = []
             for key in memory_keys:
                 aux = data.get(key)
                 anchor_aux = aux.get("anchor_ode_aux") if isinstance(aux, dict) else None
@@ -883,34 +891,54 @@ class Trainer:
                         dst.append(value.float().detach().flatten())
                 affine = anchor_aux.get("affine")
                 if torch.is_tensor(affine):
-                    affine_abs.append(affine.float().detach().abs().flatten())
+                    aff = affine.float().detach()
+                    affine_abs.append(aff.abs().flatten())
+                    translate_abs.append(aff[..., 0:2].abs().flatten())
+                    scale_abs.append((aff[..., 2:4] - 1.0).abs().flatten())
+                    rotate_abs.append(aff[..., 4:5].abs().flatten())
+                    shear_abs.append(aff[..., 5:6].abs().flatten())
                 weights = anchor_aux.get("slot_weights")
                 if torch.is_tensor(weights):
                     w = weights.float().detach().clamp_min(1.0e-8)
                     slot_entropy.append((-(w * w.log()).sum(dim=-1) / math.log(max(w.shape[-1], 2))).flatten())
+                    slot_max_prob.append(w.max(dim=-1).values.flatten())
+                gates = anchor_aux.get("skip_gates")
+                if torch.is_tensor(gates):
+                    gate_values.append(gates.float().detach().flatten())
 
             metrics = {
-                "anchor_ode/confidence_prior": prior_conf,
-                "anchor_ode/confidence_base": base_conf,
-                "anchor_ode/confidence_update": update_conf,
-                "anchor_ode/confidence_boundary": boundary_conf,
-                "anchor_ode/confidence_scale": scale_conf,
-                "anchor_ode/slot_confidence": slot_conf,
-                "anchor_ode/base_prior_disagreement": disagreement,
-                "anchor_ode/mask_entropy": entropy,
-                "anchor_ode/final_base_residual_abs_mean": final_base_residual,
-                "anchor_ode/guided_base_residual_abs_mean": guided_base_residual,
-                "anchor_ode/affine_abs_mean": affine_abs,
-                "anchor_ode/slot_entropy": slot_entropy,
+                "confidence_prior_mean": prior_conf,
+                "confidence_base_mean": base_conf,
+                "confidence_update_mean": update_conf,
+                "confidence_boundary_mean": boundary_conf,
+                "confidence_scale_mean": scale_conf,
+                "slot_confidence_mean": slot_conf,
+                "base_prior_disagreement": disagreement,
+                "mask_entropy": entropy,
+                "final_base_residual_abs_mean": final_base_residual,
+                "guided_base_residual_abs_mean": guided_base_residual,
+                "affine_abs_mean": affine_abs,
+                "translate_abs_mean": translate_abs,
+                "scale_abs_mean": scale_abs,
+                "rotate_abs_mean": rotate_abs,
+                "shear_abs_mean": shear_abs,
+                "slot_entropy": slot_entropy,
+                "slot_max_prob": slot_max_prob,
             }
+            if gate_values:
+                gates = torch.cat(gate_values)
+                metrics["gate_mean"] = [gates]
+                metrics["gate_std"] = [gates.std(unbiased=False).reshape(1)]
             for name, tensors in metrics.items():
                 if not tensors:
                     continue
                 value = torch.cat(tensors).mean().item()
-                self.log.log_scalar(name, value, it)
+                self.log.log_scalar(f"anchor_ode/{name}", value, it)
                 metrics[name] = value
             if metrics:
-                self._log_metrics(metrics, step=it)
+                logger = getattr(self, "mlflow_logger", None)
+                if logger is not None:
+                    logger.log_anchor_ode_diagnostics(metrics, step=it)
         except Exception:
             pass
 
@@ -920,14 +948,14 @@ class Trainer:
         result = self.evaluator.evaluate(val_loader, "val", epoch, run_path, it)
         logger = getattr(self, "mlflow_logger", None)
         if self.main_process and logger is not None:
-            logger.log_evaluation_result(result, step=it)
+            logger.log_evaluation_result(result, step=it, log_artifacts=False)
         return result.summary_metrics
 
     def test(self, test_loader, epoch, run_path, it, local_rank=None, world_size=None):
         result = self.evaluator.evaluate(test_loader, "test", epoch, run_path, it)
         logger = getattr(self, "mlflow_logger", None)
         if self.main_process and logger is not None:
-            logger.log_evaluation_result(result, step=it)
+            logger.log_evaluation_result(result, step=it, log_artifacts=False)
         return result.summary_metrics
 
     def _reset_metrics(self):
@@ -1112,9 +1140,9 @@ class Trainer:
         current_state = self.model_without_ddp.state_dict()
         raw_to_save = raw_state if raw_state is not None else current_state
         if self.ema is not None and self.ema_eval:
-            torch.save(raw_to_save, self.run_path / "raw_at_best_ema.pth")
+            torch.save(raw_to_save, self.run_path / "best_raw.pth")
             torch.save(self.ema.state_dict(), self.run_path / "best_ema.pth")
-            saved_weight_files = ["raw_at_best_ema.pth", "best_ema.pth"]
+            saved_weight_files = ["best_raw.pth", "best_ema.pth"]
         else:
             torch.save(raw_to_save, self.run_path / "best_raw.pth")
             saved_weight_files = ["best_raw.pth"]
@@ -1135,9 +1163,10 @@ class Trainer:
             json.dump(metadata, handle, indent=2, sort_keys=True)
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:
+            logger.log_best(metrics, epoch=epoch, iteration=it)
             for filename in saved_weight_files:
-                logger.log_artifact(self.run_path / filename, artifact_path="checkpoints")
-            logger.log_artifact(self.run_path / "best_summary.json", artifact_path="checkpoints")
+                logger.log_checkpoint(self.run_path / filename, artifact_name=filename)
+            logger.log_checkpoint(self.run_path / "best_summary.json", artifact_name="best_summary.json")
         self.log.info(f"Saved best checkpoint set at iter {it}: {metric_name}={metric:.6f}")
 
     def _run_evaluation_impl(self, data_loader, mode, epoch, run_path, it) -> EvaluationResult:
@@ -1620,7 +1649,10 @@ class Trainer:
         log_str = f"[{mode.capitalize()}] Iter={it} | " + " | ".join(log_items)
         self.log.info(log_str)
 
-        self._log_metrics({**metrics, "epoch": epoch}, step=it, prefix=mode)
+        logger = getattr(self, "mlflow_logger", None)
+        if logger is not None:
+            logger.log_eval_summary(metrics, mode=mode, step=it)
+            logger.log_anchor_ode_diagnostics(metrics, step=it)
 
     def save_weights(self, it: int):
         if not self.main_process:
@@ -1655,7 +1687,7 @@ class Trainer:
         torch.save(payload, latest_path)
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:
-            logger.log_artifact(latest_path, artifact_path="checkpoints")
+            logger.log_checkpoint(latest_path, artifact_name="latest.pth")
         self.log.info(f"Saved checkpoint: {ckpt_path}")
 
     def upload_summary_artifact(self) -> None:
@@ -1664,6 +1696,15 @@ class Trainer:
         logger = getattr(self, "mlflow_logger", None)
         summary_path = self.run_path / "summary.csv"
         if logger is not None and summary_path.exists():
+            try:
+                with summary_path.open("r", encoding="utf-8", newline="") as handle:
+                    rows = list(csv.DictReader(handle))
+                if rows:
+                    summary_json = self.run_path / "summary.json"
+                    summary_json.write_text(json.dumps(rows[-1], indent=2, sort_keys=True), encoding="utf-8")
+                    logger.log_artifact(summary_json, artifact_path="eval")
+            except Exception as exc:
+                self.log.warning(f"Failed to prepare summary.json artifact: {exc}")
             logger.log_artifact(summary_path, artifact_path="eval")
 
     def load_checkpoint(self, path: str):

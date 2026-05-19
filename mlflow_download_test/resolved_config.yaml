@@ -1,0 +1,3 @@
+model: debug
+backend: garage
+artifact_store: mlflow-artifacts

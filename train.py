@@ -45,6 +45,23 @@ def resolve_git_short_hash() -> str:
         return "nogit"
 
 
+def resolve_git_metadata() -> dict:
+    root = Path(__file__).resolve().parent
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    except Exception:
+        commit = "unknown"
+    try:
+        short = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=root, text=True).strip()
+    except Exception:
+        short = "nogit"
+    try:
+        dirty = bool(subprocess.check_output(["git", "status", "--short"], cwd=root, text=True).strip())
+    except Exception:
+        dirty = False
+    return {"git_commit": commit, "git_short": short, "git_dirty": dirty}
+
+
 def resolve_mlflow_experiment_name(cfg: DictConfig) -> str:
     mlflow_cfg = cfg.get("mlflow", {})
     configured = mlflow_cfg.get("experiment_name", None) if hasattr(mlflow_cfg, "get") else None
@@ -71,9 +88,82 @@ def resolve_mlflow_experiment_name(cfg: DictConfig) -> str:
         return "dynakey" if uses_dynakey else "unext_fusion"
     if model_name == "delay_ode":
         return "delay_ode"
+    if "ablation" in exp_id and "anchor_ode" in exp_id:
+        return "ablation_anchor_ode"
     if model_name in {"unext", "unext_only", "baseline_unext"} or "unext_only" in exp_id:
-        return "baseline_unext"
+        return "unext_baseline"
     return model_name or "experiment"
+
+
+def _cfg_get_nested(cfg, path: str, default=None):
+    value = cfg
+    for part in path.split("."):
+        if not hasattr(value, "get"):
+            return default
+        value = value.get(part, default)
+        if value is default:
+            return default
+    return value
+
+
+def build_mlflow_metadata(cfg: DictConfig, *, world_size: int) -> tuple[dict, dict]:
+    git_info = resolve_git_metadata()
+    method_family = resolve_mlflow_experiment_name(cfg)
+    model_name = resolve_model_name(cfg)
+    dataset_name = str(cfg.get("dataset_name", "dataset"))
+    protocol_name = str(cfg.get("data", {}).get("protocol_name", "unknown"))
+    mlflow_cfg = cfg.get("mlflow", {})
+    stage = str(mlflow_cfg.get("stage", "full")) if hasattr(mlflow_cfg, "get") else "full"
+    run_type = str(mlflow_cfg.get("run_type", "train")) if hasattr(mlflow_cfg, "get") else "train"
+    eval_cfg = cfg.get("evaluation", {})
+    post_cfg = eval_cfg.get("postprocess", {}) if hasattr(eval_cfg, "get") else {}
+    tags = {
+        "project": "tahara-3d",
+        "method": method_family,
+        "model": model_name,
+        "dataset": dataset_name,
+        "protocol": protocol_name,
+        "run_type": run_type,
+        "stage": stage,
+        "exp_id": str(cfg.get("exp_id", "experiment")),
+        "seed": int(cfg.get("seed", 42)),
+        "git_commit": git_info["git_commit"],
+        "git_dirty": git_info["git_dirty"],
+        "ddp_world_size": int(world_size),
+        "has_ema": bool(_cfg_get_nested(cfg, "ema.enabled", False) or _cfg_get_nested(cfg, "main_training.ema_enabled", False)),
+        "has_tta": bool(eval_cfg.get("tta_enabled", False)) if hasattr(eval_cfg, "get") else False,
+        "has_postprocess": bool(post_cfg.get("enabled", eval_cfg.get("postprocess_enabled", False))) if hasattr(post_cfg, "get") else False,
+    }
+    stage_cfg = cfg.get("main_training", {})
+    loss_cfg = cfg.get("loss", cfg.get("losses", {}))
+    model_cfg = cfg.get("model", {})
+    anchor_cfg = model_cfg.get("anchor_ode", model_cfg.get("memory_core", {})) if hasattr(model_cfg, "get") else {}
+    params = {
+        "model.name": model_name,
+        "model.version": model_cfg.get("version", cfg.get("model_version", "")) if hasattr(model_cfg, "get") else "",
+        "dataset.name": dataset_name,
+        "dataset.resolution": cfg.get("resolution", _cfg_get_nested(cfg, "data.resolution", "")),
+        "dataset.sequence_length": stage_cfg.get("seq_length", _cfg_get_nested(cfg, "data.sequence_length", "")) if hasattr(stage_cfg, "get") else "",
+        "train.lr": stage_cfg.get("learning_rate", None),
+        "train.batch_size": stage_cfg.get("batch_size", None),
+        "train.optimizer": stage_cfg.get("optimizer", cfg.get("optimizer", "")),
+        "train.scheduler": stage_cfg.get("scheduler", cfg.get("scheduler", "")),
+        "train.max_iter": stage_cfg.get("num_iterations", None),
+        "loss.dice_weight": loss_cfg.get("dice_weight", loss_cfg.get("lambda_dice", None)) if hasattr(loss_cfg, "get") else None,
+        "loss.bce_weight": loss_cfg.get("bce_weight", loss_cfg.get("lambda_bce", None)) if hasattr(loss_cfg, "get") else None,
+        "loss.boundary_weight": loss_cfg.get("boundary_weight", loss_cfg.get("lambda_boundary", None)) if hasattr(loss_cfg, "get") else None,
+        "anchor_ode.state_dim": anchor_cfg.get("state_dim", None) if hasattr(anchor_cfg, "get") else None,
+        "anchor_ode.num_slots": anchor_cfg.get("num_slots", None) if hasattr(anchor_cfg, "get") else None,
+        "anchor_ode.gate_init_bias": anchor_cfg.get("gate_init_bias", None) if hasattr(anchor_cfg, "get") else None,
+        "anchor_ode.prior_residual_clip": anchor_cfg.get("prior_residual_clip", None) if hasattr(anchor_cfg, "get") else None,
+        "anchor_ode.affine_max_translate": anchor_cfg.get("affine_max_translate", None) if hasattr(anchor_cfg, "get") else None,
+        "anchor_ode.affine_max_scale": anchor_cfg.get("affine_max_scale", None) if hasattr(anchor_cfg, "get") else None,
+        "postprocess.enabled": tags["has_postprocess"],
+        "postprocess.min_area": post_cfg.get("min_area", None) if hasattr(post_cfg, "get") else None,
+        "eval.threshold": eval_cfg.get("threshold", eval_cfg.get("default_threshold", 0.5)) if hasattr(eval_cfg, "get") else 0.5,
+        "seed": int(cfg.get("seed", 42)),
+    }
+    return tags, params
 
 
 def resolve_mlflow_run_name(
@@ -89,11 +179,12 @@ def resolve_mlflow_run_name(
     model_name = resolve_model_name(cfg)
     dataset_name = str(cfg.get("dataset_name", "dataset"))
     protocol = str(cfg.get("data", {}).get("protocol_name", "protocol"))
-    exp_name = str(cfg.get("exp_id", "experiment"))
+    mlflow_cfg = cfg.get("mlflow", {})
+    run_type = str(mlflow_cfg.get("run_type", "train")) if hasattr(mlflow_cfg, "get") else "train"
     seed = int(cfg.get("seed", 42))
-    timestamp = timestamp or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = timestamp or datetime.datetime.now().strftime("%m%d-%H%M")
     git_hash = git_hash or resolve_git_short_hash()
-    return f"{model_name}_{dataset_name}_{protocol}_{exp_name}_seed{seed}_{timestamp}_{git_hash}"
+    return f"{model_name}_{dataset_name}_{protocol}_{run_type}_s{seed}_{timestamp}_{git_hash}"
 
 
 def resolve_dataset_class(cfg: DictConfig):
@@ -124,11 +215,26 @@ def train(cfg: DictConfig):
     trainer = None
 
     try:
+        stage = str(mlflow_cfg.get("stage", "full")) if hasattr(mlflow_cfg, "get") else "full"
+        mlflow_enabled = bool(mlflow_cfg.get("enabled", True)) if hasattr(mlflow_cfg, "get") else True
+        mlflow_required = bool(mlflow_cfg.get("required", True)) if hasattr(mlflow_cfg, "get") else True
+        if main_process and stage in {"full", "final"} and mlflow_required and not mlflow_enabled:
+            raise RuntimeError("Formal full/final runs require mlflow.enabled=true.")
+        info_if_rank_zero("MLflow: preflight...")
+        mlflow_logger.preflight()
+        info_if_rank_zero("MLflow: starting run...")
         mlflow_logger.start_run()
         mlflow_started = True
-        mlflow_logger.log_config(cfg)
+        info_if_rank_zero("MLflow: logging run metadata...")
+        metadata_tags, metadata_params = build_mlflow_metadata(cfg, world_size=world_size)
+        mlflow_logger.log_run_metadata(tags=metadata_tags, params=metadata_params)
+        info_if_rank_zero("MLflow: logging config...")
+        mlflow_logger.log_config(cfg, overrides=list(HydraConfig.get().overrides.task))
+        info_if_rank_zero("MLflow: logging environment info...")
         mlflow_logger.log_env_info()
+        info_if_rank_zero("MLflow: logging git info...")
         mlflow_logger.log_git_info()
+        info_if_rank_zero("MLflow: run initialization complete.")
 
         # Ensure configuration is printed only once by the main process
             

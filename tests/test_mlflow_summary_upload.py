@@ -24,7 +24,7 @@ class MLflowSummaryUploadTests(unittest.TestCase):
             (trainer.run_path / "summary.csv").write_text("mode,dice\nval,0.9\n", encoding="utf-8")
             trainer.upload_summary_artifact()
 
-        self.assertEqual(logger.calls, [("summary.csv", "eval")])
+        self.assertEqual(logger.calls, [("summary.json", "eval"), ("summary.csv", "eval")])
 
     def test_missing_summary_is_noop(self):
         trainer = Trainer.__new__(Trainer)

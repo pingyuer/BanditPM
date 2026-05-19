@@ -43,6 +43,15 @@ python scripts/summarize_and_clean_outputs.py --clean
 http://172.16.240.77:5000
 ```
 
+## MLflow 记录语义
+
+- Tags 用于检索和分组：`run_type`、`method_family`、`model_name`、`dataset_name`、`protocol_name`、`exp_id`、`seed`、`git_commit`、`git_dirty`、`ddp_world_size`。
+- Params 只保存可比较的小型超参，例如学习率、batch size、训练步数、协议版本和模型/数据关键开关。
+- Metrics 只保存标量时间序列，例如 `train/*`、`val/*`、`test/*`、`anchor_ode/*`、`dynakey/*`。
+- Artifacts 保存大文件和结构化明细：`configs/`、`checkpoints/`、`eval/`、`visuals/`、`env/`、`source/`。
+- 完整 config 只上传到 `configs/resolved_config.yaml`，不全量展开到 params。
+- 训练期 val/test 默认只写 metrics；per-frame/per-video/sweep 明细只在 final eval 或独立 eval run 上传。
+
 ## Trainer 日志流
 
 主要位置：

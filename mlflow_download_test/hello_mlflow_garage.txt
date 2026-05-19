@@ -1,0 +1,5 @@
+{
+  "message": "hello from mlflow test",
+  "tracking_uri": "http://172.16.240.77:5000",
+  "time": 1779112129.023211
+}

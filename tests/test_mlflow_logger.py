@@ -8,6 +8,7 @@ from unittest import mock
 from omegaconf import OmegaConf
 
 from utils.mlflow_logger import MLflowLogger
+from evaluation import EvaluationResult
 
 
 class _FakeRun:
@@ -37,6 +38,8 @@ class MLflowLoggerTests(unittest.TestCase):
                 "experiment_name": "anchor_ode",
                 "run_name": None,
                 "resume_run_id": "abc",
+                "required": True,
+                "artifacts_required": True,
             }
         )
 
@@ -52,7 +55,101 @@ class MLflowLoggerTests(unittest.TestCase):
         self.assertIn(("start_run", {"run_id": "abc"}), calls)
         self.assertIn(("metrics", {"val/dice": 0.9}, 3), calls)
         self.assertIn(("end_run", "FAILED"), calls)
-        self.assertTrue(any(call[0] == "artifact" and call[2] == "configs" for call in calls))
+        self.assertTrue(any(call == ("artifact", "config.yaml", "configs") for call in calls))
+        self.assertTrue(any(call == ("artifact", "config_resolved.yaml", "configs") for call in calls))
+        self.assertTrue(any(call == ("artifact", "overrides.txt", "configs") for call in calls))
+
+    def test_log_config_uses_param_whitelist(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_params=lambda params: calls.append(("params", params)),
+            log_param=lambda key, value: calls.append(("param", key, value)),
+            log_artifact=lambda path, artifact_path=None: calls.append(("artifact", Path(path).name, artifact_path)),
+        )
+        cfg = OmegaConf.create(
+            {
+                "model": {"name": "debug", "huge_blob": {"nested": "kept out"}},
+                "main_training": {"learning_rate": 1.0e-4, "lr_schedule_steps": [100, 200]},
+                "hydra": {"runtime": {"output_dir": "/tmp/should_not_be_param"}},
+                "callbacks": {"private": "nope"},
+                "seed": 7,
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_config(cfg)
+        merged_params = {}
+        for call in calls:
+            if call[0] == "params":
+                merged_params.update(call[1])
+        self.assertEqual(merged_params, {})
+        self.assertNotIn("hydra.runtime.output_dir", merged_params)
+        self.assertNotIn("callbacks.private", merged_params)
+        self.assertTrue(any(call == ("artifact", "config_resolved.yaml", "configs") for call in calls))
+
+    def test_log_run_metadata_writes_tags_and_core_params(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            set_tags=lambda tags: calls.append(("tags", tags)),
+            log_params=lambda params: calls.append(("params", params)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_run_metadata(
+                tags={"run_type": "train", "method": "gdkvm"},
+                params={"train.lr": 1.0e-4},
+            )
+        self.assertIn(("tags", {"run_type": "train", "method": "gdkvm"}), calls)
+        self.assertIn(("params", {"train.lr": "0.0001"}), calls)
+
+    def test_structured_metric_helpers(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_train_step({"total_loss": 1.0, "dice_loss": 0.2, "lr": 1.0e-4}, step=5)
+            logger.log_eval_summary({"dice_frame_mean": 0.8, "iou_frame_mean": 0.7}, mode="val", step=6)
+            logger.log_best({"dice_frame_mean": 0.8, "iou_frame_mean": 0.7, "hd95": 2.0}, epoch=1, iteration=6)
+            logger.log_anchor_ode_diagnostics(
+                {"base_dice": 0.7, "guided_dice": 0.75, "final_dice": 0.8, "gate_mean": 0.3},
+                step=6,
+            )
+        self.assertIn(("metrics", {"train/loss/total": 1.0, "train/loss/dice": 0.2, "train/lr": 1.0e-4}, 5), calls)
+        self.assertIn(("metrics", {"val/dice": 0.8, "val/iou": 0.7}, 6), calls)
+        self.assertIn(("metrics", {"best/val_dice": 0.8, "best/val_iou": 0.7, "best/val_hd95": 2.0, "best/epoch": 1.0, "best/iter": 6.0}, 6), calls)
+        self.assertTrue(
+            any(call[0] == "metrics" and call[1].get("anchor_ode/final_minus_base_dice") == 0.10000000000000009 for call in calls)
+        )
+
+    def test_evaluation_result_artifacts_are_opt_in(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+            log_artifact=lambda path, artifact_path=None: calls.append(("artifact", Path(path).name, artifact_path)),
+        )
+        result = EvaluationResult(
+            mode="val",
+            iteration=10,
+            epoch=1,
+            summary_metrics={"dice": 0.8},
+            threshold_sweep={"0.50": 0.8},
+            per_video_metrics=[{"video": "a", "dice": 0.8}],
+            per_frame_metrics=[{"video": "a", "frame": 0, "dice": 0.8}],
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_evaluation_result(result, step=10, log_artifacts=False)
+            logger.log_evaluation_result(result, step=11, log_artifacts=True)
+        self.assertIn(("metrics", {"val/dice": 0.8}, 10), calls)
+        self.assertIn(("metrics", {"val/dice": 0.8}, 11), calls)
+        artifact_calls = [call for call in calls if call[0] == "artifact"]
+        self.assertTrue(any(call == ("artifact", "summary.json", "eval") for call in artifact_calls))
+        self.assertEqual(
+            [call for call in calls if call[0] == "artifact" and call[1] == "summary.json"],
+            [("artifact", "summary.json", "eval")],
+        )
 
     def test_artifact_paths_and_eval_tags_are_flat(self):
         calls = []
@@ -70,6 +167,8 @@ class MLflowLoggerTests(unittest.TestCase):
                 "experiment_name": "evals",
                 "run_name": "eval-debug",
                 "resume_run_id": None,
+                "required": True,
+                "artifacts_required": True,
             }
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
@@ -84,7 +183,7 @@ class MLflowLoggerTests(unittest.TestCase):
                 dataset="echonet",
                 protocol="ed2es",
             )
-            logger.log_checkpoint(ckpt, name="best_raw")
+            logger.log_checkpoint(ckpt, artifact_name="best_raw.pth")
             logger.log_env_info()
             logger.log_git_info()
 
@@ -100,6 +199,46 @@ class MLflowLoggerTests(unittest.TestCase):
                 for call in calls
             )
         )
+
+    def test_preflight_success_and_failure(self):
+        calls = []
+
+        class FakeMLflow:
+            def set_tracking_uri(self, uri):
+                calls.append(("tracking_uri", uri))
+
+            def set_experiment(self, name):
+                calls.append(("experiment", name))
+
+            def start_run(self, **kwargs):
+                calls.append(("start_run", kwargs))
+                return self
+
+            def __enter__(self):
+                return _FakeRun()
+
+            def __exit__(self, exc_type, exc, tb):
+                calls.append(("end_context", exc_type))
+
+            def set_tag(self, key, value):
+                calls.append(("tag", key, value))
+
+            def log_metric(self, key, value, step=None):
+                calls.append(("metric", key, value, step))
+
+            def log_artifact(self, path, artifact_path=None):
+                calls.append(("artifact", Path(path).name, artifact_path))
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": FakeMLflow()}):
+            logger = MLflowLogger({"tracking_uri": "uri", "experiment_name": "exp", "required": True}, run_dir=tmp)
+            logger.preflight()
+        self.assertTrue(any(call == ("metric", "preflight/alive", 1.0, 0) for call in calls))
+
+        failing = types.SimpleNamespace(set_tracking_uri=lambda uri: None, set_experiment=lambda name: None, start_run=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("down")))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": failing}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp)
+            with self.assertRaises(RuntimeError):
+                logger.preflight()
 
     def test_non_main_process_is_noop(self):
         cfg = OmegaConf.create({"enabled": True})
