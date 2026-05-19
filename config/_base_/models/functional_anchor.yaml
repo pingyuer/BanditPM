@@ -28,13 +28,19 @@ model:
     phase_dim: 32
     hidden_dim: 128
     anchor_size: 32
-    residual_clip: 1.5
+    residual_clip: 0.5
+    residual_scale: 0.1
+    trust_max: 0.6
+    trust_warmup_iters: 500
+    trust_l1_weight: 0.01
+    trust_entropy_weight: 0.0
     prediction_mode: "base_primary"
     training_stage: "joint_residual"
     use_anchor_features_in_residual: true
     temporal_state:
       detach_state: true
       detach_every: 3
+      update_scale: 0.5
     phase:
       source_priority: ["metadata_ed_es", "area_curve", "normalized_time"]
       normalized_time_weight: 1.0
@@ -42,7 +48,7 @@ model:
       area_curve_weight_echo: 1.0
     lambda_anchor: 0.3
     lambda_base_seg: 0.5
-    lambda_residual_smallness: 0.05
+    lambda_residual_smallness: 0.1
     lambda_boundary_residual: 0.1
     lambda_phase_consistency: 0.02
     lambda_anchor_temporal: 0.05

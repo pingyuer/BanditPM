@@ -8,9 +8,12 @@ model:
   functional_anchor:
     training_stage: "joint_residual"
     prediction_mode: "base_primary"
+    residual_clip: 0.5
+    residual_scale: 0.1
+    trust_max: 0.6
     lambda_anchor: 0.3
     lambda_base_seg: 0.5
-    lambda_residual_smallness: 0.05
+    lambda_residual_smallness: 0.2
     lambda_boundary_residual: 0.1
     lambda_phase_consistency: 0.005
     lambda_anchor_temporal: 0.05
@@ -19,3 +22,4 @@ model:
     temporal_state:
       detach_state: true
       detach_every: 3
+      update_scale: 0.5

@@ -245,12 +245,22 @@ class MLflowLogger:
             elif key_str.startswith("loss/"):
                 out[key_str] = value
             elif key_str.startswith("aux_functional_anchor_"):
-                out[f"functional_anchor/{key_str.removeprefix('aux_functional_anchor_')}"] = value
+                out[f"loss/weighted/functional_anchor/{key_str.removeprefix('aux_functional_anchor_')}"] = value
+            elif key_str.startswith("raw_functional_anchor_"):
+                out[f"loss/raw/functional_anchor/{key_str.removeprefix('raw_functional_anchor_')}"] = value
+            elif key_str.startswith("lambda_functional_anchor_"):
+                out[f"lambda/functional_anchor/{key_str.removeprefix('lambda_functional_anchor_')}"] = value
         self.log_metrics(out, step=step, prefix="train")
 
     def log_eval_summary(self, metrics: Mapping[str, Any], *, mode: str, step: int | None = None) -> None:
         out = self._standard_eval_metrics(metrics)
         self.log_metrics(out, step=step, prefix=mode)
+        functional = self._functional_anchor_metrics(metrics)
+        if functional:
+            self.log_metrics(functional, step=step, prefix=f"{mode}/functional_anchor")
+        anchor = self._anchor_ode_metrics(metrics, require_explicit=True)
+        if anchor:
+            self.log_metrics(anchor, step=step, prefix=f"{mode}/anchor_ode")
 
     def log_best(self, metrics: Mapping[str, Any], *, epoch: int, iteration: int) -> None:
         best = {
@@ -263,6 +273,12 @@ class MLflowLogger:
         self.log_metrics(best, step=iteration, prefix="best")
 
     def log_anchor_ode_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
+        self.log_metrics(self._anchor_ode_metrics(metrics, require_explicit=False), step=step, prefix="anchor_ode")
+
+    @classmethod
+    def _anchor_ode_metrics(cls, metrics: Mapping[str, Any], *, require_explicit: bool = True) -> dict[str, Any]:
+        if require_explicit and not any(str(key).startswith("anchor_ode/") for key in metrics):
+            return {}
         out = {}
         aliases = {
             "base_dice": ("base_dice", "base_only_dice_frame_mean", "anchor_ode/base_dice"),
@@ -290,21 +306,26 @@ class MLflowLogger:
                     out[dst] = metrics[key]
                     break
         if "final_dice" in out and "base_dice" in out:
-            final = self._to_float(out["final_dice"])
-            base = self._to_float(out["base_dice"])
+            final = cls._to_float(out["final_dice"])
+            base = cls._to_float(out["base_dice"])
             if final is not None and base is not None:
                 out["final_minus_base_dice"] = final - base
         if "guided_dice" in out and "base_dice" in out:
-            guided = self._to_float(out["guided_dice"])
-            base = self._to_float(out["base_dice"])
+            guided = cls._to_float(out["guided_dice"])
+            base = cls._to_float(out["base_dice"])
             if guided is not None and base is not None:
                 out["guided_minus_base_dice"] = guided - base
-        self.log_metrics(out, step=step, prefix="anchor_ode")
+        return out
 
     def log_functional_anchor_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
+        self.log_metrics(self._functional_anchor_metrics(metrics), step=step, prefix="functional_anchor")
+
+    @classmethod
+    def _functional_anchor_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:
         aliases = {
             "base_dice": ("base_dice", "base_only_dice_frame_mean", "functional_anchor/base_dice"),
             "anchor_only_dice": ("anchor_only_dice", "anchor_only_dice_frame_mean", "functional_anchor/anchor_only_dice"),
+            "proposal_dice": ("proposal_dice", "proposal_dice_frame_mean", "functional_anchor/proposal_dice"),
             "final_dice": ("final_dice", "dice_frame_mean", "dice", "functional_anchor/final_dice"),
             "final_minus_base": ("final_minus_base", "functional_anchor/final_minus_base"),
             "final_minus_anchor": ("final_minus_anchor", "functional_anchor/final_minus_anchor"),
@@ -313,6 +334,7 @@ class MLflowLogger:
             "residual_boundary_ratio": ("residual_boundary_ratio", "functional_anchor/residual_boundary_ratio"),
             "residual_abs_mean": ("residual_abs_mean", "functional_anchor/residual_abs_mean"),
             "residual_abs_max": ("residual_abs_max", "functional_anchor/residual_abs_max"),
+            "residual_clip_hit_ratio": ("residual_clip_hit_ratio", "functional_anchor/residual_clip_hit_ratio"),
             "delta_abs_mean": ("delta_abs_mean", "functional_anchor/delta_abs_mean"),
             "shape_residual_norm": ("shape_residual_norm", "functional_anchor/shape_residual_norm"),
             "boundary_residual_norm": ("boundary_residual_norm", "functional_anchor/boundary_residual_norm"),
@@ -332,10 +354,16 @@ class MLflowLogger:
             "slot_area_early_diastole": ("slot_area_early_diastole", "functional_anchor/slot_area_early_diastole"),
             "slot_area_uncertain": ("slot_area_uncertain", "functional_anchor/slot_area_uncertain"),
             "phase_source": ("phase_source", "functional_anchor/phase_source"),
+            "phase_source_metadata_ratio": ("phase_source_metadata_ratio", "functional_anchor/phase_source_metadata_ratio"),
+            "phase_source_area_ratio": ("phase_source_area_ratio", "functional_anchor/phase_source_area_ratio"),
+            "phase_source_time_ratio": ("phase_source_time_ratio", "functional_anchor/phase_source_time_ratio"),
             "phase_loss": ("phase_loss", "aux_functional_anchor_phase_consistency", "functional_anchor/phase_loss"),
             "phase_reliability": ("phase_reliability", "functional_anchor/phase_reliability"),
             "state_norm": ("state_norm", "functional_anchor/state_norm"),
             "state_delta_norm": ("state_delta_norm", "functional_anchor/state_delta_norm"),
+            "state_update_norm": ("state_update_norm", "functional_anchor/state_update_norm"),
+            "state_delta_ratio": ("state_delta_ratio", "functional_anchor/state_delta_ratio"),
+            "ode_raw_delta_norm": ("ode_raw_delta_norm", "functional_anchor/ode_raw_delta_norm"),
             "ode_update_norm": ("ode_update_norm", "functional_anchor/ode_update_norm"),
             "gate_mean_low": ("gate_mean_low", "functional_anchor/gate_mean_low"),
             "gate_mean_mid": ("gate_mean_mid", "functional_anchor/gate_mean_mid"),
@@ -358,16 +386,20 @@ class MLflowLogger:
                     out[dst] = metrics[key]
                     break
         if "final_minus_base" not in out and "final_dice" in out and "base_dice" in out:
-            final = self._to_float(out["final_dice"])
-            base = self._to_float(out["base_dice"])
+            final = cls._to_float(out["final_dice"])
+            base = cls._to_float(out["base_dice"])
             if final is not None and base is not None:
                 out["final_minus_base"] = final - base
         if "final_minus_anchor" not in out and "final_dice" in out and "anchor_only_dice" in out:
-            final = self._to_float(out["final_dice"])
-            anchor = self._to_float(out["anchor_only_dice"])
+            final = cls._to_float(out["final_dice"])
+            anchor = cls._to_float(out["anchor_only_dice"])
             if final is not None and anchor is not None:
                 out["final_minus_anchor"] = final - anchor
-        self.log_metrics(out, step=step, prefix="functional_anchor")
+        if not any(str(key).startswith("functional_anchor/") for key in metrics) and not any(
+            key in metrics for key in ("anchor_only_dice", "proposal_dice", "base_dice")
+        ):
+            return {}
+        return out
 
     def log_artifact(self, path: str | Path, *, artifact_path: str | None = None) -> None:
         if not self.enabled:
@@ -424,8 +456,6 @@ class MLflowLogger:
         mode = str(getattr(result, "mode", "eval"))
         summary_metrics = dict(getattr(result, "summary_metrics", {}) or {})
         self.log_eval_summary(summary_metrics, mode=mode, step=step)
-        self.log_anchor_ode_diagnostics(summary_metrics, step=step)
-        self.log_functional_anchor_diagnostics(summary_metrics, step=step)
 
         if not log_artifacts:
             return

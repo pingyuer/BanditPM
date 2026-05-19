@@ -38,7 +38,9 @@ class FunctionalAnchorSegmenter(nn.Module):
         self.phase_dim = int(_cfg_get(method_cfg, "phase_dim", 32))
         self.hidden_dim = int(_cfg_get(method_cfg, "hidden_dim", 128))
         self.anchor_size = int(_cfg_get(method_cfg, "anchor_size", 32))
-        self.residual_clip = float(_cfg_get(method_cfg, "residual_clip", 1.5))
+        self.residual_clip = float(_cfg_get(method_cfg, "residual_clip", 0.5))
+        self.residual_scale = float(_cfg_get(method_cfg, "residual_scale", 0.1))
+        self.trust_max = float(_cfg_get(method_cfg, "trust_max", 0.6))
         self.prediction_mode = str(_cfg_get(method_cfg, "prediction_mode", "base_primary"))
         self.use_anchor_features_in_residual = bool(_cfg_get(method_cfg, "use_anchor_features_in_residual", True))
         self.disable_injector = bool(_cfg_get(method_cfg, "disable_injector", False))
@@ -47,6 +49,7 @@ class FunctionalAnchorSegmenter(nn.Module):
         temporal_state_cfg = _cfg_get(method_cfg, "temporal_state", {})
         self.detach_state = bool(_cfg_get(temporal_state_cfg, "detach_state", True))
         self.detach_every = int(_cfg_get(temporal_state_cfg, "detach_every", 1))
+        self.state_update_scale = float(_cfg_get(temporal_state_cfg, "update_scale", 0.5))
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -62,7 +65,13 @@ class FunctionalAnchorSegmenter(nn.Module):
         }
         evidence_dim = sum(feature_dims.values())
         self.phase_encoder = PhaseEncoder(self.num_slots, self.phase_dim, self.hidden_dim)
-        self.state_ode = TemporalStateODE(evidence_dim, self.phase_dim, self.state_dim, self.hidden_dim)
+        self.state_ode = TemporalStateODE(
+            evidence_dim,
+            self.phase_dim,
+            self.state_dim,
+            self.hidden_dim,
+            dt=self.state_update_scale,
+        )
         self.anchor_bank = FunctionalAnchorBank(self.num_slots, self.state_dim, self.phase_dim, self.hidden_dim)
         self.anchor_decoder = AnchorDecoder(
             self.num_slots,
@@ -79,7 +88,12 @@ class FunctionalAnchorSegmenter(nn.Module):
             use_anchor_features=self.use_anchor_features_in_residual,
         )
         self.injector = MultiLevelInjector(feature_dims)
-        self.fusion = ConfidenceFusion(self.prediction_mode, self.residual_clip)
+        self.fusion = ConfidenceFusion(
+            self.prediction_mode,
+            self.residual_clip,
+            trust_max=self.trust_max,
+            residual_scale=self.residual_scale,
+        )
 
     def _normalize(self, image: torch.Tensor) -> torch.Tensor:
         return (image - 0.5) / 0.5
@@ -254,7 +268,7 @@ class FunctionalAnchorSegmenter(nn.Module):
                 phase_reliability=phase_reliability,
                 slot_history=prev["slot_weights"],
             )
-            z, dz = self.state_ode(prev["z"], evidence, phase_embed)
+            z, dz, state_update = self.state_ode(prev["z"], evidence, phase_embed)
             slot_weights, slot_aux = self.anchor_bank(z, phase_embed, norm_time)
             target_sizes = {level: feats[level].shape[-2:] for level in feats}
             anchor_logits, anchor_features = self.anchor_decoder(
@@ -304,6 +318,7 @@ class FunctionalAnchorSegmenter(nn.Module):
                 "shape_residual_logits": residuals["shape_residual_logits"],
                 "boundary_residual_logits": residuals["boundary_residual_logits"],
                 "residual_logits": fusion_aux["residual_logits"],
+                "proposal_logits": fusion_aux["proposal_logits"],
                 "final_object_logits": final_object_logits,
                 "slot_weights": slot_weights,
                 "slot_entropy": slot_aux["slot_entropy"],
@@ -320,22 +335,32 @@ class FunctionalAnchorSegmenter(nn.Module):
                 "phase_embed": phase_embed,
                 "phase_descriptor": phase_descriptor,
                 "phase_source": phase_source_code,
+                "phase_source_metadata_ratio": (phase_source_code == 0).float().mean(),
+                "phase_source_area_ratio": (phase_source_code == 1).float().mean(),
+                "phase_source_time_ratio": (phase_source_code == 2).float().mean(),
                 "phase_reliability": phase_reliability,
                 "phase_entropy": -(slot_weights * slot_weights.clamp_min(1.0e-8).log()).sum(dim=-1),
                 "z_state": z,
                 "z_delta": dz,
+                "z_update": state_update,
                 "state_norm": z.detach().pow(2).mean(dim=-1).sqrt(),
-                "state_delta_norm": dz.detach().pow(2).mean(dim=-1).sqrt(),
-                "ode_update_norm": torch.tanh(dz.detach()).pow(2).mean(dim=-1).sqrt(),
+                "state_delta_norm": state_update.detach().pow(2).mean(dim=-1).sqrt(),
+                "state_update_norm": state_update.detach().pow(2).mean(dim=-1).sqrt(),
+                "state_delta_ratio": state_update.detach().pow(2).mean(dim=-1).sqrt()
+                / z.detach().pow(2).mean(dim=-1).sqrt().clamp_min(1.0e-6),
+                "ode_raw_delta_norm": dz.detach().pow(2).mean(dim=-1).sqrt(),
+                "ode_update_norm": state_update.detach().pow(2).mean(dim=-1).sqrt(),
                 "anchor_features": anchor_features,
                 "confidence": residuals["confidence"],
+                "anchor_trust_map": residuals["anchor_trust"],
+                "inject_gate_dec_map": residuals["gate_dec"],
                 "gate_mean_low": residuals["gate_low"].mean(),
                 "gate_mean_mid": residuals["gate_mid"].mean(),
                 "gate_mean_high": residuals["gate_high"].mean(),
                 "inject_gate_low": residuals["gate_low"].mean(),
                 "inject_gate_mid": residuals["gate_mid"].mean(),
                 "inject_gate_high": residuals["gate_high"].mean(),
-                "inject_gate_dec": residuals["anchor_trust"].mean(),
+                "inject_gate_dec": residuals["gate_dec"].mean(),
                 "confidence_mean": residuals["confidence"].mean(),
                 "confidence_std": residuals["confidence"].std(unbiased=False),
                 "trust_mean": fusion_aux["trust_mean"],
@@ -344,6 +369,7 @@ class FunctionalAnchorSegmenter(nn.Module):
                 "image_trust_ratio": fusion_aux["image_trust_ratio"],
                 "residual_abs_mean": fusion_aux["residual_abs_mean"],
                 "residual_abs_max": fusion_aux["residual_abs_max"],
+                "residual_clip_hit_ratio": fusion_aux["residual_clip_hit_ratio"],
                 "delta_abs_mean": fusion_aux["delta_abs_mean"],
                 "residual_l1": fusion_aux["residual_logits"].abs().mean(),
                 "residual_l2": fusion_aux["residual_logits"].pow(2).mean().sqrt(),

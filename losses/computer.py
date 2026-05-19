@@ -105,6 +105,8 @@ class LossComputer(nn.Module):
         self.lambda_functional_anchor_temp = float(functional_cfg.get("lambda_anchor_temporal", 0.02))
         self.lambda_functional_anchor_slot_order = float(functional_cfg.get("lambda_slot_area_order", 0.01))
         self.lambda_functional_anchor_phase_slot = float(functional_cfg.get("lambda_phase_slot_correlation", 0.01))
+        self.lambda_functional_anchor_trust_l1 = float(functional_cfg.get("trust_l1_weight", 0.0))
+        self.lambda_functional_anchor_trust_entropy = float(functional_cfg.get("trust_entropy_weight", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -513,6 +515,8 @@ class LossComputer(nn.Module):
         temporal_terms = []
         slot_order_terms = []
         phase_slot_terms = []
+        trust_l1_terms = []
+        trust_entropy_terms = []
 
         for bi in range(batch_size):
             curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
@@ -552,6 +556,15 @@ class LossComputer(nn.Module):
                 residual = aux.get("residual_logits")
                 if torch.is_tensor(residual) and self.lambda_functional_anchor_residual_l1 > 0:
                     residual_terms.append(residual[bi : bi + 1, :curr_num_obj].abs().mean())
+                trust = aux.get("anchor_trust_map", aux.get("anchor_trust"))
+                if torch.is_tensor(trust):
+                    trust_item = trust[bi : bi + 1].float().clamp(1.0e-6, 1.0 - 1.0e-6)
+                    if self.lambda_functional_anchor_trust_l1 > 0:
+                        trust_l1_terms.append(trust_item.mean())
+                    if self.lambda_functional_anchor_trust_entropy > 0:
+                        trust_entropy_terms.append(
+                            -(trust_item * trust_item.log() + (1.0 - trust_item) * (1.0 - trust_item).log()).mean()
+                        )
 
                 final_obj = aux.get("final_object_logits")
                 if torch.is_tensor(final_obj) and self.lambda_functional_anchor_boundary > 0:
@@ -575,21 +588,45 @@ class LossComputer(nn.Module):
                     phase_slot_terms.append(F.mse_loss(slot_weights[bi : bi + 1, :curr_num_obj, 2], es_target))
 
         if anchor_terms:
-            out["aux_functional_anchor_anchor"] = torch.stack(anchor_terms).mean() * self.lambda_functional_anchor_anchor
+            raw = torch.stack(anchor_terms).mean()
+            out["raw_functional_anchor_anchor"] = raw.detach()
+            out["aux_functional_anchor_anchor"] = raw * self.lambda_functional_anchor_anchor
         if base_terms:
-            out["aux_functional_anchor_base"] = torch.stack(base_terms).mean() * self.lambda_functional_anchor_base
+            raw = torch.stack(base_terms).mean()
+            out["raw_functional_anchor_base"] = raw.detach()
+            out["aux_functional_anchor_base"] = raw * self.lambda_functional_anchor_base
         if residual_terms:
-            out["aux_functional_anchor_residual_l1"] = torch.stack(residual_terms).mean() * self.lambda_functional_anchor_residual_l1
+            raw = torch.stack(residual_terms).mean()
+            out["raw_functional_anchor_residual_l1"] = raw.detach()
+            out["aux_functional_anchor_residual_l1"] = raw * self.lambda_functional_anchor_residual_l1
         if boundary_terms:
-            out["aux_functional_anchor_boundary_residual"] = torch.stack(boundary_terms).mean() * self.lambda_functional_anchor_boundary
+            raw = torch.stack(boundary_terms).mean()
+            out["raw_functional_anchor_boundary_residual"] = raw.detach()
+            out["aux_functional_anchor_boundary_residual"] = raw * self.lambda_functional_anchor_boundary
         if phase_terms:
-            out["aux_functional_anchor_phase_consistency"] = torch.stack(phase_terms).mean() * self.lambda_functional_anchor_phase
+            raw = torch.stack(phase_terms).mean()
+            out["raw_functional_anchor_phase_consistency"] = raw.detach()
+            out["aux_functional_anchor_phase_consistency"] = raw * self.lambda_functional_anchor_phase
         if temporal_terms:
-            out["aux_functional_anchor_anchor_temporal"] = torch.stack(temporal_terms).mean() * self.lambda_functional_anchor_temp
+            raw = torch.stack(temporal_terms).mean()
+            out["raw_functional_anchor_anchor_temporal"] = raw.detach()
+            out["aux_functional_anchor_anchor_temporal"] = raw * self.lambda_functional_anchor_temp
         if slot_order_terms:
-            out["aux_functional_anchor_slot_area_order"] = torch.stack(slot_order_terms).mean() * self.lambda_functional_anchor_slot_order
+            raw = torch.stack(slot_order_terms).mean()
+            out["raw_functional_anchor_slot_area_order"] = raw.detach()
+            out["aux_functional_anchor_slot_area_order"] = raw * self.lambda_functional_anchor_slot_order
         if phase_slot_terms:
-            out["aux_functional_anchor_phase_slot_correlation"] = torch.stack(phase_slot_terms).mean() * self.lambda_functional_anchor_phase_slot
+            raw = torch.stack(phase_slot_terms).mean()
+            out["raw_functional_anchor_phase_slot_correlation"] = raw.detach()
+            out["aux_functional_anchor_phase_slot_correlation"] = raw * self.lambda_functional_anchor_phase_slot
+        if trust_l1_terms:
+            raw = torch.stack(trust_l1_terms).mean()
+            out["raw_functional_anchor_trust_l1"] = raw.detach()
+            out["aux_functional_anchor_trust_l1"] = raw * self.lambda_functional_anchor_trust_l1
+        if trust_entropy_terms:
+            raw = torch.stack(trust_entropy_terms).mean()
+            out["raw_functional_anchor_trust_entropy"] = raw.detach()
+            out["aux_functional_anchor_trust_entropy"] = raw * self.lambda_functional_anchor_trust_entropy
         if not out:
             out["aux_functional_anchor_zero"] = zero
         return out

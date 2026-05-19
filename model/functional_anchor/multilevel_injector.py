@@ -22,7 +22,7 @@ class MultiLevelInjector(nn.Module):
             "high": gates.get("gate_high"),
             "mid": gates.get("gate_mid"),
             "low": gates.get("gate_low"),
-            "dec": gates.get("anchor_trust"),
+            "dec": gates.get("gate_dec"),
         }
         for level, gate in gate_map.items():
             if level not in feats or level not in anchor_features or gate is None:

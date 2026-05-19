@@ -128,13 +128,58 @@ class FunctionalAnchorMetricsTests(unittest.TestCase):
                 "metrics",
                 {
                     "train/loss/total": 1.0,
-                    "train/functional_anchor/anchor": 0.2,
-                    "train/functional_anchor/residual_l1": 0.01,
+                    "train/loss/weighted/functional_anchor/anchor": 0.2,
+                    "train/loss/weighted/functional_anchor/residual_l1": 0.01,
                 },
                 3,
             ),
             calls,
         )
+
+    def test_eval_summary_uses_split_functional_namespace(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_eval_summary(
+                {
+                    "dice_frame_mean": 0.8,
+                    "iou_frame_mean": 0.7,
+                    "functional_anchor/base_dice": 0.72,
+                    "functional_anchor/anchor_only_dice": 0.61,
+                    "functional_anchor/proposal_dice": 0.77,
+                    "functional_anchor/final_dice": 0.8,
+                    "functional_anchor/trust_mean": 0.5,
+                },
+                mode="val",
+                step=4,
+            )
+        merged = {}
+        for _, metrics, _ in calls:
+            merged.update(metrics)
+        self.assertEqual(merged["val/functional_anchor/base_dice"], 0.72)
+        self.assertEqual(merged["val/functional_anchor/anchor_only_dice"], 0.61)
+        self.assertEqual(merged["val/functional_anchor/proposal_dice"], 0.77)
+        self.assertEqual(merged["val/functional_anchor/final_dice"], 0.8)
+        self.assertNotIn("functional_anchor/final_dice", merged)
+        self.assertFalse(any(key.startswith("val/anchor_ode/") for key in merged))
+
+    def test_plain_eval_summary_does_not_emit_method_diagnostics(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_eval_summary({"dice_frame_mean": 0.8, "base_only_dice_frame_mean": 0.0}, mode="test", step=5)
+        merged = {}
+        for _, metrics, _ in calls:
+            merged.update(metrics)
+        self.assertEqual(merged["test/dice"], 0.8)
+        self.assertFalse(any("functional_anchor" in key for key in merged))
+        self.assertFalse(any("anchor_ode" in key for key in merged))
 
 
 if __name__ == "__main__":

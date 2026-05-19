@@ -36,7 +36,7 @@ class ResidualHeads(nn.Module):
         self.confidence_head = nn.Sequential(
             nn.Conv2d(feature_dims["dec"] + 5, hidden_dim, 3, padding=1),
             nn.GELU(),
-            nn.Conv2d(hidden_dim, 4, 1),
+            nn.Conv2d(hidden_dim, 5, 1),
         )
         for module in (self.shape_head[-1], self.boundary_head[-1]):
             nn.init.zeros_(module.bias)
@@ -115,5 +115,6 @@ class ResidualHeads(nn.Module):
             "gate_low": conf[:, 0:1],
             "gate_mid": conf[:, 1:2],
             "gate_high": conf[:, 2:3],
-            "anchor_trust": conf[:, 3:4],
+            "gate_dec": conf[:, 3:4],
+            "anchor_trust": conf[:, 4:5],
         }
