@@ -1,3 +1,4 @@
+import csv
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -151,10 +152,125 @@ def visualize_sequence(rgb_seq, cls_gt_seq, out_dict, run_path, batch_idx_str, i
     
     filename = "_".join(filename_parts) + ".png"
     
-    save_path = Path(run_path) / filename
+    artifact_dir = Path(run_path) / "visuals"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    save_path = artifact_dir / filename
     
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     
+    artifacts = [save_path]
+
+    if has_functional_anchor:
+        diag_paths = _save_functional_anchor_diagnostics(
+            functional_aux_by_t,
+            artifact_dir,
+            filename.replace(".png", ""),
+        )
+        artifacts.extend(diag_paths)
+
     print(f"Successfully saved sequence visualization with {num_frames} frames to {save_path}")
-    return save_path
+    return artifacts
+
+
+def _tensor_scalar(value, default=np.nan):
+    if not torch.is_tensor(value):
+        return default
+    tensor = value.detach().float()
+    if tensor.numel() == 0:
+        return default
+    return float(tensor.mean().cpu().item())
+
+
+def _save_functional_anchor_diagnostics(functional_aux_by_t, artifact_dir: Path, stem: str):
+    rows = []
+    slot_rows = []
+    slot_names = ["ed", "early_systole", "es", "early_diastole", "uncertain"]
+    for ti, aux in enumerate(functional_aux_by_t):
+        if aux is None:
+            continue
+        row = {
+            "frame": ti,
+            "base_area": _prob_area(aux.get("base_object_logits")),
+            "anchor_area": _prob_area(aux.get("anchor_logits")),
+            "proposal_area": _prob_area(aux.get("proposal_logits")),
+            "final_area": _prob_area(aux.get("final_object_logits")),
+            "residual_abs_mean": _tensor_scalar(aux.get("residual_abs_mean")),
+            "trust_mean": _tensor_scalar(aux.get("trust_mean")),
+            "phase_reliability": _tensor_scalar(aux.get("phase_reliability")),
+            "delta_abs_mean": _tensor_scalar(aux.get("delta_abs_mean")),
+        }
+        rows.append(row)
+        weights = aux.get("slot_weights")
+        if torch.is_tensor(weights):
+            values = weights[0, 0].detach().float().cpu().numpy().tolist()
+            slot_row = {"frame": ti}
+            for idx, value in enumerate(values):
+                name = slot_names[idx] if idx < len(slot_names) else f"slot_{idx}"
+                slot_row[name] = float(value)
+            slot_rows.append(slot_row)
+
+    paths = []
+    if rows:
+        csv_path = artifact_dir / f"{stem}_functional_anchor_curves.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        paths.append(csv_path)
+
+        curve_path = artifact_dir / f"{stem}_area_trust_residual.png"
+        frames = [row["frame"] for row in rows]
+        fig, axes = plt.subplots(3, 1, figsize=(max(6, len(frames) * 0.8), 8), squeeze=False)
+        ax = axes[0, 0]
+        for key in ("base_area", "anchor_area", "proposal_area", "final_area"):
+            ax.plot(frames, [row[key] for row in rows], marker="o", label=key)
+        ax.set_ylim(0, 1)
+        ax.legend(fontsize=8)
+        ax.set_ylabel("area")
+        axes[1, 0].plot(frames, [row["trust_mean"] for row in rows], marker="o", color="tab:purple")
+        axes[1, 0].set_ylim(0, 1)
+        axes[1, 0].set_ylabel("trust")
+        axes[2, 0].plot(frames, [row["residual_abs_mean"] for row in rows], marker="o", color="tab:red")
+        axes[2, 0].set_ylabel("residual")
+        axes[2, 0].set_xlabel("frame")
+        fig.tight_layout()
+        fig.savefig(curve_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(curve_path)
+
+    if slot_rows:
+        slot_csv = artifact_dir / f"{stem}_slot_weights.csv"
+        fieldnames = sorted({key for row in slot_rows for key in row.keys()}, key=lambda key: (key != "frame", key))
+        with slot_csv.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(slot_rows)
+        paths.append(slot_csv)
+
+        slot_png = artifact_dir / f"{stem}_slot_weights.png"
+        frames = [row["frame"] for row in slot_rows]
+        fig, ax = plt.subplots(figsize=(max(6, len(frames) * 0.8), 3))
+        for name in fieldnames:
+            if name == "frame":
+                continue
+            ax.plot(frames, [row.get(name, np.nan) for row in slot_rows], marker="o", label=name)
+        ax.set_ylim(0, 1)
+        ax.set_xlabel("frame")
+        ax.set_ylabel("slot weight")
+        ax.legend(fontsize=8, ncol=2)
+        fig.tight_layout()
+        fig.savefig(slot_png, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        paths.append(slot_png)
+
+    return paths
+
+
+def _prob_area(logits):
+    if not torch.is_tensor(logits):
+        return np.nan
+    tensor = torch.sigmoid(logits.detach().float())
+    if tensor.dim() >= 4:
+        tensor = tensor[0, 0]
+    return float(tensor.mean().cpu().item())

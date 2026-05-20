@@ -31,9 +31,14 @@ class ConfidenceFusion(nn.Module):
         shape_residual: torch.Tensor,
         boundary_residual: torch.Tensor,
         anchor_trust: torch.Tensor,
+        residual_scale: torch.Tensor | float | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        residual_preclip = (shape_residual + boundary_residual) * self.residual_scale
-        residual = residual_preclip.clamp(-self.residual_clip, self.residual_clip)
+        scale = self.residual_scale if residual_scale is None else residual_scale
+        if not torch.is_tensor(scale):
+            scale = torch.as_tensor(scale, device=shape_residual.device, dtype=shape_residual.dtype)
+        scale = scale.to(device=shape_residual.device, dtype=shape_residual.dtype)
+        raw_residual = shape_residual + boundary_residual
+        residual = scale * torch.tanh(raw_residual)
         trust = anchor_trust.clamp(0.0, self.trust_max)
         if trust.shape[-2:] != residual.shape[-2:]:
             trust = torch.nn.functional.interpolate(trust, size=residual.shape[-2:], mode="bilinear", align_corners=False)
@@ -54,11 +59,13 @@ class ConfidenceFusion(nn.Module):
             "residual_logits": residual,
             "proposal_logits": proposal,
             "delta_logits": delta,
+            "raw_residual_logits": raw_residual,
+            "residual_scale": scale.detach().reshape(()),
             "trust_mean": trust.detach().mean(),
             "trust_std": trust.detach().std(unbiased=False),
             "residual_abs_mean": residual.detach().abs().mean(),
             "residual_abs_max": residual.detach().abs().amax(),
-            "residual_clip_hit_ratio": (residual_preclip.detach().abs() >= self.residual_clip).float().mean(),
+            "residual_clip_hit_ratio": (residual.detach().abs() >= (scale.detach().abs() * 0.99).clamp_min(1.0e-8)).float().mean(),
             "delta_abs_mean": delta.detach().abs().mean(),
             "anchor_trust_ratio": trust.detach().mean(),
             "image_trust_ratio": (1.0 - trust.detach()).mean(),

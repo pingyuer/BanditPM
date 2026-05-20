@@ -121,6 +121,8 @@ def build_mlflow_metadata(cfg: DictConfig, *, world_size: int) -> tuple[dict, di
     if method_family == "functional_anchor" and hasattr(functional_cfg, "get"):
         tags["prediction_mode"] = str(functional_cfg.get("prediction_mode", "base_primary"))
         tags["training_stage"] = str(functional_cfg.get("training_stage", stage_cfg.get("training_stage", "joint_residual") if hasattr(stage_cfg, "get") else "joint_residual"))
+        if cfg.get("ablation_type", None):
+            tags["ablation_type"] = str(cfg.get("ablation_type"))
     params = {
         "model.name": model_name,
         "dataset.name": dataset_name,

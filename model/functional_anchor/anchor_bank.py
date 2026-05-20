@@ -60,5 +60,9 @@ class FunctionalAnchorBank(nn.Module):
             "slot_area_order_violation": order_violation,
             "slot_order_loss": order_violation,
             "ed_slot_usage": weights[..., 0],
+            "early_systole_slot_usage": weights[..., 1],
             "es_slot_usage": weights[..., 2],
+            "early_diastole_slot_usage": weights[..., 3],
+            "uncertain_slot_usage": weights[..., 4],
+            "slot_max_prob": weights.max(dim=-1).values,
         }

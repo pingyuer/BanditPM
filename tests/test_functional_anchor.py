@@ -147,10 +147,12 @@ class FunctionalAnchorForwardTests(unittest.TestCase):
             )
             self.assertEqual(outputs[mode].shape, (1, 1, 8, 8))
             self.assertIn("residual_logits", aux)
-        self.assertTrue(torch.allclose(outputs["anchor_primary"], torch.full((1, 1, 8, 8), 1.6)))
-        self.assertTrue(torch.allclose(outputs["base_primary"], torch.full((1, 1, 8, 8), 0.4)))
-        self.assertTrue(torch.allclose(outputs["learned_blend"], torch.full((1, 1, 8, 8), 0.4)))
-        self.assertTrue(torch.allclose(outputs["residual_only"], torch.full((1, 1, 8, 8), 1.3)))
+        residual = torch.tanh(torch.tensor(0.6))
+        proposal = 1.0 + residual
+        self.assertTrue(torch.allclose(outputs["anchor_primary"], torch.full((1, 1, 8, 8), float(proposal))))
+        self.assertTrue(torch.allclose(outputs["base_primary"], torch.full((1, 1, 8, 8), float(0.25 * proposal))))
+        self.assertTrue(torch.allclose(outputs["learned_blend"], torch.full((1, 1, 8, 8), float(0.25 * proposal))))
+        self.assertTrue(torch.allclose(outputs["residual_only"], torch.full((1, 1, 8, 8), float(1.0 + 0.5 * residual))))
 
     def test_residual_head_anchor_feature_ablation_changes_inputs(self):
         torch.manual_seed(104)

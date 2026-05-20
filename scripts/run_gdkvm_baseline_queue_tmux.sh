@@ -66,6 +66,7 @@ run_one() {
   local data_path="$6"
   local batch_size="$7"
   local workers="$8"
+  local command_log_path="$9"
 
   env \
     CUDA_VISIBLE_DEVICES="${gpu}" \
@@ -80,19 +81,20 @@ run_one() {
     data_path="${data_path}" \
     main_training.batch_size="${batch_size}" \
     main_training.num_workers="${workers}" \
+    mlflow.command_log_path="${command_log_path}" \
     exp_id="${name}" \
     "hydra.run.dir=outputs/BanditPM/${name}/\${now:%Y-%m-%d}/\${now:%H-%M-%S}"
 }
 
 run_echo_queue() {
   wait_for_session "${WAIT_FOR_SESSION}"
-  run_one 0 gdkvm_echo gdkvm_echo echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 \
+  run_one 0 gdkvm_echo gdkvm_echo echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 "${PROJECT_DIR}/${LOG_DIR}/gdkvm_echo.log" \
     2>&1 | tee "${LOG_DIR}/gdkvm_echo.log"
 }
 
 run_camus_queue() {
   wait_for_session "${WAIT_FOR_SESSION}"
-  run_one 1 gdkvm_camus gdkvm_camus camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 \
+  run_one 1 gdkvm_camus gdkvm_camus camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 "${PROJECT_DIR}/${LOG_DIR}/gdkvm_camus.log" \
     2>&1 | tee "${LOG_DIR}/gdkvm_camus.log"
 }
 

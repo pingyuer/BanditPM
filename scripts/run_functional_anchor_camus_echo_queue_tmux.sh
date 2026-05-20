@@ -52,6 +52,7 @@ run_one() {
   local data_path="$6"
   local batch_size="$7"
   local workers="$8"
+  local command_log_path="$9"
 
   env \
     CUDA_VISIBLE_DEVICES="${gpu}" \
@@ -66,20 +67,21 @@ run_one() {
     data_path="${data_path}" \
     main_training.batch_size="${batch_size}" \
     main_training.num_workers="${workers}" \
+    mlflow.command_log_path="${command_log_path}" \
     exp_id="${name}" \
     "hydra.run.dir=outputs/BanditPM/${name}/\${now:%Y-%m-%d}/\${now:%H-%M-%S}"
 }
 
 run_echo_queue() {
-  run_one 0 functional_anchor_echo_warmup_base functional_anchor_echo_warmup_base echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 2>&1 | tee "${LOG_DIR}/functional_anchor_echo_warmup_base.log"
-  run_one 0 functional_anchor_echo_anchor_pretrain functional_anchor_echo_anchor_pretrain echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 2>&1 | tee "${LOG_DIR}/functional_anchor_echo_anchor_pretrain.log"
-  run_one 0 functional_anchor_echo_joint_residual functional_anchor_echo_joint_residual echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 2>&1 | tee "${LOG_DIR}/functional_anchor_echo_joint_residual.log"
+  run_one 0 functional_anchor_echo_warmup_base functional_anchor_echo_warmup_base echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 "${PROJECT_DIR}/${LOG_DIR}/functional_anchor_echo_warmup_base.log" 2>&1 | tee "${LOG_DIR}/functional_anchor_echo_warmup_base.log"
+  run_one 0 functional_anchor_echo_anchor_pretrain functional_anchor_echo_anchor_pretrain echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 "${PROJECT_DIR}/${LOG_DIR}/functional_anchor_echo_anchor_pretrain.log" 2>&1 | tee "${LOG_DIR}/functional_anchor_echo_anchor_pretrain.log"
+  run_one 0 functional_anchor_echo_joint_residual functional_anchor_echo_joint_residual echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 "${PROJECT_DIR}/${LOG_DIR}/functional_anchor_echo_joint_residual.log" 2>&1 | tee "${LOG_DIR}/functional_anchor_echo_joint_residual.log"
 }
 
 run_camus_queue() {
-  run_one 1 functional_anchor_camus_warmup_base functional_anchor_camus_warmup_base camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 2>&1 | tee "${LOG_DIR}/functional_anchor_camus_warmup_base.log"
-  run_one 1 functional_anchor_camus_anchor_pretrain functional_anchor_camus_anchor_pretrain camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 2>&1 | tee "${LOG_DIR}/functional_anchor_camus_anchor_pretrain.log"
-  run_one 1 functional_anchor_camus_joint_residual functional_anchor_camus_joint_residual camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 2>&1 | tee "${LOG_DIR}/functional_anchor_camus_joint_residual.log"
+  run_one 1 functional_anchor_camus_warmup_base functional_anchor_camus_warmup_base camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 "${PROJECT_DIR}/${LOG_DIR}/functional_anchor_camus_warmup_base.log" 2>&1 | tee "${LOG_DIR}/functional_anchor_camus_warmup_base.log"
+  run_one 1 functional_anchor_camus_anchor_pretrain functional_anchor_camus_anchor_pretrain camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 "${PROJECT_DIR}/${LOG_DIR}/functional_anchor_camus_anchor_pretrain.log" 2>&1 | tee "${LOG_DIR}/functional_anchor_camus_anchor_pretrain.log"
+  run_one 1 functional_anchor_camus_joint_residual functional_anchor_camus_joint_residual camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 "${PROJECT_DIR}/${LOG_DIR}/functional_anchor_camus_joint_residual.log" 2>&1 | tee "${LOG_DIR}/functional_anchor_camus_joint_residual.log"
 }
 
 tmux new-session -d -s "${SESSION_NAME}" -n echo "cd '${PROJECT_DIR}' && echo '[\$(date +%F\\ %T)] START functional anchor echo queue' && $(declare -f run_one run_echo_queue); COMMON_ARGS=($(printf '%q ' "${COMMON_ARGS[@]}")); PROJECT_DIR='${PROJECT_DIR}'; UV_BIN='${UV_BIN}'; DATASETS_ROOT='${DATASETS_ROOT}'; LOG_DIR='${LOG_DIR}'; run_echo_queue; echo '[\$(date +%F\\ %T)] END functional anchor echo queue'; exec bash"

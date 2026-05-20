@@ -59,6 +59,7 @@ ECHO_CMD="$(echo_cmd 0 gdkvm_echo gdkvm_echo \
   dataset_name=echonet \
   data.protocol_name=echonet_ed2es_endpoint \
   "data_path=${DATASETS_ROOT}/processed/echonet_png128_10f" \
+  "mlflow.command_log_path=${PROJECT_DIR}/${LOG_DIR}/gdkvm_echo.log" \
   main_training.batch_size=20 \
   main_training.num_workers=10)"
 
@@ -67,6 +68,7 @@ CAMUS_CMD="$(echo_cmd 1 gdkvm_camus gdkvm_camus \
   dataset_name=camus \
   data.protocol_name=camus_short_dense \
   "data_path=${DATASETS_ROOT}/processed/camus_png256_10f" \
+  "mlflow.command_log_path=${PROJECT_DIR}/${LOG_DIR}/gdkvm_camus.log" \
   main_training.batch_size=8 \
   main_training.num_workers=8)"
 

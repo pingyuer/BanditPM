@@ -13,6 +13,7 @@ mlflow:
   experiment_name: null
   run_name: null
   resume_run_id: null
+  command_log_path: null
 
 log_text_interval: 100
 log_image_interval: 500
@@ -28,3 +29,4 @@ eval_stage:
   final_test: true
   test_every_eval: true
   test_interval: 0
+  num_vis: 2

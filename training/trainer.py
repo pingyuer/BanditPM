@@ -442,6 +442,12 @@ class Trainer:
             "iou_video_mean": metrics.get("iou_video_mean", 0.0),
             "hd95_resized": metrics.get("hd95_resized", 0.0),
             "hd95_original": metrics.get("hd95_original", 0.0),
+            "ed_dice": metrics.get("ed_dice", 0.0),
+            "es_dice": metrics.get("es_dice", 0.0),
+            "ed_hd95": metrics.get("ed_hd95", 0.0),
+            "es_hd95": metrics.get("es_hd95", 0.0),
+            "overall_dice": metrics.get("overall_dice", metrics.get("dice", 0.0)),
+            "overall_hd95": metrics.get("overall_hd95", metrics.get("hd95", 0.0)),
             "assd_resized": metrics.get("assd_resized", 0.0),
             "assd_original": metrics.get("assd_original", 0.0),
             "temporal_drift": metrics.get("temporal_drift", 0.0),
@@ -544,6 +550,7 @@ class Trainer:
         self._move_to_device(data)
         data["init_mode"] = self._resolve_phase_init("train")
         data["current_iter"] = it
+        data["global_step"] = it
         data["current_epoch"] = it // max(len(self.train_loader), 1)
         data["iters_per_epoch"] = max(len(self.train_loader), 1)
 
@@ -603,6 +610,7 @@ class Trainer:
                 self._log_dynakey_stats(data, it)
                 self._log_anchor_ode_stats(data, it)
                 self._log_functional_anchor_stats(data, it)
+                self._log_functional_anchor_grad_stats(it)
 
         return loss.detach()
 
@@ -626,14 +634,63 @@ class Trainer:
                 ("lambda_functional_anchor_phase_slot", "phase_slot_correlation"),
                 ("lambda_functional_anchor_trust_l1", "trust_l1"),
                 ("lambda_functional_anchor_trust_entropy", "trust_entropy"),
+                ("lambda_functional_anchor_ode_raw_delta", "ode_raw_delta"),
             ):
                 if hasattr(self.loss_computer, attr):
                     log_dict[f"lambda_functional_anchor_{name}"] = getattr(self.loss_computer, attr)
+            for group in self.optimizer.param_groups:
+                name = group.get("name")
+                if name == "functional_anchor_residual_heads":
+                    log_dict["residual_head_lr"] = group.get("lr", 0.0)
+            if str(self.cfg.get("model", {}).get("name", "")).lower() == "functional_anchor":
+                model = self.model_without_ddp
+                if hasattr(model, "_anchor_temperature"):
+                    temp = model._anchor_temperature(self.device, torch.float32)
+                    log_dict["anchor_temperature"] = float(temp.detach().item())
+                if hasattr(model, "_residual_scale_at"):
+                    scale = model._residual_scale_at({"current_iter": it}, self.device, torch.float32)
+                    log_dict["residual_scale"] = float(scale.detach().item())
             logger = getattr(self, "mlflow_logger", None)
             if logger is not None:
                 logger.log_train_step(log_dict, step=it)
         except Exception:
             pass
+
+    def _grad_norm_for_prefixes(self, prefixes: tuple[str, ...]) -> float | None:
+        total = 0.0
+        found = False
+        for name, param in self.model_without_ddp.named_parameters():
+            if not any(name.startswith(prefix) for prefix in prefixes):
+                continue
+            if param.grad is None:
+                continue
+            found = True
+            total += float(param.grad.detach().float().pow(2).sum().item())
+        if not found:
+            return None
+        return total ** 0.5
+
+    def _log_functional_anchor_grad_stats(self, it: int) -> None:
+        if str(self.cfg.get("model", {}).get("name", "")).lower() != "functional_anchor":
+            return
+        metrics = {}
+        for key, prefixes in {
+            "grad/residual_head": ("residual_heads.",),
+            "grad/shape_residual_head": ("residual_heads.shape_head.",),
+            "grad/boundary_residual_head": ("residual_heads.boundary_head.",),
+            "grad/trust_head": ("residual_heads.confidence_head.",),
+            "grad/anchor_decoder": ("anchor_decoder.",),
+            "grad/ode_state": ("state_ode.",),
+            "grad/slot_predictor": ("anchor_bank.selector.",),
+        }.items():
+            value = self._grad_norm_for_prefixes(prefixes)
+            if value is not None:
+                metrics[key] = value
+        temp = getattr(self.model_without_ddp, "anchor_temperature_raw", None)
+        if isinstance(temp, torch.nn.Parameter) and temp.grad is not None:
+            metrics["grad/anchor_temperature"] = float(temp.grad.detach().abs().item())
+        if metrics:
+            self._log_metrics(metrics, step=it)
 
     def _log_bpm_stats(self, data, it: int) -> None:
         bpm_keys = sorted(k for k in data.keys() if k.startswith("bpm_aux_"))
@@ -993,11 +1050,32 @@ class Trainer:
                 "confidence_std": [],
                 "trust_mean": [],
                 "trust_std": [],
+                "trust_spatial_std": [],
+                "trust_disagreement_corr": [],
                 "anchor_trust_ratio": [],
                 "image_trust_ratio": [],
                 "residual_abs_mean": [],
                 "residual_abs_max": [],
+                "residual_clip_hit_ratio": [],
+                "residual_scale": [],
                 "delta_abs_mean": [],
+                "base_logit_abs_mean": [],
+                "anchor_logit_abs_mean": [],
+                "proposal_logit_abs_mean": [],
+                "final_logit_abs_mean": [],
+                "base_logit_std": [],
+                "anchor_logit_std": [],
+                "proposal_logit_std": [],
+                "final_logit_std": [],
+                "base_prob_mean": [],
+                "anchor_prob_mean": [],
+                "proposal_prob_mean": [],
+                "final_prob_mean": [],
+                "anchor_temperature": [],
+                "early_systole_slot_usage": [],
+                "early_diastole_slot_usage": [],
+                "uncertain_slot_usage": [],
+                "slot_max_prob": [],
             }
             for key in memory_keys:
                 aux = data.get(key)
@@ -1071,6 +1149,187 @@ class Trainer:
     @staticmethod
     def _threshold_key(threshold: float) -> str:
         return f"thr_{threshold:.2f}".replace(".", "p")
+
+    @staticmethod
+    def _metric_totals_template() -> dict[str, float]:
+        return {
+            "dice_frame_sum": 0.0,
+            "dice_frame_count": 0.0,
+            "iou_frame_sum": 0.0,
+            "iou_frame_count": 0.0,
+            "dice_video_sum": 0.0,
+            "dice_video_count": 0.0,
+            "iou_video_sum": 0.0,
+            "iou_video_count": 0.0,
+            "hd95_resized_sum": 0.0,
+            "hd95_resized_count": 0.0,
+            "hd95_original_sum": 0.0,
+            "hd95_original_count": 0.0,
+            "ed_dice_sum": 0.0,
+            "ed_dice_count": 0.0,
+            "es_dice_sum": 0.0,
+            "es_dice_count": 0.0,
+            "ed_hd95_resized_sum": 0.0,
+            "ed_hd95_original_sum": 0.0,
+            "ed_hd95_count": 0.0,
+            "es_hd95_resized_sum": 0.0,
+            "es_hd95_original_sum": 0.0,
+            "es_hd95_count": 0.0,
+            "assd_resized_sum": 0.0,
+            "assd_resized_count": 0.0,
+            "assd_original_sum": 0.0,
+            "assd_original_count": 0.0,
+            "precision_sum": 0.0,
+            "recall_sum": 0.0,
+            "acc_sum": 0.0,
+            "sp_sum": 0.0,
+            "F1_sum": 0.0,
+            "conf_count": 0.0,
+            "temporal_drift_sum": 0.0,
+            "temporal_drift_count": 0.0,
+            "temporal_dice_consistency_sum": 0.0,
+            "temporal_dice_consistency_count": 0.0,
+            "area_smoothness_sum": 0.0,
+            "area_smoothness_count": 0.0,
+            "centroid_jitter_sum": 0.0,
+            "centroid_jitter_count": 0.0,
+            "gate_mean_sum": 0.0,
+            "residual_abs_mean_sum": 0.0,
+            "memory_update_rate_sum": 0.0,
+            "teacher_forcing_prob_sum": 0.0,
+            "base_only_dice_sum": 0.0,
+            "base_only_dice_count": 0.0,
+            "guided_only_dice_sum": 0.0,
+            "guided_only_dice_count": 0.0,
+            "prior_only_dice_sum": 0.0,
+            "prior_only_dice_count": 0.0,
+            "functional_anchor_base_dice_sum": 0.0,
+            "functional_anchor_base_dice_count": 0.0,
+            "functional_anchor_anchor_dice_sum": 0.0,
+            "functional_anchor_anchor_dice_count": 0.0,
+            "functional_anchor_proposal_dice_sum": 0.0,
+            "functional_anchor_proposal_dice_count": 0.0,
+            "functional_anchor_base_area_range_sum": 0.0,
+            "functional_anchor_base_area_std_sum": 0.0,
+            "functional_anchor_base_area_count": 0.0,
+            "functional_anchor_anchor_area_range_sum": 0.0,
+            "functional_anchor_anchor_area_std_sum": 0.0,
+            "functional_anchor_anchor_area_count": 0.0,
+            "functional_anchor_proposal_area_range_sum": 0.0,
+            "functional_anchor_proposal_area_std_sum": 0.0,
+            "functional_anchor_proposal_area_count": 0.0,
+            "functional_anchor_final_area_range_sum": 0.0,
+            "functional_anchor_final_area_std_sum": 0.0,
+            "functional_anchor_final_area_count": 0.0,
+            "functional_anchor_ed_es_area_gap_sum": 0.0,
+            "functional_anchor_ed_es_area_ratio_sum": 0.0,
+            "functional_anchor_ed_es_area_count": 0.0,
+            "functional_anchor_residual_l1_sum": 0.0,
+            "functional_anchor_residual_l2_sum": 0.0,
+            "functional_anchor_residual_boundary_ratio_sum": 0.0,
+            "functional_anchor_shape_residual_norm_sum": 0.0,
+            "functional_anchor_boundary_residual_norm_sum": 0.0,
+            "functional_anchor_slot_entropy_sum": 0.0,
+            "functional_anchor_ed_slot_usage_sum": 0.0,
+            "functional_anchor_early_systole_slot_usage_sum": 0.0,
+            "functional_anchor_es_slot_usage_sum": 0.0,
+            "functional_anchor_early_diastole_slot_usage_sum": 0.0,
+            "functional_anchor_uncertain_slot_usage_sum": 0.0,
+            "functional_anchor_slot_max_prob_sum": 0.0,
+            "functional_anchor_slot_area_order_violation_sum": 0.0,
+            "functional_anchor_gate_low_sum": 0.0,
+            "functional_anchor_gate_mid_sum": 0.0,
+            "functional_anchor_gate_high_sum": 0.0,
+            "functional_anchor_confidence_mean_sum": 0.0,
+            "functional_anchor_confidence_std_sum": 0.0,
+            "functional_anchor_anchor_trust_ratio_sum": 0.0,
+            "functional_anchor_image_trust_ratio_sum": 0.0,
+            "functional_anchor_trust_mean_sum": 0.0,
+            "functional_anchor_trust_std_sum": 0.0,
+            "functional_anchor_trust_spatial_std_sum": 0.0,
+            "functional_anchor_trust_disagreement_corr_sum": 0.0,
+            "functional_anchor_residual_abs_mean_sum": 0.0,
+            "functional_anchor_residual_abs_max_sum": 0.0,
+            "functional_anchor_residual_clip_hit_ratio_sum": 0.0,
+            "functional_anchor_residual_scale_sum": 0.0,
+            "functional_anchor_delta_abs_mean_sum": 0.0,
+            "functional_anchor_base_logit_abs_mean_sum": 0.0,
+            "functional_anchor_anchor_logit_abs_mean_sum": 0.0,
+            "functional_anchor_proposal_logit_abs_mean_sum": 0.0,
+            "functional_anchor_final_logit_abs_mean_sum": 0.0,
+            "functional_anchor_base_logit_std_sum": 0.0,
+            "functional_anchor_anchor_logit_std_sum": 0.0,
+            "functional_anchor_proposal_logit_std_sum": 0.0,
+            "functional_anchor_final_logit_std_sum": 0.0,
+            "functional_anchor_base_prob_mean_sum": 0.0,
+            "functional_anchor_anchor_prob_mean_sum": 0.0,
+            "functional_anchor_proposal_prob_mean_sum": 0.0,
+            "functional_anchor_final_prob_mean_sum": 0.0,
+            "functional_anchor_anchor_temperature_sum": 0.0,
+            "functional_anchor_slot_order_loss_sum": 0.0,
+            "functional_anchor_slot_area_ed_sum": 0.0,
+            "functional_anchor_slot_area_early_systole_sum": 0.0,
+            "functional_anchor_slot_area_es_sum": 0.0,
+            "functional_anchor_slot_area_early_diastole_sum": 0.0,
+            "functional_anchor_slot_area_uncertain_sum": 0.0,
+            "functional_anchor_phase_source_sum": 0.0,
+            "functional_anchor_phase_source_metadata_ratio_sum": 0.0,
+            "functional_anchor_phase_source_area_ratio_sum": 0.0,
+            "functional_anchor_phase_source_time_ratio_sum": 0.0,
+            "functional_anchor_phase_reliability_sum": 0.0,
+            "functional_anchor_phase_reliability_std_sum": 0.0,
+            "functional_anchor_phase_reliability_min_sum": 0.0,
+            "functional_anchor_phase_reliability_low_ratio_sum": 0.0,
+            "functional_anchor_state_norm_sum": 0.0,
+            "functional_anchor_state_delta_norm_sum": 0.0,
+            "functional_anchor_state_update_norm_sum": 0.0,
+            "functional_anchor_state_delta_ratio_sum": 0.0,
+            "functional_anchor_ode_raw_delta_norm_sum": 0.0,
+            "functional_anchor_ode_clamp_ratio_sum": 0.0,
+            "functional_anchor_ode_update_norm_sum": 0.0,
+            "functional_anchor_inject_gate_low_sum": 0.0,
+            "functional_anchor_inject_gate_mid_sum": 0.0,
+            "functional_anchor_inject_gate_high_sum": 0.0,
+            "functional_anchor_inject_gate_dec_sum": 0.0,
+            "functional_anchor_aux_count": 0.0,
+            "aux_count": 0.0,
+        }
+
+    @staticmethod
+    def _batch_scalar_index(batch_data: dict, key: str, bi: int) -> int | None:
+        value = batch_data.get(key)
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            if value.numel() == 0:
+                return None
+            item = value.detach().flatten()[bi if value.numel() > bi else 0]
+            return int(item.item())
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            item = value[bi] if len(value) > bi else value[0]
+            return int(item)
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    def _resolve_phase_eval_frames(self, batch_data: dict, bi: int, sample_eval_indices: list[int]) -> tuple[int | None, int | None]:
+        if not sample_eval_indices:
+            return None, None
+        eval_set = set(int(idx) for idx in sample_eval_indices)
+        ed_idx = self._batch_scalar_index(batch_data, "ed_frame", bi)
+        es_idx = self._batch_scalar_index(batch_data, "es_frame", bi)
+        if ed_idx is None:
+            ed_idx = sample_eval_indices[0]
+        elif ed_idx not in eval_set:
+            ed_idx = None
+        if es_idx is None:
+            es_idx = sample_eval_indices[-1]
+        elif es_idx not in eval_set:
+            es_idx = None
+        return ed_idx, es_idx
 
     def _tta_cfg(self):
         return self.cfg.get("evaluation", {}).get("tta", {})
@@ -1288,6 +1547,8 @@ class Trainer:
             data_loader.sampler.set_epoch(epoch)
 
         visual_artifacts = []
+        per_frame_metrics = []
+        per_video_metrics = []
         try:
             with torch.no_grad():
                 for batch_idx, batch_data in enumerate(data_loader):
@@ -1372,6 +1633,21 @@ class Trainer:
                             "functional_anchor_anchor_dice_count": 0.0,
                             "functional_anchor_proposal_dice_sum": 0.0,
                             "functional_anchor_proposal_dice_count": 0.0,
+                            "functional_anchor_base_area_range_sum": 0.0,
+                            "functional_anchor_base_area_std_sum": 0.0,
+                            "functional_anchor_base_area_count": 0.0,
+                            "functional_anchor_anchor_area_range_sum": 0.0,
+                            "functional_anchor_anchor_area_std_sum": 0.0,
+                            "functional_anchor_anchor_area_count": 0.0,
+                            "functional_anchor_proposal_area_range_sum": 0.0,
+                            "functional_anchor_proposal_area_std_sum": 0.0,
+                            "functional_anchor_proposal_area_count": 0.0,
+                            "functional_anchor_final_area_range_sum": 0.0,
+                            "functional_anchor_final_area_std_sum": 0.0,
+                            "functional_anchor_final_area_count": 0.0,
+                            "functional_anchor_ed_es_area_gap_sum": 0.0,
+                            "functional_anchor_ed_es_area_ratio_sum": 0.0,
+                            "functional_anchor_ed_es_area_count": 0.0,
                             "functional_anchor_residual_l1_sum": 0.0,
                             "functional_anchor_residual_l2_sum": 0.0,
                             "functional_anchor_residual_boundary_ratio_sum": 0.0,
@@ -1379,7 +1655,11 @@ class Trainer:
                             "functional_anchor_boundary_residual_norm_sum": 0.0,
                             "functional_anchor_slot_entropy_sum": 0.0,
                             "functional_anchor_ed_slot_usage_sum": 0.0,
+                            "functional_anchor_early_systole_slot_usage_sum": 0.0,
                             "functional_anchor_es_slot_usage_sum": 0.0,
+                            "functional_anchor_early_diastole_slot_usage_sum": 0.0,
+                            "functional_anchor_uncertain_slot_usage_sum": 0.0,
+                            "functional_anchor_slot_max_prob_sum": 0.0,
                             "functional_anchor_slot_area_order_violation_sum": 0.0,
                             "functional_anchor_gate_low_sum": 0.0,
                             "functional_anchor_gate_mid_sum": 0.0,
@@ -1390,10 +1670,26 @@ class Trainer:
                             "functional_anchor_image_trust_ratio_sum": 0.0,
                             "functional_anchor_trust_mean_sum": 0.0,
                             "functional_anchor_trust_std_sum": 0.0,
+                            "functional_anchor_trust_spatial_std_sum": 0.0,
+                            "functional_anchor_trust_disagreement_corr_sum": 0.0,
                             "functional_anchor_residual_abs_mean_sum": 0.0,
                             "functional_anchor_residual_abs_max_sum": 0.0,
                             "functional_anchor_residual_clip_hit_ratio_sum": 0.0,
+                            "functional_anchor_residual_scale_sum": 0.0,
                             "functional_anchor_delta_abs_mean_sum": 0.0,
+                            "functional_anchor_base_logit_abs_mean_sum": 0.0,
+                            "functional_anchor_anchor_logit_abs_mean_sum": 0.0,
+                            "functional_anchor_proposal_logit_abs_mean_sum": 0.0,
+                            "functional_anchor_final_logit_abs_mean_sum": 0.0,
+                            "functional_anchor_base_logit_std_sum": 0.0,
+                            "functional_anchor_anchor_logit_std_sum": 0.0,
+                            "functional_anchor_proposal_logit_std_sum": 0.0,
+                            "functional_anchor_final_logit_std_sum": 0.0,
+                            "functional_anchor_base_prob_mean_sum": 0.0,
+                            "functional_anchor_anchor_prob_mean_sum": 0.0,
+                            "functional_anchor_proposal_prob_mean_sum": 0.0,
+                            "functional_anchor_final_prob_mean_sum": 0.0,
+                            "functional_anchor_anchor_temperature_sum": 0.0,
                             "functional_anchor_slot_order_loss_sum": 0.0,
                             "functional_anchor_slot_area_ed_sum": 0.0,
                             "functional_anchor_slot_area_early_systole_sum": 0.0,
@@ -1405,11 +1701,15 @@ class Trainer:
                             "functional_anchor_phase_source_area_ratio_sum": 0.0,
                             "functional_anchor_phase_source_time_ratio_sum": 0.0,
                             "functional_anchor_phase_reliability_sum": 0.0,
+                            "functional_anchor_phase_reliability_std_sum": 0.0,
+                            "functional_anchor_phase_reliability_min_sum": 0.0,
+                            "functional_anchor_phase_reliability_low_ratio_sum": 0.0,
                             "functional_anchor_state_norm_sum": 0.0,
                             "functional_anchor_state_delta_norm_sum": 0.0,
                             "functional_anchor_state_update_norm_sum": 0.0,
                             "functional_anchor_state_delta_ratio_sum": 0.0,
                             "functional_anchor_ode_raw_delta_norm_sum": 0.0,
+                            "functional_anchor_ode_clamp_ratio_sum": 0.0,
                             "functional_anchor_ode_update_norm_sum": 0.0,
                             "functional_anchor_inject_gate_low_sum": 0.0,
                             "functional_anchor_inject_gate_mid_sum": 0.0,
@@ -1422,6 +1722,8 @@ class Trainer:
                             key = self._threshold_key(thr)
                             metric_totals[f"{key}_dice_sum"] = 0.0
                             metric_totals[f"{key}_dice_count"] = 0.0
+                        for key, value in self._metric_totals_template().items():
+                            metric_totals.setdefault(key, value)
 
                     conf_pred_frames = []
                     conf_gt_frames = []
@@ -1430,8 +1732,13 @@ class Trainer:
                         sample_dice = []
                         sample_iou = []
                         drift_values = []
+                        base_area_values = []
+                        anchor_area_values = []
+                        proposal_area_values = []
+                        final_area_values = []
                         original_sizes = batch_data.get("original_size")
                         sample_eval_indices = torch.nonzero(eval_indices[bi], as_tuple=False).flatten().tolist()
+                        ed_frame, es_frame = self._resolve_phase_eval_frames(batch_data, bi, sample_eval_indices)
                         for ti in sample_eval_indices:
                             pred = out[f"masks_{ti}"][bi:bi + 1]
                             if pred.shape[1] > 1:
@@ -1462,6 +1769,15 @@ class Trainer:
                                         metric_totals[f"{prefix}_dice_count"] += 1.0
                             functional_aux = memory_aux.get("functional_anchor_aux") if isinstance(memory_aux, dict) else None
                             if isinstance(functional_aux, dict):
+                                required_logits = (
+                                    "base_object_logits",
+                                    "anchor_logits",
+                                    "proposal_logits",
+                                    "final_object_logits",
+                                )
+                                missing_logits = [name for name in required_logits if not torch.is_tensor(functional_aux.get(name))]
+                                if missing_logits:
+                                    raise KeyError(f"Missing Functional-UNeXt logits in functional_anchor_aux: {missing_logits}")
                                 for src, prefix in (
                                     ("base_object_logits", "functional_anchor_base"),
                                     ("anchor_logits", "functional_anchor_anchor"),
@@ -1474,6 +1790,14 @@ class Trainer:
                                         aux_dice, _ = self._binary_overlap_metrics(aux_bin, gt_frame)
                                         metric_totals[f"{prefix}_dice_sum"] += aux_dice
                                         metric_totals[f"{prefix}_dice_count"] += 1.0
+                                        area_value = aux_bin.float().mean().detach()
+                                        if prefix == "functional_anchor_base":
+                                            base_area_values.append(area_value)
+                                        elif prefix == "functional_anchor_anchor":
+                                            anchor_area_values.append(area_value)
+                                        elif prefix == "functional_anchor_proposal":
+                                            proposal_area_values.append(area_value)
+                                final_area_values.append(pred_bin.float().mean().detach())
                                 residual = functional_aux.get("residual_logits")
                                 boundary = functional_aux.get("boundary_residual_logits")
                                 shape = functional_aux.get("shape_residual_logits")
@@ -1493,7 +1817,11 @@ class Trainer:
                                 for src, dst in (
                                     ("slot_entropy", "functional_anchor_slot_entropy_sum"),
                                     ("ed_slot_usage", "functional_anchor_ed_slot_usage_sum"),
+                                    ("early_systole_slot_usage", "functional_anchor_early_systole_slot_usage_sum"),
                                     ("es_slot_usage", "functional_anchor_es_slot_usage_sum"),
+                                    ("early_diastole_slot_usage", "functional_anchor_early_diastole_slot_usage_sum"),
+                                    ("uncertain_slot_usage", "functional_anchor_uncertain_slot_usage_sum"),
+                                    ("slot_max_prob", "functional_anchor_slot_max_prob_sum"),
                                     ("slot_area_order_violation", "functional_anchor_slot_area_order_violation_sum"),
                                     ("slot_order_loss", "functional_anchor_slot_order_loss_sum"),
                                     ("slot_area_ed", "functional_anchor_slot_area_ed_sum"),
@@ -1517,10 +1845,26 @@ class Trainer:
                                     ("confidence_std", "functional_anchor_confidence_std_sum"),
                                     ("trust_mean", "functional_anchor_trust_mean_sum"),
                                     ("trust_std", "functional_anchor_trust_std_sum"),
+                                    ("trust_spatial_std", "functional_anchor_trust_spatial_std_sum"),
+                                    ("trust_disagreement_corr", "functional_anchor_trust_disagreement_corr_sum"),
                                     ("residual_abs_mean", "functional_anchor_residual_abs_mean_sum"),
                                     ("residual_abs_max", "functional_anchor_residual_abs_max_sum"),
                                     ("residual_clip_hit_ratio", "functional_anchor_residual_clip_hit_ratio_sum"),
+                                    ("residual_scale", "functional_anchor_residual_scale_sum"),
                                     ("delta_abs_mean", "functional_anchor_delta_abs_mean_sum"),
+                                    ("base_logit_abs_mean", "functional_anchor_base_logit_abs_mean_sum"),
+                                    ("anchor_logit_abs_mean", "functional_anchor_anchor_logit_abs_mean_sum"),
+                                    ("proposal_logit_abs_mean", "functional_anchor_proposal_logit_abs_mean_sum"),
+                                    ("final_logit_abs_mean", "functional_anchor_final_logit_abs_mean_sum"),
+                                    ("base_logit_std", "functional_anchor_base_logit_std_sum"),
+                                    ("anchor_logit_std", "functional_anchor_anchor_logit_std_sum"),
+                                    ("proposal_logit_std", "functional_anchor_proposal_logit_std_sum"),
+                                    ("final_logit_std", "functional_anchor_final_logit_std_sum"),
+                                    ("base_prob_mean", "functional_anchor_base_prob_mean_sum"),
+                                    ("anchor_prob_mean", "functional_anchor_anchor_prob_mean_sum"),
+                                    ("proposal_prob_mean", "functional_anchor_proposal_prob_mean_sum"),
+                                    ("final_prob_mean", "functional_anchor_final_prob_mean_sum"),
+                                    ("anchor_temperature", "functional_anchor_anchor_temperature_sum"),
                                     ("anchor_trust_ratio", "functional_anchor_anchor_trust_ratio_sum"),
                                     ("image_trust_ratio", "functional_anchor_image_trust_ratio_sum"),
                                     ("phase_source_metadata_ratio", "functional_anchor_phase_source_metadata_ratio_sum"),
@@ -1529,10 +1873,17 @@ class Trainer:
                                     ("state_update_norm", "functional_anchor_state_update_norm_sum"),
                                     ("state_delta_ratio", "functional_anchor_state_delta_ratio_sum"),
                                     ("ode_raw_delta_norm", "functional_anchor_ode_raw_delta_norm_sum"),
+                                    ("ode_clamp_ratio", "functional_anchor_ode_clamp_ratio_sum"),
                                 ):
                                     value = functional_aux.get(src)
                                     if torch.is_tensor(value):
                                         metric_totals[dst] += float(value.float().mean().item())
+                                phase_rel = functional_aux.get("phase_reliability")
+                                if torch.is_tensor(phase_rel):
+                                    rel = phase_rel.float()
+                                    metric_totals["functional_anchor_phase_reliability_std_sum"] += float(rel.std(unbiased=False).item())
+                                    metric_totals["functional_anchor_phase_reliability_min_sum"] += float(rel.min().item())
+                                    metric_totals["functional_anchor_phase_reliability_low_ratio_sum"] += float((rel < 0.5).float().mean().item())
                                 metric_totals["functional_anchor_aux_count"] += 1.0
 
                             dice_t, iou_t = self._binary_overlap_metrics(pred_bin, gt_frame)
@@ -1561,6 +1912,39 @@ class Trainer:
                             metric_totals["hd95_original_count"] += 1.0
                             metric_totals["assd_original_sum"] += assd_original
                             metric_totals["assd_original_count"] += 1.0
+
+                            phase_names = []
+                            if ed_frame is not None and int(ti) == int(ed_frame):
+                                phase_names.append("ed")
+                            if es_frame is not None and int(ti) == int(es_frame):
+                                phase_names.append("es")
+                            for phase_name in phase_names:
+                                metric_totals[f"{phase_name}_dice_sum"] += dice_t
+                                metric_totals[f"{phase_name}_dice_count"] += 1.0
+                                metric_totals[f"{phase_name}_hd95_resized_sum"] += hd95_resized
+                                metric_totals[f"{phase_name}_hd95_original_sum"] += hd95_original
+                                metric_totals[f"{phase_name}_hd95_count"] += 1.0
+
+                            if self.main_process:
+                                sample_name = ""
+                                info = batch_data.get("info", {})
+                                if isinstance(info, dict) and "name" in info:
+                                    name_value = info["name"]
+                                    sample_name = str(name_value[bi] if isinstance(name_value, (list, tuple)) and len(name_value) > bi else name_value)
+                                per_frame_metrics.append(
+                                    {
+                                        "mode": mode,
+                                        "iteration": int(it),
+                                        "video": sample_name,
+                                        "sample_index": int(bi),
+                                        "frame": int(ti),
+                                        "phase": ",".join(phase_names),
+                                        "dice": float(dice_t),
+                                        "iou": float(iou_t),
+                                        "hd95_resized": float(hd95_resized),
+                                        "hd95_original": float(hd95_original),
+                                    }
+                                )
 
                             conf_pred_frames.append(pred_bin)
                             conf_gt_frames.append(gt_frame)
@@ -1595,6 +1979,42 @@ class Trainer:
                         if sample_iou:
                             metric_totals["iou_video_sum"] += float(np.mean(sample_iou))
                             metric_totals["iou_video_count"] += 1.0
+                        if self.main_process and sample_dice:
+                            sample_name = ""
+                            info = batch_data.get("info", {})
+                            if isinstance(info, dict) and "name" in info:
+                                name_value = info["name"]
+                                sample_name = str(name_value[bi] if isinstance(name_value, (list, tuple)) and len(name_value) > bi else name_value)
+                            per_video_metrics.append(
+                                {
+                                    "mode": mode,
+                                    "iteration": int(it),
+                                    "video": sample_name,
+                                    "sample_index": int(bi),
+                                    "dice": float(np.mean(sample_dice)),
+                                    "iou": float(np.mean(sample_iou)) if sample_iou else 0.0,
+                                    "ed_frame": int(ed_frame) if ed_frame is not None else "",
+                                    "es_frame": int(es_frame) if es_frame is not None else "",
+                                }
+                            )
+                        for prefix, values in (
+                            ("base", base_area_values),
+                            ("anchor", anchor_area_values),
+                            ("proposal", proposal_area_values),
+                            ("final", final_area_values),
+                        ):
+                            if len(values) >= 2:
+                                series = torch.stack(values).float()
+                                metric_totals[f"functional_anchor_{prefix}_area_range_sum"] += float(series.max().item() - series.min().item())
+                                metric_totals[f"functional_anchor_{prefix}_area_std_sum"] += float(series.std(unbiased=False).item())
+                                metric_totals[f"functional_anchor_{prefix}_area_count"] += 1.0
+                        if len(final_area_values) >= 2:
+                            final_series = torch.stack(final_area_values).float()
+                            metric_totals["functional_anchor_ed_es_area_gap_sum"] += float((final_series[0] - final_series[-1]).item())
+                            metric_totals["functional_anchor_ed_es_area_ratio_sum"] += float(
+                                (final_series[0] / final_series[-1].clamp_min(1.0e-6)).item()
+                            )
+                            metric_totals["functional_anchor_ed_es_area_count"] += 1.0
                         if drift_values:
                             drift_mean = float(np.mean(drift_values))
                             metric_totals["temporal_drift_sum"] += drift_mean
@@ -1674,7 +2094,10 @@ class Trainer:
                     if self.main_process and batch_idx < vis_limit:
                         vis_path = self._visualize_batch(batch_data, out, batch_idx, it, epoch, mode)
                         if vis_path is not None:
-                            visual_artifacts.append(Path(vis_path))
+                            if isinstance(vis_path, (list, tuple)):
+                                visual_artifacts.extend(Path(path) for path in vis_path if path is not None)
+                            else:
+                                visual_artifacts.append(Path(vis_path))
 
             if "metric_totals" not in locals():
                 metric_totals = {
@@ -1724,6 +2147,21 @@ class Trainer:
                     "functional_anchor_anchor_dice_count": 0.0,
                     "functional_anchor_proposal_dice_sum": 0.0,
                     "functional_anchor_proposal_dice_count": 0.0,
+                    "functional_anchor_base_area_range_sum": 0.0,
+                    "functional_anchor_base_area_std_sum": 0.0,
+                    "functional_anchor_base_area_count": 0.0,
+                    "functional_anchor_anchor_area_range_sum": 0.0,
+                    "functional_anchor_anchor_area_std_sum": 0.0,
+                    "functional_anchor_anchor_area_count": 0.0,
+                    "functional_anchor_proposal_area_range_sum": 0.0,
+                    "functional_anchor_proposal_area_std_sum": 0.0,
+                    "functional_anchor_proposal_area_count": 0.0,
+                    "functional_anchor_final_area_range_sum": 0.0,
+                    "functional_anchor_final_area_std_sum": 0.0,
+                    "functional_anchor_final_area_count": 0.0,
+                    "functional_anchor_ed_es_area_gap_sum": 0.0,
+                    "functional_anchor_ed_es_area_ratio_sum": 0.0,
+                    "functional_anchor_ed_es_area_count": 0.0,
                     "functional_anchor_residual_l1_sum": 0.0,
                     "functional_anchor_residual_l2_sum": 0.0,
                     "functional_anchor_residual_boundary_ratio_sum": 0.0,
@@ -1731,7 +2169,11 @@ class Trainer:
                     "functional_anchor_boundary_residual_norm_sum": 0.0,
                     "functional_anchor_slot_entropy_sum": 0.0,
                     "functional_anchor_ed_slot_usage_sum": 0.0,
+                    "functional_anchor_early_systole_slot_usage_sum": 0.0,
                     "functional_anchor_es_slot_usage_sum": 0.0,
+                    "functional_anchor_early_diastole_slot_usage_sum": 0.0,
+                    "functional_anchor_uncertain_slot_usage_sum": 0.0,
+                    "functional_anchor_slot_max_prob_sum": 0.0,
                     "functional_anchor_slot_area_order_violation_sum": 0.0,
                     "functional_anchor_gate_low_sum": 0.0,
                     "functional_anchor_gate_mid_sum": 0.0,
@@ -1742,10 +2184,26 @@ class Trainer:
                     "functional_anchor_image_trust_ratio_sum": 0.0,
                     "functional_anchor_trust_mean_sum": 0.0,
                     "functional_anchor_trust_std_sum": 0.0,
+                    "functional_anchor_trust_spatial_std_sum": 0.0,
+                    "functional_anchor_trust_disagreement_corr_sum": 0.0,
                     "functional_anchor_residual_abs_mean_sum": 0.0,
                     "functional_anchor_residual_abs_max_sum": 0.0,
                     "functional_anchor_residual_clip_hit_ratio_sum": 0.0,
+                    "functional_anchor_residual_scale_sum": 0.0,
                     "functional_anchor_delta_abs_mean_sum": 0.0,
+                    "functional_anchor_base_logit_abs_mean_sum": 0.0,
+                    "functional_anchor_anchor_logit_abs_mean_sum": 0.0,
+                    "functional_anchor_proposal_logit_abs_mean_sum": 0.0,
+                    "functional_anchor_final_logit_abs_mean_sum": 0.0,
+                    "functional_anchor_base_logit_std_sum": 0.0,
+                    "functional_anchor_anchor_logit_std_sum": 0.0,
+                    "functional_anchor_proposal_logit_std_sum": 0.0,
+                    "functional_anchor_final_logit_std_sum": 0.0,
+                    "functional_anchor_base_prob_mean_sum": 0.0,
+                    "functional_anchor_anchor_prob_mean_sum": 0.0,
+                    "functional_anchor_proposal_prob_mean_sum": 0.0,
+                    "functional_anchor_final_prob_mean_sum": 0.0,
+                    "functional_anchor_anchor_temperature_sum": 0.0,
                     "functional_anchor_slot_order_loss_sum": 0.0,
                     "functional_anchor_slot_area_ed_sum": 0.0,
                     "functional_anchor_slot_area_early_systole_sum": 0.0,
@@ -1757,11 +2215,15 @@ class Trainer:
                     "functional_anchor_phase_source_area_ratio_sum": 0.0,
                     "functional_anchor_phase_source_time_ratio_sum": 0.0,
                     "functional_anchor_phase_reliability_sum": 0.0,
+                    "functional_anchor_phase_reliability_std_sum": 0.0,
+                    "functional_anchor_phase_reliability_min_sum": 0.0,
+                    "functional_anchor_phase_reliability_low_ratio_sum": 0.0,
                     "functional_anchor_state_norm_sum": 0.0,
                     "functional_anchor_state_delta_norm_sum": 0.0,
                     "functional_anchor_state_update_norm_sum": 0.0,
                     "functional_anchor_state_delta_ratio_sum": 0.0,
                     "functional_anchor_ode_raw_delta_norm_sum": 0.0,
+                    "functional_anchor_ode_clamp_ratio_sum": 0.0,
                     "functional_anchor_ode_update_norm_sum": 0.0,
                     "functional_anchor_inject_gate_low_sum": 0.0,
                     "functional_anchor_inject_gate_mid_sum": 0.0,
@@ -1774,6 +2236,8 @@ class Trainer:
                     key = self._threshold_key(thr)
                     metric_totals[f"{key}_dice_sum"] = 0.0
                     metric_totals[f"{key}_dice_count"] = 0.0
+                for key, value in self._metric_totals_template().items():
+                    metric_totals.setdefault(key, value)
 
             global_metrics = self._reduce_metric_totals(metric_totals)
             threshold_metrics = {
@@ -1823,6 +2287,8 @@ class Trainer:
                 iteration=int(it),
                 epoch=int(epoch),
                 summary_metrics=global_metrics,
+                per_video_metrics=per_video_metrics if self.main_process else [],
+                per_frame_metrics=per_frame_metrics if self.main_process else [],
                 threshold_sweep=threshold_sweep,
                 postprocess=postprocess,
                 visual_artifacts=visual_artifacts,
@@ -1867,6 +2333,8 @@ class Trainer:
             return reduced[sum_key] / count if count > 0 else 0.0
 
         metric_space = str(self.cfg.get("evaluation", {}).get("metric_space", "original"))
+        ed_hd95 = mean("ed_hd95_original_sum", "ed_hd95_count") if metric_space == "original" else mean("ed_hd95_resized_sum", "ed_hd95_count")
+        es_hd95 = mean("es_hd95_original_sum", "es_hd95_count") if metric_space == "original" else mean("es_hd95_resized_sum", "es_hd95_count")
         metrics = {
             "dice_frame_mean": mean("dice_frame_sum", "dice_frame_count"),
             "dice_video_mean": mean("dice_video_sum", "dice_video_count"),
@@ -1874,6 +2342,14 @@ class Trainer:
             "iou_video_mean": mean("iou_video_sum", "iou_video_count"),
             "hd95_resized": mean("hd95_resized_sum", "hd95_resized_count"),
             "hd95_original": mean("hd95_original_sum", "hd95_original_count"),
+            "ed_dice": mean("ed_dice_sum", "ed_dice_count"),
+            "es_dice": mean("es_dice_sum", "es_dice_count"),
+            "ed_hd95_resized": mean("ed_hd95_resized_sum", "ed_hd95_count"),
+            "ed_hd95_original": mean("ed_hd95_original_sum", "ed_hd95_count"),
+            "es_hd95_resized": mean("es_hd95_resized_sum", "es_hd95_count"),
+            "es_hd95_original": mean("es_hd95_original_sum", "es_hd95_count"),
+            "ed_hd95": ed_hd95,
+            "es_hd95": es_hd95,
             "assd_resized": mean("assd_resized_sum", "assd_resized_count"),
             "assd_original": mean("assd_original_sum", "assd_original_count"),
             "precision": mean("precision_sum", "conf_count"),
@@ -1897,6 +2373,8 @@ class Trainer:
             "guided_only_dice_frame_mean": mean("guided_only_dice_sum", "guided_only_dice_count"),
             "prior_only_dice_frame_mean": mean("prior_only_dice_sum", "prior_only_dice_count"),
         }
+        metrics["overall_dice"] = metrics["dice"]
+        metrics["overall_hd95"] = metrics["hd95"]
         if reduced.get("base_only_dice_count", 0.0) > 0:
             metrics["anchor_ode/final_dice"] = metrics["dice_frame_mean"]
             metrics["anchor_ode/base_dice"] = metrics["base_only_dice_frame_mean"]
@@ -1910,6 +2388,16 @@ class Trainer:
                     "functional_anchor/base_dice": mean("functional_anchor_base_dice_sum", "functional_anchor_base_dice_count"),
                     "functional_anchor/anchor_only_dice": mean("functional_anchor_anchor_dice_sum", "functional_anchor_anchor_dice_count"),
                     "functional_anchor/proposal_dice": mean("functional_anchor_proposal_dice_sum", "functional_anchor_proposal_dice_count"),
+                    "functional_anchor/base_area_range": mean("functional_anchor_base_area_range_sum", "functional_anchor_base_area_count"),
+                    "functional_anchor/base_area_std": mean("functional_anchor_base_area_std_sum", "functional_anchor_base_area_count"),
+                    "functional_anchor/anchor_area_range": mean("functional_anchor_anchor_area_range_sum", "functional_anchor_anchor_area_count"),
+                    "functional_anchor/anchor_area_std": mean("functional_anchor_anchor_area_std_sum", "functional_anchor_anchor_area_count"),
+                    "functional_anchor/proposal_area_range": mean("functional_anchor_proposal_area_range_sum", "functional_anchor_proposal_area_count"),
+                    "functional_anchor/proposal_area_std": mean("functional_anchor_proposal_area_std_sum", "functional_anchor_proposal_area_count"),
+                    "functional_anchor/final_area_range": mean("functional_anchor_final_area_range_sum", "functional_anchor_final_area_count"),
+                    "functional_anchor/final_area_std": mean("functional_anchor_final_area_std_sum", "functional_anchor_final_area_count"),
+                    "functional_anchor/ED_ES_area_gap": mean("functional_anchor_ed_es_area_gap_sum", "functional_anchor_ed_es_area_count"),
+                    "functional_anchor/ED_ES_area_ratio": mean("functional_anchor_ed_es_area_ratio_sum", "functional_anchor_ed_es_area_count"),
                     "functional_anchor/residual_l1": mean("functional_anchor_residual_l1_sum", "functional_anchor_aux_count"),
                     "functional_anchor/residual_l2": mean("functional_anchor_residual_l2_sum", "functional_anchor_aux_count"),
                     "functional_anchor/residual_boundary_ratio": mean("functional_anchor_residual_boundary_ratio_sum", "functional_anchor_aux_count"),
@@ -1917,7 +2405,13 @@ class Trainer:
                     "functional_anchor/boundary_residual_norm": mean("functional_anchor_boundary_residual_norm_sum", "functional_anchor_aux_count"),
                     "functional_anchor/slot_entropy": mean("functional_anchor_slot_entropy_sum", "functional_anchor_aux_count"),
                     "functional_anchor/ED_slot_usage": mean("functional_anchor_ed_slot_usage_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/slot_usage_ed": mean("functional_anchor_ed_slot_usage_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/slot_usage_early_systole": mean("functional_anchor_early_systole_slot_usage_sum", "functional_anchor_aux_count"),
                     "functional_anchor/ES_slot_usage": mean("functional_anchor_es_slot_usage_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/slot_usage_es": mean("functional_anchor_es_slot_usage_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/slot_usage_early_diastole": mean("functional_anchor_early_diastole_slot_usage_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/slot_usage_uncertain": mean("functional_anchor_uncertain_slot_usage_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/slot_max_prob_mean": mean("functional_anchor_slot_max_prob_sum", "functional_anchor_aux_count"),
                     "functional_anchor/slot_area_order_violation": mean("functional_anchor_slot_area_order_violation_sum", "functional_anchor_aux_count"),
                     "functional_anchor/gate_mean_low": mean("functional_anchor_gate_low_sum", "functional_anchor_aux_count"),
                     "functional_anchor/gate_mean_mid": mean("functional_anchor_gate_mid_sum", "functional_anchor_aux_count"),
@@ -1928,10 +2422,26 @@ class Trainer:
                     "functional_anchor/image_trust_ratio": mean("functional_anchor_image_trust_ratio_sum", "functional_anchor_aux_count"),
                     "functional_anchor/trust_mean": mean("functional_anchor_trust_mean_sum", "functional_anchor_aux_count"),
                     "functional_anchor/trust_std": mean("functional_anchor_trust_std_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/trust_spatial_std": mean("functional_anchor_trust_spatial_std_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/trust_disagreement_corr": mean("functional_anchor_trust_disagreement_corr_sum", "functional_anchor_aux_count"),
                     "functional_anchor/residual_abs_mean": mean("functional_anchor_residual_abs_mean_sum", "functional_anchor_aux_count"),
                     "functional_anchor/residual_abs_max": mean("functional_anchor_residual_abs_max_sum", "functional_anchor_aux_count"),
                     "functional_anchor/residual_clip_hit_ratio": mean("functional_anchor_residual_clip_hit_ratio_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/residual_scale": mean("functional_anchor_residual_scale_sum", "functional_anchor_aux_count"),
                     "functional_anchor/delta_abs_mean": mean("functional_anchor_delta_abs_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/base_logit_abs_mean": mean("functional_anchor_base_logit_abs_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/anchor_logit_abs_mean": mean("functional_anchor_anchor_logit_abs_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/proposal_logit_abs_mean": mean("functional_anchor_proposal_logit_abs_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/final_logit_abs_mean": mean("functional_anchor_final_logit_abs_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/base_logit_std": mean("functional_anchor_base_logit_std_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/anchor_logit_std": mean("functional_anchor_anchor_logit_std_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/proposal_logit_std": mean("functional_anchor_proposal_logit_std_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/final_logit_std": mean("functional_anchor_final_logit_std_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/base_prob_mean": mean("functional_anchor_base_prob_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/anchor_prob_mean": mean("functional_anchor_anchor_prob_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/proposal_prob_mean": mean("functional_anchor_proposal_prob_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/final_prob_mean": mean("functional_anchor_final_prob_mean_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/anchor_temperature": mean("functional_anchor_anchor_temperature_sum", "functional_anchor_aux_count"),
                     "functional_anchor/slot_order_loss": mean("functional_anchor_slot_order_loss_sum", "functional_anchor_aux_count"),
                     "functional_anchor/slot_area_ed": mean("functional_anchor_slot_area_ed_sum", "functional_anchor_aux_count"),
                     "functional_anchor/slot_area_early_systole": mean("functional_anchor_slot_area_early_systole_sum", "functional_anchor_aux_count"),
@@ -1943,11 +2453,16 @@ class Trainer:
                     "functional_anchor/phase_source_area_ratio": mean("functional_anchor_phase_source_area_ratio_sum", "functional_anchor_aux_count"),
                     "functional_anchor/phase_source_time_ratio": mean("functional_anchor_phase_source_time_ratio_sum", "functional_anchor_aux_count"),
                     "functional_anchor/phase_reliability": mean("functional_anchor_phase_reliability_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/phase_reliability_mean": mean("functional_anchor_phase_reliability_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/phase_reliability_std": mean("functional_anchor_phase_reliability_std_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/phase_reliability_min": mean("functional_anchor_phase_reliability_min_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/phase_reliability_low_ratio": mean("functional_anchor_phase_reliability_low_ratio_sum", "functional_anchor_aux_count"),
                     "functional_anchor/state_norm": mean("functional_anchor_state_norm_sum", "functional_anchor_aux_count"),
                     "functional_anchor/state_delta_norm": mean("functional_anchor_state_delta_norm_sum", "functional_anchor_aux_count"),
                     "functional_anchor/state_update_norm": mean("functional_anchor_state_update_norm_sum", "functional_anchor_aux_count"),
                     "functional_anchor/state_delta_ratio": mean("functional_anchor_state_delta_ratio_sum", "functional_anchor_aux_count"),
                     "functional_anchor/ode_raw_delta_norm": mean("functional_anchor_ode_raw_delta_norm_sum", "functional_anchor_aux_count"),
+                    "functional_anchor/ode_clamp_ratio": mean("functional_anchor_ode_clamp_ratio_sum", "functional_anchor_aux_count"),
                     "functional_anchor/ode_update_norm": mean("functional_anchor_ode_update_norm_sum", "functional_anchor_aux_count"),
                     "functional_anchor/inject_gate_low": mean("functional_anchor_inject_gate_low_sum", "functional_anchor_aux_count"),
                     "functional_anchor/inject_gate_mid": mean("functional_anchor_inject_gate_mid_sum", "functional_anchor_aux_count"),
@@ -1960,6 +2475,10 @@ class Trainer:
                 metrics["functional_anchor/final_minus_base"] = metrics["dice_frame_mean"] - metrics["functional_anchor/base_dice"]
             if reduced.get("functional_anchor_anchor_dice_count", 0.0) > 0:
                 metrics["functional_anchor/final_minus_anchor"] = metrics["dice_frame_mean"] - metrics["functional_anchor/anchor_only_dice"]
+            if reduced.get("functional_anchor_proposal_dice_count", 0.0) > 0 and reduced.get("functional_anchor_anchor_dice_count", 0.0) > 0:
+                metrics["functional_anchor/proposal_minus_anchor"] = (
+                    metrics["functional_anchor/proposal_dice"] - metrics["functional_anchor/anchor_only_dice"]
+                )
         for key in reduced:
             if key.startswith("thr_") and key.endswith("_dice_sum"):
                 prefix = key[: -len("_dice_sum")]
@@ -1985,10 +2504,32 @@ class Trainer:
         weights_path = self.run_path / f"{self.model_name}_iter_{it}.pth"
         torch.save(self.model_without_ddp.state_dict(), weights_path)
         self.log.info(f"Saved weights: {weights_path}")
+        latest_path = self.run_path / "latest.pth"
+        torch.save(self.model_without_ddp.state_dict(), latest_path)
+        manifest = {
+            "iteration": int(it),
+            "kind": "state_dict",
+            "model_name": str(self.model_name),
+            "stage": str(self.stage),
+            "latest": latest_path.name,
+            "ema_enabled": bool(self.ema is not None),
+        }
         if self.ema is not None:
             ema_path = self.run_path / f"{self.model_name}_ema_iter_{it}.pth"
             torch.save(self.ema.state_dict(), ema_path)
             self.log.info(f"Saved EMA weights: {ema_path}")
+            latest_ema_path = self.run_path / "latest_ema.pth"
+            torch.save(self.ema.state_dict(), latest_ema_path)
+            manifest["latest_ema"] = latest_ema_path.name
+        manifest_path = self.run_path / "model_manifest.json"
+        with manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+        logger = getattr(self, "mlflow_logger", None)
+        if logger is not None:
+            logger.log_checkpoint(latest_path, artifact_name="latest.pth")
+            if self.ema is not None:
+                logger.log_checkpoint(self.run_path / "latest_ema.pth", artifact_name="latest_ema.pth")
+            logger.log_checkpoint(manifest_path, artifact_name="model_manifest.json")
 
     def save_checkpoint(self, it: int):
         if not self.main_process:
@@ -2030,6 +2571,11 @@ class Trainer:
             except Exception as exc:
                 self.log.warning(f"Failed to prepare summary.json artifact: {exc}")
             logger.log_artifact(summary_path, artifact_path="eval")
+        if logger is not None:
+            try:
+                logger.log_run_logs()
+            except Exception as exc:
+                self.log.warning(f"Failed to upload run logs to MLflow: {exc}")
 
     def load_checkpoint(self, path: str):
         self.log.info(f"Loading checkpoint: {path}")

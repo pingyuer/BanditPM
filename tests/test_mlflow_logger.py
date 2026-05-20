@@ -117,11 +117,48 @@ class MLflowLoggerTests(unittest.TestCase):
                 step=6,
             )
         self.assertIn(("metrics", {"train/loss/total": 1.0, "train/loss/dice": 0.2, "train/lr": 1.0e-4}, 5), calls)
-        self.assertIn(("metrics", {"val/dice": 0.8, "val/iou": 0.7}, 6), calls)
+        self.assertTrue(
+            any(
+                call[0] == "metrics"
+                and call[1].get("val/dice") == 0.8
+                and call[1].get("val/iou") == 0.7
+                and call[1].get("val/overall/Dice") == 0.8
+                for call in calls
+            )
+        )
         self.assertIn(("metrics", {"best/val_dice": 0.8, "best/val_iou": 0.7, "best/val_hd95": 2.0, "best/epoch": 1.0, "best/iter": 6.0}, 6), calls)
         self.assertTrue(
             any(call[0] == "metrics" and call[1].get("anchor_ode/final_minus_base_dice") == 0.10000000000000009 for call in calls)
         )
+
+    def test_eval_summary_logs_phase_and_overall_metrics(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_eval_summary(
+                {
+                    "ed_dice": 0.91,
+                    "es_dice": 0.82,
+                    "ed_hd95": 3.0,
+                    "es_hd95": 5.0,
+                    "overall_dice": 0.87,
+                    "overall_hd95": 4.0,
+                },
+                mode="test",
+                step=12,
+            )
+        merged = {}
+        for _, metrics, _ in calls:
+            merged.update(metrics)
+        self.assertEqual(merged["test/phase/ED_Dice"], 0.91)
+        self.assertEqual(merged["test/phase/ES_Dice"], 0.82)
+        self.assertEqual(merged["test/phase/ED_HD95"], 3.0)
+        self.assertEqual(merged["test/phase/ES_HD95"], 5.0)
+        self.assertEqual(merged["test/overall/Dice"], 0.87)
+        self.assertEqual(merged["test/overall/HD95"], 4.0)
 
     def test_evaluation_result_artifacts_are_opt_in(self):
         calls = []
@@ -142,14 +179,35 @@ class MLflowLoggerTests(unittest.TestCase):
             logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
             logger.log_evaluation_result(result, step=10, log_artifacts=False)
             logger.log_evaluation_result(result, step=11, log_artifacts=True)
-        self.assertIn(("metrics", {"val/dice": 0.8}, 10), calls)
-        self.assertIn(("metrics", {"val/dice": 0.8}, 11), calls)
+        self.assertTrue(any(call[0] == "metrics" and call[1].get("val/dice") == 0.8 for call in calls if call[2] == 10))
+        self.assertTrue(any(call[0] == "metrics" and call[1].get("val/dice") == 0.8 for call in calls if call[2] == 11))
         artifact_calls = [call for call in calls if call[0] == "artifact"]
         self.assertTrue(any(call == ("artifact", "summary.json", "eval") for call in artifact_calls))
         self.assertEqual(
             [call for call in calls if call[0] == "artifact" and call[1] == "summary.json"],
             [("artifact", "summary.json", "eval")],
         )
+
+    def test_run_logs_uploads_train_and_command_logs(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_artifact=lambda path, artifact_path=None: calls.append(("artifact", Path(path).name, artifact_path)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            tmp_path = Path(tmp)
+            train_log = tmp_path / "train.log"
+            command_log = tmp_path / "command.log"
+            train_log.write_text("train\n", encoding="utf-8")
+            command_log.write_text("command\n", encoding="utf-8")
+            logger = MLflowLogger(
+                {"required": True, "command_log_path": str(command_log)},
+                run_dir=tmp,
+                enabled=True,
+                main_process=True,
+            )
+            logger.log_run_logs()
+        self.assertIn(("artifact", "train.log", "logs"), calls)
+        self.assertIn(("artifact", "command.log", "logs"), calls)
 
     def test_artifact_paths_and_eval_tags_are_flat(self):
         calls = []

@@ -9,16 +9,21 @@ model:
     training_stage: "joint_residual"
     prediction_mode: "base_primary"
     residual_clip: 0.5
-    residual_scale: 0.1
+    residual_scale:
+      enabled: true
+      init: 0.03
+      max: 0.15
+      warmup_iters: 500
     trust_max: 0.6
     lambda_anchor: 0.3
     lambda_base_seg: 0.5
-    lambda_residual_smallness: 0.2
+    lambda_residual_smallness: 0.05
     lambda_boundary_residual: 0.1
     lambda_phase_consistency: 0.1
     lambda_anchor_temporal: 0.05
     lambda_slot_area_order: 0.05
     lambda_phase_slot_correlation: 0.01
+    lambda_ode_raw_delta: 0.001
     temporal_state:
       detach_state: true
       detach_every: 3

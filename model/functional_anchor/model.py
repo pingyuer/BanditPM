@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Dict
 
 import torch
@@ -39,7 +40,15 @@ class FunctionalAnchorSegmenter(nn.Module):
         self.hidden_dim = int(_cfg_get(method_cfg, "hidden_dim", 128))
         self.anchor_size = int(_cfg_get(method_cfg, "anchor_size", 32))
         self.residual_clip = float(_cfg_get(method_cfg, "residual_clip", 0.5))
-        self.residual_scale = float(_cfg_get(method_cfg, "residual_scale", 0.1))
+        residual_scale_cfg = _cfg_get(method_cfg, "residual_scale", 0.1)
+        if hasattr(residual_scale_cfg, "get"):
+            self.residual_scale_init = float(_cfg_get(residual_scale_cfg, "init", 0.03))
+            self.residual_scale_max = float(_cfg_get(residual_scale_cfg, "max", 0.15))
+            self.residual_scale_warmup_iters = int(_cfg_get(residual_scale_cfg, "warmup_iters", 500))
+        else:
+            self.residual_scale_init = float(residual_scale_cfg)
+            self.residual_scale_max = float(residual_scale_cfg)
+            self.residual_scale_warmup_iters = 0
         self.trust_max = float(_cfg_get(method_cfg, "trust_max", 0.6))
         self.prediction_mode = str(_cfg_get(method_cfg, "prediction_mode", "base_primary"))
         self.use_anchor_features_in_residual = bool(_cfg_get(method_cfg, "use_anchor_features_in_residual", True))
@@ -50,6 +59,20 @@ class FunctionalAnchorSegmenter(nn.Module):
         self.detach_state = bool(_cfg_get(temporal_state_cfg, "detach_state", True))
         self.detach_every = int(_cfg_get(temporal_state_cfg, "detach_every", 1))
         self.state_update_scale = float(_cfg_get(temporal_state_cfg, "update_scale", 0.5))
+        temp_cfg = _cfg_get(method_cfg, "anchor_logit_temperature", {})
+        self.anchor_temperature_enabled = bool(_cfg_get(temp_cfg, "enabled", False)) if hasattr(temp_cfg, "get") else False
+        self.anchor_temperature_min = float(_cfg_get(temp_cfg, "min", 0.1)) if hasattr(temp_cfg, "get") else 0.1
+        self.anchor_temperature_max = float(_cfg_get(temp_cfg, "max", 2.0)) if hasattr(temp_cfg, "get") else 2.0
+        temp_init = float(_cfg_get(temp_cfg, "init", 1.0)) if hasattr(temp_cfg, "get") else 1.0
+        temp_learnable = bool(_cfg_get(temp_cfg, "learnable", False)) if hasattr(temp_cfg, "get") else False
+        temp_init = min(max(temp_init, self.anchor_temperature_min + 1.0e-6), self.anchor_temperature_max - 1.0e-6)
+        ratio = (temp_init - self.anchor_temperature_min) / max(self.anchor_temperature_max - self.anchor_temperature_min, 1.0e-6)
+        raw_init = math.log(max(ratio, 1.0e-6) / max(1.0 - ratio, 1.0e-6))
+        raw_tensor = torch.tensor(raw_init, dtype=torch.float32)
+        if self.anchor_temperature_enabled and temp_learnable:
+            self.anchor_temperature_raw = nn.Parameter(raw_tensor)
+        else:
+            self.register_buffer("anchor_temperature_raw", raw_tensor, persistent=True)
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -92,8 +115,32 @@ class FunctionalAnchorSegmenter(nn.Module):
             self.prediction_mode,
             self.residual_clip,
             trust_max=self.trust_max,
-            residual_scale=self.residual_scale,
+            residual_scale=self.residual_scale_init,
         )
+
+    def _anchor_temperature(self, device, dtype) -> torch.Tensor:
+        if not self.anchor_temperature_enabled:
+            return torch.ones((), device=device, dtype=dtype)
+        raw = self.anchor_temperature_raw.to(device=device, dtype=dtype)
+        return self.anchor_temperature_min + torch.sigmoid(raw) * (self.anchor_temperature_max - self.anchor_temperature_min)
+
+    def _residual_scale_at(self, data: Dict, device, dtype) -> torch.Tensor:
+        if self.residual_scale_warmup_iters <= 0 or self.residual_scale_max <= self.residual_scale_init:
+            return torch.tensor(self.residual_scale_max, device=device, dtype=dtype)
+        step = data.get("global_step", data.get("current_iter", 0))
+        step_value = float(step.detach().flatten()[0].item()) if torch.is_tensor(step) else float(step)
+        ratio = min(max(step_value / float(self.residual_scale_warmup_iters), 0.0), 1.0)
+        value = self.residual_scale_init + ratio * (self.residual_scale_max - self.residual_scale_init)
+        return torch.tensor(value, device=device, dtype=dtype)
+
+    def _phase_reliability_from_area(
+        self,
+        current_area: torch.Tensor,
+        prev_area: torch.Tensor,
+        area_velocity: torch.Tensor,
+    ) -> torch.Tensor:
+        reliability = torch.maximum(area_velocity.abs(), (current_area - prev_area).abs()) / 0.03
+        return reliability.clamp(0.05, 0.95)
 
     def _normalize(self, image: torch.Tensor) -> torch.Tensor:
         return (image - 0.5) / 0.5
@@ -204,7 +251,8 @@ class FunctionalAnchorSegmenter(nn.Module):
             uncertain = area_velocity.abs() < 1.0e-5
             fallback = torch.full_like(current_area, norm)
             phase = torch.where(uncertain, fallback, phase)
-            return phase.clamp(0.0, 1.0), torch.ones(B, N, device=device, dtype=dtype), torch.ones(B, N, device=device, dtype=dtype)
+            reliability = self._phase_reliability_from_area(current_area, prev_area, area_velocity)
+            return phase.clamp(0.0, 1.0), torch.ones(B, N, device=device, dtype=dtype), reliability
         value = float(ti) / max(float(T - 1), 1.0)
         return (
             torch.full((B, N), value, device=device, dtype=dtype),
@@ -271,13 +319,16 @@ class FunctionalAnchorSegmenter(nn.Module):
             z, dz, state_update = self.state_ode(prev["z"], evidence, phase_embed)
             slot_weights, slot_aux = self.anchor_bank(z, phase_embed, norm_time)
             target_sizes = {level: feats[level].shape[-2:] for level in feats}
-            anchor_logits, anchor_features = self.anchor_decoder(
+            anchor_logits_raw, anchor_features = self.anchor_decoder(
                 z,
                 phase_embed,
                 slot_weights,
                 target_sizes,
                 base_object_logits.shape[-2:],
             )
+            anchor_temperature = self._anchor_temperature(images.device, images.dtype)
+            anchor_logits = anchor_logits_raw * anchor_temperature
+            residual_scale = self._residual_scale_at(data, images.device, images.dtype)
             residuals = self.residual_heads(
                 feats,
                 anchor_logits,
@@ -299,7 +350,19 @@ class FunctionalAnchorSegmenter(nn.Module):
                 shape_residual=residuals["shape_residual_logits"],
                 boundary_residual=residuals["boundary_residual_logits"],
                 anchor_trust=residuals["anchor_trust"],
+                residual_scale=residual_scale,
             )
+            trust_map = residuals["anchor_trust"]
+            disagreement = (torch.sigmoid(base_object_logits).mean(dim=1, keepdim=True) - torch.sigmoid(anchor_logits).mean(dim=1, keepdim=True)).abs()
+            disagreement_ds = disagreement
+            if disagreement_ds.shape[-2:] != trust_map.shape[-2:]:
+                disagreement_ds = torch.nn.functional.interpolate(
+                    disagreement_ds, size=trust_map.shape[-2:], mode="bilinear", align_corners=False
+                )
+            trust_flat = trust_map.detach().flatten()
+            disagreement_flat = disagreement_ds.detach().flatten()
+            trust_corr = ((trust_flat - trust_flat.mean()) * (disagreement_flat - disagreement_flat.mean())).mean()
+            trust_corr = trust_corr / (trust_flat.std(unbiased=False) * disagreement_flat.std(unbiased=False)).clamp_min(1.0e-6)
             logits, masks = self._object_logits_to_full(final_object_logits)
             anchor_area = torch.sigmoid(anchor_logits).mean(dim=(-2, -1)).detach()
             next_area_velocity = anchor_area - prev_area.detach()
@@ -314,6 +377,7 @@ class FunctionalAnchorSegmenter(nn.Module):
             aux = {
                 "mode": self.prediction_mode,
                 "base_object_logits": base_object_logits,
+                "anchor_logits_raw": anchor_logits_raw,
                 "anchor_logits": anchor_logits,
                 "shape_residual_logits": residuals["shape_residual_logits"],
                 "boundary_residual_logits": residuals["boundary_residual_logits"],
@@ -331,7 +395,11 @@ class FunctionalAnchorSegmenter(nn.Module):
                 "slot_area_order_violation": slot_aux["slot_area_order_violation"],
                 "slot_order_loss": slot_aux["slot_order_loss"],
                 "ed_slot_usage": slot_aux["ed_slot_usage"],
+                "early_systole_slot_usage": slot_aux["early_systole_slot_usage"],
                 "es_slot_usage": slot_aux["es_slot_usage"],
+                "early_diastole_slot_usage": slot_aux["early_diastole_slot_usage"],
+                "uncertain_slot_usage": slot_aux["uncertain_slot_usage"],
+                "slot_max_prob": slot_aux["slot_max_prob"],
                 "phase_embed": phase_embed,
                 "phase_descriptor": phase_descriptor,
                 "phase_source": phase_source_code,
@@ -350,6 +418,7 @@ class FunctionalAnchorSegmenter(nn.Module):
                 / z.detach().pow(2).mean(dim=-1).sqrt().clamp_min(1.0e-6),
                 "ode_raw_delta_norm": dz.detach().pow(2).mean(dim=-1).sqrt(),
                 "ode_update_norm": state_update.detach().pow(2).mean(dim=-1).sqrt(),
+                "ode_clamp_ratio": (dz.detach().abs() > 2.0).float().mean(),
                 "anchor_features": anchor_features,
                 "confidence": residuals["confidence"],
                 "anchor_trust_map": residuals["anchor_trust"],
@@ -365,12 +434,28 @@ class FunctionalAnchorSegmenter(nn.Module):
                 "confidence_std": residuals["confidence"].std(unbiased=False),
                 "trust_mean": fusion_aux["trust_mean"],
                 "trust_std": fusion_aux["trust_std"],
+                "trust_spatial_std": trust_map.detach().flatten(1).std(dim=1, unbiased=False).mean(),
+                "trust_disagreement_corr": trust_corr,
                 "anchor_trust_ratio": fusion_aux["anchor_trust_ratio"],
                 "image_trust_ratio": fusion_aux["image_trust_ratio"],
                 "residual_abs_mean": fusion_aux["residual_abs_mean"],
                 "residual_abs_max": fusion_aux["residual_abs_max"],
                 "residual_clip_hit_ratio": fusion_aux["residual_clip_hit_ratio"],
+                "residual_scale": fusion_aux["residual_scale"],
                 "delta_abs_mean": fusion_aux["delta_abs_mean"],
+                "base_logit_abs_mean": base_object_logits.detach().abs().mean(),
+                "anchor_logit_abs_mean": anchor_logits.detach().abs().mean(),
+                "proposal_logit_abs_mean": fusion_aux["proposal_logits"].detach().abs().mean(),
+                "final_logit_abs_mean": final_object_logits.detach().abs().mean(),
+                "base_logit_std": base_object_logits.detach().std(unbiased=False),
+                "anchor_logit_std": anchor_logits.detach().std(unbiased=False),
+                "proposal_logit_std": fusion_aux["proposal_logits"].detach().std(unbiased=False),
+                "final_logit_std": final_object_logits.detach().std(unbiased=False),
+                "base_prob_mean": torch.sigmoid(base_object_logits.detach()).mean(),
+                "anchor_prob_mean": torch.sigmoid(anchor_logits.detach()).mean(),
+                "proposal_prob_mean": torch.sigmoid(fusion_aux["proposal_logits"].detach()).mean(),
+                "final_prob_mean": torch.sigmoid(final_object_logits.detach()).mean(),
+                "anchor_temperature": anchor_temperature.detach(),
                 "residual_l1": fusion_aux["residual_logits"].abs().mean(),
                 "residual_l2": fusion_aux["residual_logits"].pow(2).mean().sqrt(),
                 "shape_residual_norm": residuals["shape_residual_logits"].abs().mean(),

@@ -236,6 +236,9 @@ class MLflowLogger:
             "conf_loss": "loss/conf",
             "confidence_loss": "loss/conf",
             "lr": "lr",
+            "residual_head_lr": "residual_head_lr",
+            "anchor_temperature": "anchor_temperature",
+            "residual_scale": "residual_scale",
         }
         out = {}
         for key, value in metrics.items():
@@ -329,13 +332,28 @@ class MLflowLogger:
             "final_dice": ("final_dice", "dice_frame_mean", "dice", "functional_anchor/final_dice"),
             "final_minus_base": ("final_minus_base", "functional_anchor/final_minus_base"),
             "final_minus_anchor": ("final_minus_anchor", "functional_anchor/final_minus_anchor"),
+            "proposal_minus_anchor": ("proposal_minus_anchor", "functional_anchor/proposal_minus_anchor"),
             "residual_l1": ("residual_l1", "functional_anchor/residual_l1"),
             "residual_l2": ("residual_l2", "functional_anchor/residual_l2"),
             "residual_boundary_ratio": ("residual_boundary_ratio", "functional_anchor/residual_boundary_ratio"),
             "residual_abs_mean": ("residual_abs_mean", "functional_anchor/residual_abs_mean"),
             "residual_abs_max": ("residual_abs_max", "functional_anchor/residual_abs_max"),
             "residual_clip_hit_ratio": ("residual_clip_hit_ratio", "functional_anchor/residual_clip_hit_ratio"),
+            "residual_scale": ("residual_scale", "functional_anchor/residual_scale"),
             "delta_abs_mean": ("delta_abs_mean", "functional_anchor/delta_abs_mean"),
+            "base_logit_abs_mean": ("base_logit_abs_mean", "functional_anchor/base_logit_abs_mean"),
+            "anchor_logit_abs_mean": ("anchor_logit_abs_mean", "functional_anchor/anchor_logit_abs_mean"),
+            "proposal_logit_abs_mean": ("proposal_logit_abs_mean", "functional_anchor/proposal_logit_abs_mean"),
+            "final_logit_abs_mean": ("final_logit_abs_mean", "functional_anchor/final_logit_abs_mean"),
+            "base_logit_std": ("base_logit_std", "functional_anchor/base_logit_std"),
+            "anchor_logit_std": ("anchor_logit_std", "functional_anchor/anchor_logit_std"),
+            "proposal_logit_std": ("proposal_logit_std", "functional_anchor/proposal_logit_std"),
+            "final_logit_std": ("final_logit_std", "functional_anchor/final_logit_std"),
+            "base_prob_mean": ("base_prob_mean", "functional_anchor/base_prob_mean"),
+            "anchor_prob_mean": ("anchor_prob_mean", "functional_anchor/anchor_prob_mean"),
+            "proposal_prob_mean": ("proposal_prob_mean", "functional_anchor/proposal_prob_mean"),
+            "final_prob_mean": ("final_prob_mean", "functional_anchor/final_prob_mean"),
+            "anchor_temperature": ("anchor_temperature", "functional_anchor/anchor_temperature"),
             "shape_residual_norm": ("shape_residual_norm", "functional_anchor/shape_residual_norm"),
             "boundary_residual_norm": ("boundary_residual_norm", "functional_anchor/boundary_residual_norm"),
             "area_curve_smoothness": ("area_curve_smoothness", "functional_anchor/area_curve_smoothness"),
@@ -345,7 +363,14 @@ class MLflowLogger:
             "anchor_temporal_consistency": ("anchor_temporal_consistency", "functional_anchor/anchor_temporal_consistency"),
             "slot_entropy": ("slot_entropy", "functional_anchor/slot_entropy"),
             "ED_slot_usage": ("ed_slot_usage", "ED_slot_usage", "functional_anchor/ED_slot_usage"),
+            "slot_usage_ed": ("slot_usage_ed", "functional_anchor/slot_usage_ed"),
+            "slot_usage_early_systole": ("early_systole_slot_usage", "functional_anchor/slot_usage_early_systole"),
             "ES_slot_usage": ("es_slot_usage", "ES_slot_usage", "functional_anchor/ES_slot_usage"),
+            "slot_usage_es": ("slot_usage_es", "functional_anchor/slot_usage_es"),
+            "slot_usage_early_diastole": ("early_diastole_slot_usage", "functional_anchor/slot_usage_early_diastole"),
+            "slot_usage_uncertain": ("uncertain_slot_usage", "functional_anchor/slot_usage_uncertain"),
+            "slot_max_prob_mean": ("slot_max_prob", "slot_max_prob_mean", "functional_anchor/slot_max_prob_mean"),
+            "slot_max_prob_std": ("slot_max_prob_std", "functional_anchor/slot_max_prob_std"),
             "slot_area_order_violation": ("slot_area_order_violation", "functional_anchor/slot_area_order_violation"),
             "slot_order_loss": ("slot_order_loss", "functional_anchor/slot_order_loss"),
             "slot_area_ed": ("slot_area_ed", "functional_anchor/slot_area_ed"),
@@ -359,12 +384,17 @@ class MLflowLogger:
             "phase_source_time_ratio": ("phase_source_time_ratio", "functional_anchor/phase_source_time_ratio"),
             "phase_loss": ("phase_loss", "aux_functional_anchor_phase_consistency", "functional_anchor/phase_loss"),
             "phase_reliability": ("phase_reliability", "functional_anchor/phase_reliability"),
+            "phase_reliability_mean": ("phase_reliability_mean", "functional_anchor/phase_reliability_mean"),
+            "phase_reliability_std": ("phase_reliability_std", "functional_anchor/phase_reliability_std"),
+            "phase_reliability_min": ("phase_reliability_min", "functional_anchor/phase_reliability_min"),
+            "phase_reliability_low_ratio": ("phase_reliability_low_ratio", "functional_anchor/phase_reliability_low_ratio"),
             "state_norm": ("state_norm", "functional_anchor/state_norm"),
             "state_delta_norm": ("state_delta_norm", "functional_anchor/state_delta_norm"),
             "state_update_norm": ("state_update_norm", "functional_anchor/state_update_norm"),
             "state_delta_ratio": ("state_delta_ratio", "functional_anchor/state_delta_ratio"),
             "ode_raw_delta_norm": ("ode_raw_delta_norm", "functional_anchor/ode_raw_delta_norm"),
             "ode_update_norm": ("ode_update_norm", "functional_anchor/ode_update_norm"),
+            "ode_clamp_ratio": ("ode_clamp_ratio", "functional_anchor/ode_clamp_ratio"),
             "gate_mean_low": ("gate_mean_low", "functional_anchor/gate_mean_low"),
             "gate_mean_mid": ("gate_mean_mid", "functional_anchor/gate_mean_mid"),
             "gate_mean_high": ("gate_mean_high", "functional_anchor/gate_mean_high"),
@@ -376,8 +406,21 @@ class MLflowLogger:
             "confidence_std": ("confidence_std", "functional_anchor/confidence_std"),
             "trust_mean": ("trust_mean", "functional_anchor/trust_mean"),
             "trust_std": ("trust_std", "functional_anchor/trust_std"),
+            "trust_spatial_std": ("trust_spatial_std", "functional_anchor/trust_spatial_std"),
+            "trust_temporal_std": ("trust_temporal_std", "functional_anchor/trust_temporal_std"),
+            "trust_disagreement_corr": ("trust_disagreement_corr", "functional_anchor/trust_disagreement_corr"),
             "anchor_trust_ratio": ("anchor_trust_ratio", "functional_anchor/anchor_trust_ratio"),
             "image_trust_ratio": ("image_trust_ratio", "functional_anchor/image_trust_ratio"),
+            "base_area_range": ("base_area_range", "functional_anchor/base_area_range"),
+            "base_area_std": ("base_area_std", "functional_anchor/base_area_std"),
+            "anchor_area_range": ("anchor_area_range", "functional_anchor/anchor_area_range"),
+            "anchor_area_std": ("anchor_area_std", "functional_anchor/anchor_area_std"),
+            "proposal_area_range": ("proposal_area_range", "functional_anchor/proposal_area_range"),
+            "proposal_area_std": ("proposal_area_std", "functional_anchor/proposal_area_std"),
+            "final_area_range": ("final_area_range", "functional_anchor/final_area_range"),
+            "final_area_std": ("final_area_std", "functional_anchor/final_area_std"),
+            "ED_ES_area_gap": ("ED_ES_area_gap", "functional_anchor/ED_ES_area_gap"),
+            "ED_ES_area_ratio": ("ED_ES_area_ratio", "functional_anchor/ED_ES_area_ratio"),
         }
         out = {}
         for dst, keys in aliases.items():
@@ -395,6 +438,11 @@ class MLflowLogger:
             anchor = cls._to_float(out["anchor_only_dice"])
             if final is not None and anchor is not None:
                 out["final_minus_anchor"] = final - anchor
+        if "proposal_minus_anchor" not in out and "proposal_dice" in out and "anchor_only_dice" in out:
+            proposal = cls._to_float(out["proposal_dice"])
+            anchor = cls._to_float(out["anchor_only_dice"])
+            if proposal is not None and anchor is not None:
+                out["proposal_minus_anchor"] = proposal - anchor
         if not any(str(key).startswith("functional_anchor/") for key in metrics) and not any(
             key in metrics for key in ("anchor_only_dice", "proposal_dice", "base_dice")
         ):
@@ -484,6 +532,22 @@ class MLflowLogger:
 
         for artifact in getattr(result, "visual_artifacts", []) or []:
             self.log_artifact(artifact, artifact_path="visuals")
+
+    def log_run_logs(self) -> None:
+        if not self.enabled:
+            return
+        candidates = [self.run_dir / "train.log"]
+        configured = self._cfg_get("command_log_path", None)
+        if configured:
+            candidates.append(Path(str(configured)).expanduser())
+        seen = set()
+        for path in candidates:
+            path = Path(path)
+            key = str(path.resolve()) if path.exists() else str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            self.log_artifact(path, artifact_path="logs")
 
     def log_env_info(self) -> None:
         if not self.enabled:
@@ -592,6 +656,12 @@ class MLflowLogger:
             "iou": metrics.get("iou", metrics.get("iou_frame_mean")),
             "hd95": metrics.get("hd95", metrics.get("hd95_original", metrics.get("hd95_resized"))),
             "assd": metrics.get("assd", metrics.get("assd_original", metrics.get("assd_resized"))),
+            "phase/ED_Dice": metrics.get("ed_dice"),
+            "phase/ES_Dice": metrics.get("es_dice"),
+            "phase/ED_HD95": metrics.get("ed_hd95"),
+            "phase/ES_HD95": metrics.get("es_hd95"),
+            "overall/Dice": metrics.get("overall_dice", metrics.get("dice", metrics.get("dice_frame_mean"))),
+            "overall/HD95": metrics.get("overall_hd95", metrics.get("hd95", metrics.get("hd95_original", metrics.get("hd95_resized")))),
             "area_smoothness": metrics.get("area_smoothness"),
             "area_acceleration": metrics.get("area_acceleration"),
             "temporal_jitter": metrics.get("temporal_jitter", metrics.get("temporal_drift")),

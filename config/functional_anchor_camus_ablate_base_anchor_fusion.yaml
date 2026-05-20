@@ -1,0 +1,17 @@
+defaults:
+  - functional_anchor_camus_joint_residual
+  - _self_
+
+exp_id: "functional_anchor_camus_ablate_base_anchor_fusion"
+ablation_type: "base_anchor_fusion"
+
+model:
+  functional_anchor:
+    disable_injector: true
+    residual_scale:
+      enabled: true
+      init: 0.0
+      max: 0.0
+      warmup_iters: 1
+    lambda_residual_smallness: 0.0
+    lambda_boundary_residual: 0.0

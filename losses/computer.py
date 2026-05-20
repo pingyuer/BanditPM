@@ -107,6 +107,7 @@ class LossComputer(nn.Module):
         self.lambda_functional_anchor_phase_slot = float(functional_cfg.get("lambda_phase_slot_correlation", 0.01))
         self.lambda_functional_anchor_trust_l1 = float(functional_cfg.get("trust_l1_weight", 0.0))
         self.lambda_functional_anchor_trust_entropy = float(functional_cfg.get("trust_entropy_weight", 0.0))
+        self.lambda_functional_anchor_ode_raw_delta = float(functional_cfg.get("lambda_ode_raw_delta", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -517,6 +518,7 @@ class LossComputer(nn.Module):
         phase_slot_terms = []
         trust_l1_terms = []
         trust_entropy_terms = []
+        ode_raw_delta_terms = []
 
         for bi in range(batch_size):
             curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
@@ -586,6 +588,9 @@ class LossComputer(nn.Module):
                     es_target = ((norm_time - 0.5).abs() <= 0.125).float()
                     phase_slot_terms.append(F.mse_loss(slot_weights[bi : bi + 1, :curr_num_obj, 0], ed_target))
                     phase_slot_terms.append(F.mse_loss(slot_weights[bi : bi + 1, :curr_num_obj, 2], es_target))
+                z_delta = aux.get("z_delta")
+                if torch.is_tensor(z_delta) and self.lambda_functional_anchor_ode_raw_delta > 0:
+                    ode_raw_delta_terms.append(z_delta[bi : bi + 1, :curr_num_obj].pow(2).mean())
 
         if anchor_terms:
             raw = torch.stack(anchor_terms).mean()
@@ -627,6 +632,10 @@ class LossComputer(nn.Module):
             raw = torch.stack(trust_entropy_terms).mean()
             out["raw_functional_anchor_trust_entropy"] = raw.detach()
             out["aux_functional_anchor_trust_entropy"] = raw * self.lambda_functional_anchor_trust_entropy
+        if ode_raw_delta_terms:
+            raw = torch.stack(ode_raw_delta_terms).mean()
+            out["raw_functional_anchor_ode_raw_delta"] = raw.detach()
+            out["aux_functional_anchor_ode_raw_delta"] = raw * self.lambda_functional_anchor_ode_raw_delta
         if not out:
             out["aux_functional_anchor_zero"] = zero
         return out
