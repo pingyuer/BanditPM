@@ -32,10 +32,11 @@ def _ellipse_sdf(size: int, rx: float, ry: float, cx: float = 0.0, cy: float = 0
 
 
 class FAFModule(nn.Module):
-    """Lightweight functional anchor-affine field.
+    """Overcomplete functional anchor field with soft retrieval and selective update.
 
-    The field is a small bank of canonical SDF anchors plus online affine ODE
-    states. Dense per-anchor features and per-anchor residual heads are avoided.
+    Each anchor owns a learnable function code that decodes into a canonical SDF
+    via a shared basis.  Affine deformation + soft retrieval + trust-gated
+    residual correction form the full proposal → correction pipeline.
     """
 
     def __init__(
@@ -67,10 +68,13 @@ class FAFModule(nn.Module):
         ode_warmup_iters: int = 1500,
         velocity_momentum: float = 0.8,
         feature_modulation: dict | None = None,
+        disable_proposal_in_residual: bool = False,
     ) -> None:
         super().__init__()
         self.num_anchors = int(num_anchors)
         self.query_dim = int(query_dim)
+        self.code_dim = int(code_dim)
+        self.basis_dim = int(basis_dim)
         self.anchor_size = int(anchor_size)
         self.residual_clip = float(residual_clip)
         self.trust_max = float(trust_max)
@@ -90,6 +94,9 @@ class FAFModule(nn.Module):
         self.memory_ema = float(memory_ema)
         self.enable_memory_update = bool(enable_memory_update)
         self.disable_trust_gate = bool(disable_trust_gate)
+        self.disable_proposal_in_residual = bool(disable_proposal_in_residual)
+        memory_update_cfg = feature_modulation.get("memory_update", {}) if isinstance(feature_modulation, dict) else {}
+        self.truncated_bptt_steps = int(memory_update_cfg.get("truncated_bptt_steps", 0))
         feature_modulation = feature_modulation or {}
         self.enable_feature_modulation = bool(feature_modulation.get("enabled", True))
         default_strengths = {"low": 0.0, "mid": 0.08, "high": 0.12, "dec": 0.06}
@@ -105,18 +112,39 @@ class FAFModule(nn.Module):
             nn.Linear(hidden_dim, query_dim),
         )
         self.anchor_keys = nn.Parameter(_orthogonal_rows(self.num_anchors, query_dim))
-        anchors = [
-            _ellipse_sdf(anchor_size, 0.66, 0.82, 0.00, 0.00),
-            _ellipse_sdf(anchor_size, 0.50, 0.66, 0.03, 0.00),
-            _ellipse_sdf(anchor_size, 0.34, 0.46, 0.00, 0.02),
-            _ellipse_sdf(anchor_size, 0.52, 0.58, -0.14, 0.07),
-            _ellipse_sdf(anchor_size, 0.44, 0.72, 0.12, -0.05),
-        ]
-        while len(anchors) < self.num_anchors:
-            idx = len(anchors)
-            radius = max(0.30, 0.60 - 0.04 * idx)
-            anchors.append(_ellipse_sdf(anchor_size, radius, radius * 1.2, 0.05 * ((idx % 3) - 1), 0.0))
-        self.canonical_sdf = nn.Parameter(torch.stack(anchors[: self.num_anchors]).unsqueeze(1))
+
+        # --- Function-code field: each anchor owns a latent code → basis decoder → SDF ---
+        self.anchor_function_codes = nn.Parameter(
+            torch.randn(self.num_anchors, self.code_dim) * 0.02
+        )
+        self.sdf_basis = nn.Parameter(
+            torch.randn(self.basis_dim, 1, self.anchor_size, self.anchor_size) * 0.02
+        )
+        self.code_to_basis = nn.Sequential(
+            nn.Linear(self.code_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.basis_dim),
+        )
+        # Initialize basis decoder to produce ellipse-like SDFs near startup
+        with torch.no_grad():
+            init_anchors = [
+                _ellipse_sdf(anchor_size, 0.66, 0.82, 0.00, 0.00),
+                _ellipse_sdf(anchor_size, 0.50, 0.66, 0.03, 0.00),
+                _ellipse_sdf(anchor_size, 0.34, 0.46, 0.00, 0.02),
+                _ellipse_sdf(anchor_size, 0.52, 0.58, -0.14, 0.07),
+                _ellipse_sdf(anchor_size, 0.44, 0.72, 0.12, -0.05),
+            ]
+            while len(init_anchors) < self.num_anchors:
+                idx = len(init_anchors)
+                radius = max(0.30, 0.60 - 0.04 * idx)
+                init_anchors.append(_ellipse_sdf(anchor_size, radius, radius * 1.2, 0.05 * ((idx % 3) - 1), 0.0))
+            init_stack = torch.stack(init_anchors[: self.num_anchors]).unsqueeze(1)  # [N, 1, H, W]
+            # Set sdf_basis to first basis_dim init anchors (or repeat if fewer)
+            for b in range(self.basis_dim):
+                self.sdf_basis[b] = init_stack[b % self.num_anchors]
+            # Set code_to_basis bias so initial output is ~uniform over basis
+            nn.init.zeros_(self.code_to_basis[-1].weight)
+            nn.init.zeros_(self.code_to_basis[-1].bias)
 
         self.affine_delta_head = nn.Sequential(
             nn.Linear(query_dim * 2 + 6, hidden_dim),
@@ -173,6 +201,7 @@ class FAFModule(nn.Module):
             "quality": torch.full(shape, 0.5, device=device, dtype=dtype),
             "usage": torch.zeros(shape, device=device, dtype=dtype),
             "age": torch.zeros(shape, device=device, dtype=dtype),
+            "step_count": 0,
             "prev_query": None,
             "prev_proposal": None,
             "prev_area": None,
@@ -273,12 +302,22 @@ class FAFModule(nn.Module):
         row1 = torch.stack([sin / sx, cos / sy, -ty], dim=-1)
         return torch.stack([row0, row1], dim=-2)
 
-    def _warp_anchors(self, affine_state: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+    def _decode_canonical_sdf(self) -> torch.Tensor:
+        """Decode function codes into canonical SDF anchors via shared basis.
+
+        Returns:
+            canonical_sdf: [num_anchors, 1, anchor_size, anchor_size]
+        """
+        basis_weights = torch.softmax(self.code_to_basis(self.anchor_function_codes), dim=-1)  # [N, basis_dim]
+        canonical_sdf = torch.einsum("nb,bchw->nchw", basis_weights, self.sdf_basis)  # [N, 1, H_a, W_a]
+        return canonical_sdf
+
+    def _warp_anchors(self, affine_state: torch.Tensor, canonical_sdf: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
         B, N, A = affine_state.shape[:3]
         theta = self._affine_matrix(affine_state).flatten(0, 2)
         H, W = output_size
         grid = F.affine_grid(theta, size=(B * N * A, 1, H, W), align_corners=False)
-        anchors = self.canonical_sdf.to(device=affine_state.device, dtype=affine_state.dtype)
+        anchors = canonical_sdf.to(device=affine_state.device, dtype=affine_state.dtype)
         anchors = anchors.unsqueeze(0).unsqueeze(0).expand(B, N, -1, -1, -1, -1).flatten(0, 2)
         proposals = F.grid_sample(anchors, grid, mode="bilinear", padding_mode="border", align_corners=False)
         return proposals.view(B, N, A, H, W)
@@ -338,8 +377,13 @@ class FAFModule(nn.Module):
         velocity_consistency = torch.exp(-(affine_delta.detach() - velocity_state.detach()).abs().mean(dim=-1))
         state_competition = (0.45 + 0.35 * area_motion.unsqueeze(-1) + 0.20 * velocity_consistency).clamp(0.05, 1.0)
         write_strength = weights * frame_quality.unsqueeze(-1) * state_competition
+        step_count = state.get("step_count", 0)
+        allow_grad = self.truncated_bptt_steps > 0 and step_count % self.truncated_bptt_steps == 0
         if self.enable_memory_update:
-            next_velocity = self.velocity_momentum * velocity_state + (1.0 - self.velocity_momentum) * affine_delta.detach()
+            if allow_grad:
+                next_velocity = self.velocity_momentum * velocity_state + (1.0 - self.velocity_momentum) * affine_delta
+            else:
+                next_velocity = self.velocity_momentum * velocity_state + (1.0 - self.velocity_momentum) * affine_delta.detach()
             next_affine = affine_state + ode_dt * write_strength.unsqueeze(-1) * next_velocity
         else:
             next_velocity = torch.zeros_like(velocity_state)
@@ -348,14 +392,17 @@ class FAFModule(nn.Module):
         next_affine = next_affine.detach()
         next_velocity = next_velocity.detach()
 
-        proposals = self._warp_anchors(affine_state + affine_delta, (H, W))
+        # Decode function codes → canonical SDF → affine warp → proposals
+        canonical_sdf = self._decode_canonical_sdf()
+        proposals = self._warp_anchors(affine_state + affine_delta, canonical_sdf, (H, W))
         proposal_logits = (weights.unsqueeze(-1).unsqueeze(-1) * proposals).sum(dim=2)
         base_prob = torch.sigmoid(base_logits)
+        proposal_for_residual = proposal_logits if not self.disable_proposal_in_residual else torch.zeros_like(proposal_logits)
         residual_in = torch.cat(
             [
                 feats["dec"].unsqueeze(1).expand(-1, N, -1, -1, -1).flatten(0, 1),
                 base_logits.flatten(0, 1).unsqueeze(1),
-                proposal_logits.flatten(0, 1).unsqueeze(1),
+                proposal_for_residual.flatten(0, 1).unsqueeze(1),
                 query_aux["base_uncertainty_map"].flatten(0, 1).unsqueeze(1),
                 query_aux["base_boundary_map"].flatten(0, 1).unsqueeze(1),
             ],
@@ -363,6 +410,23 @@ class FAFModule(nn.Module):
         )
         raw_residual = self.residual_head(residual_in).view(B, N, H, W).clamp(-self.residual_clip, self.residual_clip)
         residual = residual_scale * torch.tanh(raw_residual)
+
+        # Residual proposal sensitivity: how much does proposal influence residual?
+        residual_proposal_sensitivity = torch.zeros((), device=device, dtype=dtype)
+        if not self.disable_proposal_in_residual:
+            with torch.no_grad():
+                residual_in_noprop = torch.cat(
+                    [
+                        feats["dec"].unsqueeze(1).expand(-1, N, -1, -1, -1).flatten(0, 1),
+                        base_logits.flatten(0, 1).unsqueeze(1),
+                        torch.zeros_like(proposal_logits).flatten(0, 1).unsqueeze(1),
+                        query_aux["base_uncertainty_map"].flatten(0, 1).unsqueeze(1),
+                        query_aux["base_boundary_map"].flatten(0, 1).unsqueeze(1),
+                    ],
+                    dim=1,
+                )
+                residual_noprop = self.residual_head(residual_in_noprop).view(B, N, H, W)
+                residual_proposal_sensitivity = (raw_residual - residual_noprop).abs().mean()
         if self.disable_trust_gate:
             trust = torch.ones_like(base_logits)
             gate = torch.ones_like(base_logits)
@@ -377,16 +441,17 @@ class FAFModule(nn.Module):
             feats, base_logits, proposal_logits, query_aux, trust
         )
 
-        sim_coverage = (weights * scores.sigmoid()).sum(dim=-1)
+        # Coverage: proposal-based (max activation of warped anchors), not query-key similarity
+        proposal_coverage = torch.sigmoid(proposals).amax(dim=2).mean(dim=(-2, -1))  # [B, N]
         anchor_area = torch.sigmoid(proposals).mean(dim=(-2, -1))
         anchor_area_means = anchor_area.mean(dim=(0, 1))
         if self.num_anchors > 1:
             anchor_area_separation = anchor_area_means.max() - anchor_area_means.min()
         else:
             anchor_area_separation = torch.zeros((), device=device, dtype=dtype)
-        function_vectors = self.canonical_sdf.flatten(1)
-        function_vectors = F.normalize(function_vectors, dim=-1)
-        pairwise = torch.matmul(function_vectors, function_vectors.transpose(0, 1))
+        # Pairwise similarity in function-code space (not raw SDF)
+        code_vectors = F.normalize(self.anchor_function_codes.detach(), dim=-1)
+        pairwise = torch.matmul(code_vectors, code_vectors.transpose(0, 1))
         eye = torch.eye(self.num_anchors, device=device, dtype=torch.bool)
         pairwise_similarity = pairwise.masked_select(~eye).mean() if self.num_anchors > 1 else torch.zeros((), device=device, dtype=dtype)
         update_norm = (ode_dt * write_strength.unsqueeze(-1) * next_velocity).detach().pow(2).mean(dim=-1).sqrt()
@@ -395,9 +460,14 @@ class FAFModule(nn.Module):
         age = state["age"]
         assert torch.is_tensor(usage) and torch.is_tensor(age)
 
+        # Basis weights for diagnostics
+        basis_weights = torch.softmax(self.code_to_basis(self.anchor_function_codes), dim=-1)
+
         aux = {
             "query": query,
-            "function_codes": self.canonical_sdf.flatten(1).view(1, 1, self.num_anchors, -1).expand(B, N, -1, -1),
+            "function_codes": self.anchor_function_codes.detach().view(1, 1, self.num_anchors, -1).expand(B, N, -1, -1),
+            "canonical_sdf": canonical_sdf.detach(),
+            "basis_weights": basis_weights.detach(),
             "active_weights": weights,
             "anchor_proposals": proposals,
             "anchor_logits": proposal_logits,
@@ -411,8 +481,8 @@ class FAFModule(nn.Module):
             "anchor_trust_map": trust,
             "feature_modulation": feature_modulation,
             "anchor_features": anchor_features,
-            "coverage_score": sim_coverage,
-            "coverage_gap": (1.0 - sim_coverage).clamp_min(0.0),
+            "coverage_score": proposal_coverage,
+            "coverage_gap": (1.0 - proposal_coverage).clamp_min(0.0),
             "active_anchor_entropy": entropy,
             "active_anchor_entropy_norm": entropy / math.log(max(self.num_anchors, 2)),
             "effective_anchor_number": effective,
@@ -436,8 +506,6 @@ class FAFModule(nn.Module):
             "write_strength_std": write_strength.detach().std(unbiased=False),
             "memory_update_norm": update_norm.mean(),
             "quality_weighted_write": (write_strength.detach() * frame_quality.detach().unsqueeze(-1)).mean(),
-            "coverage_triggered_write_ratio": torch.zeros((), device=device, dtype=dtype),
-            "recycled_anchor_ratio": torch.zeros((), device=device, dtype=dtype),
             "dead_anchor_ratio": ((usage + weights.detach()) < 1.0e-3).float().mean(),
             "trust_mean": trust.detach().mean(),
             "trust_std": trust.detach().std(unbiased=False),
@@ -455,6 +523,7 @@ class FAFModule(nn.Module):
             "residual_l2": residual.detach().pow(2).mean().sqrt(),
             "safety_residual_l1": safety_residual.detach().abs().mean(),
             "residual_clip_hit_ratio": (raw_residual.detach().abs() >= self.residual_clip * 0.99).float().mean(),
+            "residual_proposal_sensitivity": residual_proposal_sensitivity,
             "residual_scale": residual_scale.detach(),
             "trust_max": trust_max.detach(),
             "retrieval_temperature": temperature.detach(),
@@ -480,6 +549,7 @@ class FAFModule(nn.Module):
             "quality": next_quality,
             "usage": (usage + weights.detach()).detach(),
             "age": (age + 1.0).detach(),
+            "step_count": step_count + 1,
             "prev_query": query.detach(),
             "prev_proposal": proposal_logits.detach(),
             "prev_area": area.detach(),

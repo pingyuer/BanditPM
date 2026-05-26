@@ -10,12 +10,12 @@ SLOT_NAMES = ("ed_large", "early_systole", "es_small", "early_diastole", "uncert
 
 
 class FunctionalAnchorBank(nn.Module):
-    """Semantic phase slots for ED/ES/cycle anchors."""
+    """Semantic phase slots for ED/ES/cycle anchors (legacy, used by FunctionalAnchorSegmenter only)."""
 
     def __init__(self, num_slots: int, state_dim: int, phase_dim: int, hidden_dim: int) -> None:
         super().__init__()
-        if int(num_slots) < 5:
-            raise ValueError("functional_anchor.num_slots must be >= 5 for semantic phase slots")
+        if int(num_slots) < 1:
+            raise ValueError("functional_anchor.num_slots must be >= 1")
         self.num_slots = int(num_slots)
         self.selector = nn.Sequential(
             nn.Linear(state_dim + phase_dim, hidden_dim),

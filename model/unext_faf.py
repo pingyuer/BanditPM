@@ -39,6 +39,7 @@ class UNeXtFAF(nn.Module):
         self.memory_ema = float(_cfg_get(method_cfg, "memory_ema", 0.9))
         self.enable_memory_update = bool(_cfg_get(method_cfg, "enable_memory_update", True))
         self.disable_trust_gate = bool(_cfg_get(method_cfg, "disable_trust_gate", False))
+        self.disable_proposal_in_residual = bool(_cfg_get(method_cfg, "disable_proposal_in_residual", False))
         self.temperature_init = float(_cfg_get(method_cfg, "temperature_init", 0.7))
         self.temperature_warmup_iters = int(_cfg_get(method_cfg, "temperature_warmup_iters", 500))
         residual_scale_cfg = _cfg_get(method_cfg, "residual_scale", {})
@@ -97,6 +98,7 @@ class UNeXtFAF(nn.Module):
             ode_warmup_iters=self.ode_warmup_iters,
             velocity_momentum=self.velocity_momentum,
             feature_modulation=self.feature_modulation,
+            disable_proposal_in_residual=self.disable_proposal_in_residual,
         )
 
     def _normalize(self, image: torch.Tensor) -> torch.Tensor:

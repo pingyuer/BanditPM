@@ -110,11 +110,13 @@ class LossComputer(nn.Module):
         self.lambda_functional_anchor_ode_raw_delta = float(functional_cfg.get("lambda_ode_raw_delta", 0.0))
         faf_cfg = cfg.model.get("unext_faf", {})
         self.is_faf = str(cfg.model.get("name", "")).lower() in {"unext_faf", "unext-faf", "faf"}
-        self.lambda_faf_anchor = float(faf_cfg.get("lambda_faf_anchor", 0.3))
+        self.lambda_faf_anchor = float(faf_cfg.get("lambda_faf_anchor", 0.15))
+        self.lambda_faf_oracle = float(faf_cfg.get("lambda_faf_oracle", 0.5))
+        self.lambda_faf_top1 = float(faf_cfg.get("lambda_faf_top1", 0.2))
         self.lambda_faf_base = float(faf_cfg.get("lambda_faf_base", 0.5))
         self.lambda_faf_coverage = float(faf_cfg.get("lambda_faf_coverage", 0.05))
         self.lambda_faf_sparse = float(faf_cfg.get("lambda_faf_sparse", 0.002))
-        self.lambda_faf_diversity = float(faf_cfg.get("lambda_faf_diversity", 0.001))
+        self.lambda_faf_diversity = float(faf_cfg.get("lambda_faf_diversity", 0.005))
         self.lambda_faf_temporal = float(faf_cfg.get("lambda_faf_temporal", 0.02))
         self.lambda_faf_write = float(faf_cfg.get("lambda_faf_write", 0.001))
         self.lambda_faf_residual_smallness = float(faf_cfg.get("lambda_faf_residual_smallness", 0.05))
@@ -313,7 +315,9 @@ class LossComputer(nn.Module):
         device = data["rgb"].device
         zero = torch.zeros((), device=device, dtype=torch.float32)
         out: Dict[str, torch.Tensor] = {}
-        anchor_terms = []
+        anchor_oracle_terms = []
+        anchor_top1_terms = []
+        anchor_aggregated_terms = []
         base_terms = []
         coverage_terms = []
         sparse_terms = []
@@ -343,12 +347,30 @@ class LossComputer(nn.Module):
                 soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
                 gt_mask = self._gt_object_masks(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
 
+                # --- Oracle proposal loss: min over anchors (strong signal) ---
+                anchor_proposals = aux.get("anchor_proposals")
+                if torch.is_tensor(anchor_proposals) and self.lambda_faf_oracle > 0:
+                    proposals = anchor_proposals[bi : bi + 1, :curr_num_obj]
+                    gt = gt_mask[:, :curr_num_obj].to(device=proposals.device, dtype=proposals.dtype).unsqueeze(2)
+                    bce = F.binary_cross_entropy_with_logits(proposals, gt.expand_as(proposals), reduction="none").mean(dim=(-2, -1))
+                    oracle = bce.min(dim=-1).values.mean()
+                    anchor_oracle_terms.append(oracle)
+
+                    # --- Top1 assignment loss: BCE of the highest-weight anchor ---
+                    active_weights = aux.get("active_weights")
+                    if torch.is_tensor(active_weights) and self.lambda_faf_top1 > 0:
+                        top1_idx = active_weights[bi, 0].argmax().item()
+                        if top1_idx < proposals.shape[2]:
+                            top1_bce = bce[:, :, top1_idx].mean()
+                            anchor_top1_terms.append(top1_bce)
+
+                # --- Aggregated proposal loss (weak auxiliary, reduced weight) ---
                 proposal_obj = aux.get("proposal_logits", aux.get("anchor_logits"))
                 if torch.is_tensor(proposal_obj) and self.lambda_faf_anchor > 0:
                     proposal_obj = proposal_obj[bi : bi + 1, :curr_num_obj]
-                    proposal_logits = aggregate(torch.sigmoid(proposal_obj), dim=1)
-                    ce, dice = self.mask_loss(proposal_logits, soft_gt)
-                    anchor_terms.append(ce + dice)
+                    proposal_logits_agg = aggregate(torch.sigmoid(proposal_obj), dim=1)
+                    ce, dice = self.mask_loss(proposal_logits_agg, soft_gt)
+                    anchor_aggregated_terms.append(ce + dice)
                     if prev_proposal is not None and self.lambda_faf_temporal > 0:
                         temporal_terms.append((torch.sigmoid(proposal_obj) - prev_proposal).abs().mean())
                     prev_proposal = torch.sigmoid(proposal_obj).detach()
@@ -359,15 +381,6 @@ class LossComputer(nn.Module):
                     base_logits = aggregate(torch.sigmoid(base_obj), dim=1)
                     ce, dice = self.mask_loss(base_logits, soft_gt)
                     base_terms.append(ce + dice)
-
-                anchor_proposals = aux.get("anchor_proposals")
-                if torch.is_tensor(anchor_proposals) and self.lambda_faf_anchor > 0:
-                    proposals = anchor_proposals[bi : bi + 1, :curr_num_obj]
-                    gt = gt_mask[:, :curr_num_obj].to(device=proposals.device, dtype=proposals.dtype).unsqueeze(2)
-                    probs = torch.sigmoid(proposals)
-                    bce = F.binary_cross_entropy_with_logits(proposals, gt.expand_as(proposals), reduction="none").mean(dim=(-2, -1))
-                    oracle = bce.min(dim=-1).values.mean()
-                    anchor_terms.append(0.25 * oracle)
 
                 for src, bucket, weight in (
                     ("coverage_gap", coverage_terms, self.lambda_faf_coverage),
@@ -392,7 +405,9 @@ class LossComputer(nn.Module):
                     diversity_terms.append(torch.relu(0.10 - area_sep.float().mean()))
 
         for name, terms, weight in (
-            ("anchor", anchor_terms, self.lambda_faf_anchor),
+            ("anchor_oracle", anchor_oracle_terms, self.lambda_faf_oracle),
+            ("anchor_top1", anchor_top1_terms, self.lambda_faf_top1),
+            ("anchor_aggregated", anchor_aggregated_terms, self.lambda_faf_anchor),
             ("base", base_terms, self.lambda_faf_base),
             ("coverage", coverage_terms, self.lambda_faf_coverage),
             ("sparse", sparse_terms, self.lambda_faf_sparse),

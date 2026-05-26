@@ -74,7 +74,9 @@ class FAFLossTests(unittest.TestCase):
         )
         losses = LossComputer(cfg, stage_cfg).compute(data, [1, 1])
         for key in (
-            "aux_faf_anchor",
+            "aux_faf_anchor_oracle",
+            "aux_faf_anchor_top1",
+            "aux_faf_anchor_aggregated",
             "aux_faf_base",
             "aux_faf_coverage",
             "aux_faf_sparse",

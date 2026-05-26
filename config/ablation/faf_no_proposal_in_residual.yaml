@@ -1,0 +1,11 @@
+# Ablation: disable proposal logits in residual head input
+# Tests whether residual actually depends on FAF proposals or just base features
+defaults:
+  - functional_anchor_camus
+  - _self_
+
+exp_id: "faf_no_proposal_residual"
+
+model:
+  functional_anchor:
+    disable_proposal_in_residual: true
