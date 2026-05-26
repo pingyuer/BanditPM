@@ -35,57 +35,54 @@ launch_run() {
     echo "  Window ${win} [GPU ${gpu}]: ${name}"
 }
 
-# Create tmux session with 4 windows
-tmux new-session -d -s "${SESSION_NAME}" -n "gpu0a"
-tmux new-window -t "${SESSION_NAME}" -n "gpu0b"
-tmux new-window -t "${SESSION_NAME}" -n "gpu1a"
-tmux new-window -t "${SESSION_NAME}" -n "gpu1b"
+# Create two active training windows per GPU for the A30 pair.
+tmux new-session -d -s "${SESSION_NAME}" -n "g0a"
+tmux new-window -t "${SESSION_NAME}" -n "g0b"
+tmux new-window -t "${SESSION_NAME}" -n "g1a"
+tmux new-window -t "${SESSION_NAME}" -n "g1b"
+tmux new-window -t "${SESSION_NAME}" -n "watch_echo"
+
+printf '%s\n' "${SESSION_NAME}" > /tmp/faf_session
+printf '%s\n' "${TIMESTAMP}" > /tmp/faf_ts
 
 echo "============================================"
 echo "FAF Experiment Suite: ${TIMESTAMP}"
 echo "Session: ${SESSION_NAME}"
-echo "4 tmux windows, 2 per GPU"
+echo "4 training windows, 2 per GPU"
 echo "============================================"
 
-# --- Window 0 (GPU 0): camus_baseline → echo_baseline ---
-launch_run 0 0 "camus_baseline" "functional_anchor_camus.yaml" \
-    "exp_id=faf_baseline_camus" \
+# --- Window g0a (GPU 0): CAMUS baseline ---
+launch_run g0a 0 "camus_baseline" "faf_camus.yaml" \
+    "exp_id=faf_camus_baseline" \
     "main_training.num_iterations=4000" \
-    "main_training.batch_size=24"
+    "main_training.batch_size=12" \
+    "main_training.num_workers=10"
 
-# --- Window 1 (GPU 0): camus_anchor_primary → echo_anchor_primary ---
-launch_run 1 0 "camus_anchor_primary" "functional_anchor_camus.yaml" \
-    "exp_id=faf_anchor_primary_camus" \
+# --- Window g0b (GPU 0): CAMUS no-update ablation ---
+launch_run g0b 0 "camus_no_update" "faf_camus.yaml" \
+    "exp_id=faf_camus_no_update" \
     "main_training.num_iterations=4000" \
-    "main_training.batch_size=24" \
-    "model.functional_anchor.prediction_mode=anchor_primary" \
-    "model.functional_anchor.residual_scale.init=0.05" \
-    "model.functional_anchor.residual_scale.max=0.25" \
-    "model.functional_anchor.lambda_base_seg=0.2" \
-    "model.functional_anchor.lambda_anchor=0.5"
+    "main_training.batch_size=12" \
+    "main_training.num_workers=10" \
+    "model.unext_faf.enable_memory_update=false"
 
-# --- Window 2 (GPU 1): camus_more_anchors → echo_more_anchors ---
-launch_run 2 1 "camus_more_anchors" "functional_anchor_camus.yaml" \
-    "exp_id=faf_more_anchors_camus" \
+# --- Window g1a (GPU 1): CAMUS single-anchor ablation ---
+launch_run g1a 1 "camus_single_anchor" "faf_camus.yaml" \
+    "exp_id=faf_camus_single_anchor" \
     "main_training.num_iterations=4000" \
-    "main_training.batch_size=24" \
-    "model.functional_anchor.num_slots=8" \
-    "model.functional_anchor.lambda_anchor=0.5" \
-    "model.functional_anchor.lambda_base_seg=0.3" \
-    "model.functional_anchor.lambda_slot_area_order=0.05" \
-    "model.functional_anchor.lambda_phase_slot_correlation=0.02"
+    "main_training.batch_size=12" \
+    "main_training.num_workers=10" \
+    "model.unext_faf.num_anchors=1"
 
-# --- Window 3 (GPU 1): camus_strong_mod → echo_strong_mod ---
-launch_run 3 1 "camus_strong_mod" "functional_anchor_camus.yaml" \
-    "exp_id=faf_strong_mod_camus" \
+# --- Window g1b (GPU 1): CAMUS no proposal-to-residual ablation ---
+launch_run g1b 1 "camus_no_proposal_residual" "faf_camus.yaml" \
+    "exp_id=faf_camus_no_proposal_residual" \
     "main_training.num_iterations=4000" \
-    "main_training.batch_size=24" \
-    "model.functional_anchor.residual_scale.init=0.05" \
-    "model.functional_anchor.residual_scale.max=0.30" \
-    "model.functional_anchor.residual_scale.warmup_iters=300" \
-    "model.functional_anchor.lambda_base_seg=0.3" \
-    "model.functional_anchor.lambda_residual_smallness=0.02" \
-    "model.functional_anchor.lambda_boundary_residual=0.15"
+    "main_training.batch_size=12" \
+    "main_training.num_workers=10" \
+    "model.unext_faf.disable_proposal_in_residual=true"
+
+tmux send-keys -t "${SESSION_NAME}:watch_echo" "cd '${PROJECT_DIR}' && bash scripts/watch_and_launch_echo.sh 2>&1 | tee '${LOG_DIR}/watch_echo.log'; exec bash" C-m
 
 echo ""
 echo "CAMUS experiments launched. Waiting for completion before EchoNet..."

@@ -15,12 +15,14 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
     anchor_ode_lr_ratio = stage_cfg.get("anchor_ode_lr_ratio", None)
     functional_anchor_lr_ratio = stage_cfg.get("functional_anchor_lr_ratio", None)
     unext_lr_ratio = float(stage_cfg.get("unext_lr_ratio", backbone_lr_ratio))
+    residual_head_lr_mult = float(stage_cfg.get("residual_head_lr_mult", 1.0))
 
     if anchor_ode_lr_ratio is not None or functional_anchor_lr_ratio is not None:
         method_lr_ratio = float(functional_anchor_lr_ratio if functional_anchor_lr_ratio is not None else anchor_ode_lr_ratio)
         method_group_name = "functional_anchor" if functional_anchor_lr_ratio is not None else "anchor_ode"
         unext_params = []
         temporal_params = []
+        residual_params = []
         embed_params = []
         other_params = []
         embedding_names = ['summary_pos', 'query_init', 'query_emb', 'obj_pe']
@@ -38,6 +40,12 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 unext_params.append(param)
                 if print_log:
                     log.info(f'{name} counted as a UNeXt/base segmenter parameter.')
+            elif method_group_name == "functional_anchor" and name.startswith(
+                ('residual_heads.', 'faf.residual_head.', 'faf.residual_refiner.', 'faf.trust_gate_net.')
+            ):
+                residual_params.append(param)
+                if print_log:
+                    log.info(f'{name} counted as a functional_anchor residual head parameter.')
             elif name.startswith((
                 'state_encoder.',
                 'ode_bank.',
@@ -77,6 +85,12 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'lr': base_lr * method_lr_ratio,
                 'weight_decay': weight_decay,
                 'name': method_group_name,
+            },
+            {
+                'params': residual_params,
+                'lr': base_lr * method_lr_ratio * residual_head_lr_mult,
+                'weight_decay': weight_decay,
+                'name': 'functional_anchor_residual_heads',
             },
             {
                 'params': embed_params,

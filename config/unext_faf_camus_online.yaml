@@ -10,7 +10,8 @@ exp_id: "unext_faf_camus_online"
 
 main_training:
   num_iterations: 4000
-  batch_size: 8
+  batch_size: 12
+  num_workers: 10
   lr_schedule: step
   lr_schedule_steps: [2000, 3200]
   lr_schedule_gamma: 0.1
@@ -21,7 +22,7 @@ main_training:
   ema_eval: false
 
 evaluation:
-  protocol_version: "v1_unext_faf"
+  protocol_version: "v3_unext_faf"
   threshold_search_during_training: false
   threshold_search_start: 0.30
   threshold_search_end: 0.75

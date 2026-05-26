@@ -1,0 +1,16 @@
+# Ablation: with feature modulation enabled
+defaults:
+  - unext_faf_camus_online
+  - _self_
+
+exp_id: "unext_faf_camus_feature_modulation"
+
+model:
+  unext_faf:
+    feature_modulation:
+      enabled: true
+      strengths:
+        low: 0.0
+        mid: 0.08
+        high: 0.12
+        dec: 0.06

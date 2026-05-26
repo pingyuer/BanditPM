@@ -368,8 +368,8 @@ class LossComputer(nn.Module):
                 proposal_obj = aux.get("proposal_logits", aux.get("anchor_logits"))
                 if torch.is_tensor(proposal_obj) and self.lambda_faf_anchor > 0:
                     proposal_obj = proposal_obj[bi : bi + 1, :curr_num_obj]
-                    proposal_logits_agg = aggregate(torch.sigmoid(proposal_obj), dim=1)
-                    ce, dice = self.mask_loss(proposal_logits_agg, soft_gt)
+                    proposal_binary_logits = aggregate(torch.sigmoid(proposal_obj), dim=1)
+                    ce, dice = self.mask_loss(proposal_binary_logits, soft_gt)
                     anchor_aggregated_terms.append(ce + dice)
                     if prev_proposal is not None and self.lambda_faf_temporal > 0:
                         temporal_terms.append((torch.sigmoid(proposal_obj) - prev_proposal).abs().mean())

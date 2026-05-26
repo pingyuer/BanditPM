@@ -1,0 +1,10 @@
+# Ablation: no memory update (affine state frozen)
+defaults:
+  - unext_faf_camus_online
+  - _self_
+
+exp_id: "unext_faf_camus_no_update"
+
+model:
+  unext_faf:
+    enable_memory_update: false

@@ -6,7 +6,7 @@ defaults:
   - _base_/schedules/default_3k
   - _self_
 
-exp_id: "unext_faf_echo_online"
+exp_id: "faf_echo"
 
 main_training:
   num_iterations: 4000

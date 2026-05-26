@@ -1,0 +1,10 @@
+# Ablation: residual head doesn't see proposal
+defaults:
+  - unext_faf_camus_online
+  - _self_
+
+exp_id: "unext_faf_camus_no_proposal_residual"
+
+model:
+  unext_faf:
+    disable_proposal_in_residual: true

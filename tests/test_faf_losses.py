@@ -86,7 +86,6 @@ class FAFLossTests(unittest.TestCase):
             "aux_faf_residual_smallness",
             "aux_faf_affine",
             "aux_faf_velocity",
-            "aux_faf_feature_modulation",
         ):
             self.assertIn(key, losses)
             self.assertTrue(torch.isfinite(losses[key]))

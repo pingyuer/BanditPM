@@ -1,4 +1,6 @@
 # @package _global_
+# UNeXtFAF base config — clean FAF design
+# Single decode path, feature modulation off by default
 model_name: "UNeXtFAF"
 
 model:
@@ -19,54 +21,59 @@ model:
     query:
       weight: 0.0
   unext_faf:
-    mode: "online"
-    offline_mode_reserved: false
     in_channels: 1
     num_classes: 2
     base_dim: 32
     value_dim: 128
-    num_anchors: 5
+    num_anchors: 8
     query_dim: 32
     code_dim: 32
     hidden_dim: 64
-    basis_dim: 4
+    basis_dim: 6
     anchor_size: 32
+
     residual_clip: 0.25
-    trust_max: 0.35
-    trust_min_warmup: 0.10
-    trust_curriculum_iters: 1500
+    trust_max: 0.8
     retrieval_temperature: 0.25
     temperature_init: 0.7
     temperature_warmup_iters: 500
     memory_ema: 0.9
     enable_memory_update: true
     disable_trust_gate: false
+    disable_proposal_in_residual: false
+    prediction_mode: "proposal_primary"
+
     residual_scale:
-      init: 0.02
-      max: 0.12
+      init: 0.03
+      max: 0.15
       warmup_iters: 1500
-    feature_modulation:
-      enabled: true
-      strengths:
-        low: 0.0
-        mid: 0.08
-        high: 0.12
-        dec: 0.06
+
     trust_warmup_iters: 500
+    trust_min_warmup: 0.10
+    trust_curriculum_iters: 1500
+
+    feature_modulation:
+      enabled: false
+
     ode_update:
-      dt_init: 0.5
-      dt_max: 1.0
+      dt_init: 0.2
+      dt_max: 0.8
       warmup_iters: 1500
       velocity_momentum: 0.8
+      truncated_bptt_steps: 0
+
+    # Loss weights — FAF-main design
+    lambda_faf_base: 0.1
+    lambda_faf_oracle: 0.5
+    lambda_faf_top1: 0.2
     lambda_faf_anchor: 0.3
-    lambda_faf_base: 0.5
-    lambda_faf_coverage: 0.05
-    lambda_faf_sparse: 0.002
+    lambda_faf_coverage: 0.02
+    lambda_faf_sparse: 0.0         # off, just record
     lambda_faf_diversity: 0.001
-    lambda_faf_temporal: 0.02
-    lambda_faf_write: 0.001
-    lambda_faf_residual_smallness: 0.05
+    lambda_faf_temporal: 0.01
+    lambda_faf_write: 0.0005
+    lambda_faf_residual_smallness: 0.02
     residual_smallness_start_iter: 1500
-    lambda_faf_affine: 0.001
-    lambda_faf_velocity: 0.001
-    lambda_faf_feature_modulation: 0.001
+    lambda_faf_affine: 0.0005
+    lambda_faf_velocity: 0.0005
+    lambda_faf_feature_modulation: 0.0

@@ -1,12 +1,12 @@
 defaults:
-  - echonet_ed2es_endpoint_predinit
-  - _base_/datasets/echo
+  - camus_short_dense_predinit
+  - _base_/datasets/camus
   - _base_/models/unext_faf
   - _base_/runtime/default_runtime
   - _base_/schedules/default_3k
   - _self_
 
-exp_id: "unext_faf_echo_online"
+exp_id: "faf_camus"
 
 main_training:
   num_iterations: 4000
@@ -21,12 +21,6 @@ main_training:
   use_ema: false
   ema_eval: false
 
-model:
-  unext_faf:
-    trust_max: 0.8
-    residual_scale:
-      max: 0.15
-
 evaluation:
   protocol_version: "v3_unext_faf"
   threshold_search_during_training: false
@@ -34,15 +28,15 @@ evaluation:
   threshold_search_end: 0.75
   threshold_search_step: 0.01
   tta:
-    enabled: false
-    modes: ["identity"]
+    enabled: true
+    modes: ["identity", "hflip"]
   postprocess:
     enabled: true
     largest_component: true
     fill_holes: true
     remove_small_objects: true
-    min_size: 16
-    binary_closing: true
+    min_size: 8
+    binary_closing: false
 
 eval_stage:
   test_every_eval: false

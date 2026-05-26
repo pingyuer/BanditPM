@@ -1,0 +1,10 @@
+# Ablation: trust=1 gate=1 (no safety gating)
+defaults:
+  - unext_faf_camus_online
+  - _self_
+
+exp_id: "unext_faf_camus_no_trust_gate"
+
+model:
+  unext_faf:
+    disable_trust_gate: true
