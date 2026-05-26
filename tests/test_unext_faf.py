@@ -79,22 +79,36 @@ class UNeXtFAFTests(unittest.TestCase):
                 "affine_velocity_norm",
                 "retrieval_temperature",
                 "residual_scale",
+                "decoder_object_logits",
+                "safety_residual_logits",
+                "feature_modulation",
+                "feature_modulation_l1",
+                "feature_modulation_l1_high",
+                "trust_easy_mean",
+                "trust_hard_mean",
+                "anchor_area_separation",
             ):
                 self.assertIn(key, aux)
             self.assertEqual(aux["anchor_proposals"].shape, (2, 1, 4, 32, 32))
             self.assertTrue(torch.allclose(aux["active_weights"].sum(dim=-1), torch.ones(2, 1), atol=1.0e-5))
             self.assertTrue(torch.isfinite(aux["effective_anchor_number"]).all())
             self.assertTrue(torch.isfinite(aux["anchor_proposals"]).all())
+            self.assertTrue(torch.isfinite(aux["feature_modulation_l1"]))
+            self.assertGreaterEqual(float(aux["feature_modulation_l1_high"]), 0.0)
             self.assertLessEqual(float(aux["affine_delta"][..., 0].abs().max()), 0.0801)
             self.assertLessEqual(float(aux["affine_delta"][..., 2].abs().max()), 0.0501)
 
-    def test_initial_output_stays_near_base(self):
+    def test_feature_modulation_and_warmup_trust_are_active(self):
         torch.manual_seed(302)
         model = UNeXtFAF(_cfg().model)
-        out = model(_batch(batch_size=1, frames=2))
+        data = _batch(batch_size=1, frames=2)
+        data["current_iter"] = 0
+        out = model(data)
         aux = out["memory_aux_1"]["faf_aux"]
         diff = (aux["final_object_logits"] - aux["base_object_logits"]).abs().mean()
-        self.assertLess(float(diff), 0.05)
+        self.assertTrue(torch.isfinite(diff))
+        self.assertGreater(float(aux["trust"].mean()), 0.09)
+        self.assertGreater(float(aux["feature_modulation_l1"]), 0.0)
 
     def test_ode_update_can_be_disabled(self):
         torch.manual_seed(303)

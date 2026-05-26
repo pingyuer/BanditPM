@@ -46,6 +46,9 @@ class UNeXtFAF(nn.Module):
         self.residual_scale_max = float(_cfg_get(residual_scale_cfg, "max", 0.12)) if hasattr(residual_scale_cfg, "get") else 0.12
         self.residual_warmup_iters = int(_cfg_get(residual_scale_cfg, "warmup_iters", 1500)) if hasattr(residual_scale_cfg, "get") else 1500
         self.trust_warmup_iters = int(_cfg_get(method_cfg, "trust_warmup_iters", 500))
+        self.trust_min_warmup = float(_cfg_get(method_cfg, "trust_min_warmup", 0.10))
+        self.trust_curriculum_iters = int(_cfg_get(method_cfg, "trust_curriculum_iters", 1500))
+        self.feature_modulation = _cfg_get(method_cfg, "feature_modulation", {})
         ode_cfg = _cfg_get(method_cfg, "ode_update", {})
         self.ode_dt_init = float(_cfg_get(ode_cfg, "dt_init", 0.5)) if hasattr(ode_cfg, "get") else 0.5
         self.ode_dt_max = float(_cfg_get(ode_cfg, "dt_max", 1.0)) if hasattr(ode_cfg, "get") else 1.0
@@ -87,10 +90,13 @@ class UNeXtFAF(nn.Module):
             residual_scale_max=self.residual_scale_max,
             residual_warmup_iters=self.residual_warmup_iters,
             trust_warmup_iters=self.trust_warmup_iters,
+            trust_min_warmup=self.trust_min_warmup,
+            trust_curriculum_iters=self.trust_curriculum_iters,
             ode_dt_init=self.ode_dt_init,
             ode_dt_max=self.ode_dt_max,
             ode_warmup_iters=self.ode_warmup_iters,
             velocity_momentum=self.velocity_momentum,
+            feature_modulation=self.feature_modulation,
         )
 
     def _normalize(self, image: torch.Tensor) -> torch.Tensor:
@@ -108,10 +114,13 @@ class UNeXtFAF(nn.Module):
         max_num_objects = max(max(num_objects), 1)
         state = self.faf.initial_state(B, max_num_objects, images.device, images.dtype)
         out: Dict = {"num_objects": num_objects}
-        global_step = data.get("global_step", data.get("current_iter", 0))
+        global_step = data.get("global_step", data.get("current_iter"))
 
         for ti in range(T):
-            feat = self.backbone(self._normalize(images[:, ti]))
+            image = self._normalize(images[:, ti])
+            encoded = self.backbone.encode(image)
+            base_decoded = self.backbone.decode(encoded["low"], encoded["mid"], encoded["high"], image.shape[-2:])
+            feat = {**encoded, **base_decoded}
             feats = {
                 "low": feat["low"],
                 "mid": feat["mid"],
@@ -119,20 +128,31 @@ class UNeXtFAF(nn.Module):
                 "dec": feat["decoder_feature"],
             }
             base_object_logits = feat["logits"][:, 1:2].expand(-1, max_num_objects, -1, -1)
-            final_object_logits, faf_aux, state = self.faf.forward_step(
+            safety_base_logits, faf_aux, state = self.faf.forward_step(
                 feats,
                 base_object_logits,
                 state,
                 global_step=global_step,
             )
+            modulated = self.backbone.decode(
+                encoded["low"],
+                encoded["mid"],
+                encoded["high"],
+                image.shape[-2:],
+                modulation=faf_aux.get("feature_modulation"),
+            )
+            decoder_object_logits = modulated["logits"][:, 1:2].expand(-1, max_num_objects, -1, -1)
+            final_object_logits = decoder_object_logits + faf_aux["safety_residual_logits"]
             logits, masks = self._object_logits_to_full(final_object_logits)
 
             faf_aux = {
                 **faf_aux,
                 "base_object_logits": base_object_logits,
+                "decoder_object_logits": decoder_object_logits,
                 "final_object_logits": final_object_logits,
                 "base_logits": base_object_logits,
                 "final_logits": final_object_logits,
+                "safety_base_logits": safety_base_logits,
                 "mode": "online",
                 "trust_mean": faf_aux["trust_mean"],
                 "anchor_trust_ratio": faf_aux["anchor_trust_ratio"],

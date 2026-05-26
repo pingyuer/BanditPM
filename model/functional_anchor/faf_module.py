@@ -60,10 +60,13 @@ class FAFModule(nn.Module):
         residual_scale_max: float = 0.12,
         residual_warmup_iters: int = 1500,
         trust_warmup_iters: int = 500,
+        trust_min_warmup: float = 0.10,
+        trust_curriculum_iters: int = 1500,
         ode_dt_init: float = 0.5,
         ode_dt_max: float = 1.0,
         ode_warmup_iters: int = 1500,
         velocity_momentum: float = 0.8,
+        feature_modulation: dict | None = None,
     ) -> None:
         super().__init__()
         self.num_anchors = int(num_anchors)
@@ -78,6 +81,8 @@ class FAFModule(nn.Module):
         self.residual_scale_max = float(residual_scale_max)
         self.residual_warmup_iters = int(residual_warmup_iters)
         self.trust_warmup_iters = int(trust_warmup_iters)
+        self.trust_min_warmup = float(trust_min_warmup)
+        self.trust_curriculum_iters = int(trust_curriculum_iters)
         self.ode_dt_init = float(ode_dt_init)
         self.ode_dt_max = float(ode_dt_max)
         self.ode_warmup_iters = int(ode_warmup_iters)
@@ -85,6 +90,13 @@ class FAFModule(nn.Module):
         self.memory_ema = float(memory_ema)
         self.enable_memory_update = bool(enable_memory_update)
         self.disable_trust_gate = bool(disable_trust_gate)
+        feature_modulation = feature_modulation or {}
+        self.enable_feature_modulation = bool(feature_modulation.get("enabled", True))
+        default_strengths = {"low": 0.0, "mid": 0.08, "high": 0.12, "dec": 0.06}
+        strengths = feature_modulation.get("strengths", default_strengths) or default_strengths
+        self.modulation_strengths = {
+            level: float(strengths.get(level, default_strengths[level])) for level in ("low", "mid", "high", "dec")
+        }
 
         pooled_dim = sum(feature_dims.values())
         self.query_net = nn.Sequential(
@@ -94,10 +106,11 @@ class FAFModule(nn.Module):
         )
         self.anchor_keys = nn.Parameter(_orthogonal_rows(self.num_anchors, query_dim))
         anchors = [
-            _ellipse_sdf(anchor_size, 0.62, 0.78, 0.00, 0.00),
-            _ellipse_sdf(anchor_size, 0.50, 0.64, 0.00, 0.00),
-            _ellipse_sdf(anchor_size, 0.36, 0.48, 0.00, 0.00),
-            _ellipse_sdf(anchor_size, 0.48, 0.62, -0.12, 0.06),
+            _ellipse_sdf(anchor_size, 0.66, 0.82, 0.00, 0.00),
+            _ellipse_sdf(anchor_size, 0.50, 0.66, 0.03, 0.00),
+            _ellipse_sdf(anchor_size, 0.34, 0.46, 0.00, 0.02),
+            _ellipse_sdf(anchor_size, 0.52, 0.58, -0.14, 0.07),
+            _ellipse_sdf(anchor_size, 0.44, 0.72, 0.12, -0.05),
         ]
         while len(anchors) < self.num_anchors:
             idx = len(anchors)
@@ -119,7 +132,7 @@ class FAFModule(nn.Module):
             nn.GELU(),
             nn.Conv2d(hidden_dim, 1, 1),
         )
-        nn.init.zeros_(self.residual_head[-1].weight)
+        nn.init.normal_(self.residual_head[-1].weight, mean=0.0, std=1.0e-3)
         nn.init.zeros_(self.residual_head[-1].bias)
         self.trust_gate = nn.Sequential(
             nn.Conv2d(dec_dim + 4, hidden_dim, 3, padding=1),
@@ -130,8 +143,19 @@ class FAFModule(nn.Module):
         with torch.no_grad():
             self.trust_gate[-1].bias[0] = _logit(0.15)
             self.trust_gate[-1].bias[1] = _logit(0.50)
+        self.modulation_heads = nn.ModuleDict()
+        for level, dim in feature_dims.items():
+            self.modulation_heads[level] = nn.Sequential(
+                nn.Conv2d(4, max(8, hidden_dim // 2), 3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(max(8, hidden_dim // 2), dim * 2, 1),
+            )
+            nn.init.normal_(self.modulation_heads[level][-1].weight, mean=0.0, std=5.0e-3)
+            nn.init.zeros_(self.modulation_heads[level][-1].bias)
 
     def _scheduled(self, step, init: float, final: float, warmup_iters: int, device, dtype) -> torch.Tensor:
+        if step is None:
+            return torch.tensor(final, device=device, dtype=dtype)
         if warmup_iters <= 0:
             return torch.tensor(final, device=device, dtype=dtype)
         if torch.is_tensor(step):
@@ -151,7 +175,51 @@ class FAFModule(nn.Module):
             "age": torch.zeros(shape, device=device, dtype=dtype),
             "prev_query": None,
             "prev_proposal": None,
+            "prev_area": None,
         }
+
+    def _trust_floor(self, step, device, dtype) -> torch.Tensor:
+        if step is None or self.trust_curriculum_iters <= 0:
+            return torch.zeros((), device=device, dtype=dtype)
+        if torch.is_tensor(step):
+            step_value = float(step.detach().flatten()[0].item())
+        else:
+            step_value = float(step or 0)
+        ratio = min(max(step_value / float(self.trust_curriculum_iters), 0.0), 1.0)
+        return torch.tensor(self.trust_min_warmup * (1.0 - ratio), device=device, dtype=dtype)
+
+    def _build_feature_modulation(
+        self,
+        feats: dict[str, torch.Tensor],
+        base_logits: torch.Tensor,
+        proposal_logits: torch.Tensor,
+        query_aux: dict[str, torch.Tensor],
+        trust_map: torch.Tensor,
+    ) -> tuple[dict[str, dict[str, torch.Tensor]], dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        B, N = base_logits.shape[:2]
+        base_prob = torch.sigmoid(base_logits).mean(dim=1, keepdim=True)
+        proposal_prob = torch.sigmoid(proposal_logits).mean(dim=1, keepdim=True)
+        uncertainty = query_aux["base_uncertainty_map"].mean(dim=1, keepdim=True)
+        trust = trust_map.mean(dim=1, keepdim=True)
+        seed = torch.cat([base_prob, proposal_prob, uncertainty, trust], dim=1)
+        modulation: dict[str, dict[str, torch.Tensor]] = {}
+        anchor_features: dict[str, torch.Tensor] = {}
+        modulation_l1: dict[str, torch.Tensor] = {}
+        for level, feat in feats.items():
+            strength = self.modulation_strengths.get(level, 0.0)
+            if not self.enable_feature_modulation or strength <= 0.0:
+                shift = torch.zeros_like(feat)
+                scale = torch.zeros_like(feat)
+            else:
+                resized_seed = F.interpolate(seed, size=feat.shape[-2:], mode="bilinear", align_corners=False)
+                raw = self.modulation_heads[level](resized_seed)
+                scale_raw, shift_raw = raw.chunk(2, dim=1)
+                scale = strength * torch.tanh(scale_raw)
+                shift = strength * torch.tanh(shift_raw)
+            modulation[level] = {"scale": scale, "shift": shift}
+            anchor_features[level] = shift.unsqueeze(1).expand(B, N, -1, -1, -1)
+            modulation_l1[level] = scale.abs().mean() + shift.abs().mean()
+        return modulation, anchor_features, modulation_l1
 
     def _query(
         self,
@@ -233,6 +301,7 @@ class FAFModule(nn.Module):
             global_step, self.residual_scale_init, self.residual_scale_max, self.residual_warmup_iters, device, dtype
         )
         trust_max = self._scheduled(global_step, 0.05, self.trust_max, self.trust_warmup_iters, device, dtype)
+        trust_floor = self._trust_floor(global_step, device, dtype)
         ode_dt = self._scheduled(global_step, self.ode_dt_init, self.ode_dt_max, self.ode_warmup_iters, device, dtype)
 
         query, query_aux = self._query(feats, base_logits, state.get("prev_query"))
@@ -260,7 +329,15 @@ class FAFModule(nn.Module):
         affine_delta = torch.tanh(raw_delta) * limits
 
         frame_quality = (1.0 - query_aux["query_uncertainty"]).clamp(0.05, 1.0)
-        write_strength = weights * frame_quality.unsqueeze(-1)
+        prev_area = state.get("prev_area")
+        area = query_aux["query_area"]
+        if torch.is_tensor(prev_area):
+            area_motion = (area - prev_area).abs().clamp(0.0, 0.25) * 4.0
+        else:
+            area_motion = torch.zeros_like(area)
+        velocity_consistency = torch.exp(-(affine_delta.detach() - velocity_state.detach()).abs().mean(dim=-1))
+        state_competition = (0.45 + 0.35 * area_motion.unsqueeze(-1) + 0.20 * velocity_consistency).clamp(0.05, 1.0)
+        write_strength = weights * frame_quality.unsqueeze(-1) * state_competition
         if self.enable_memory_update:
             next_velocity = self.velocity_momentum * velocity_state + (1.0 - self.velocity_momentum) * affine_delta.detach()
             next_affine = affine_state + ode_dt * write_strength.unsqueeze(-1) * next_velocity
@@ -291,12 +368,22 @@ class FAFModule(nn.Module):
             gate = torch.ones_like(base_logits)
         else:
             trust_gate = self.trust_gate(residual_in).view(B, N, 2, H, W)
-            trust = torch.sigmoid(trust_gate[:, :, 0]) * trust_max
+            trust_raw = torch.sigmoid(trust_gate[:, :, 0])
+            trust = trust_floor + (trust_max - trust_floor).clamp_min(0.0) * trust_raw
             gate = torch.sigmoid(trust_gate[:, :, 1])
-        final_logits = base_logits + gate * trust * residual
+        safety_residual = gate * trust * residual
+        final_logits = base_logits + safety_residual
+        feature_modulation, anchor_features, modulation_l1 = self._build_feature_modulation(
+            feats, base_logits, proposal_logits, query_aux, trust
+        )
 
         sim_coverage = (weights * scores.sigmoid()).sum(dim=-1)
-        anchor_area = torch.sigmoid(proposals).mean(dim=(-2, -1)).detach()
+        anchor_area = torch.sigmoid(proposals).mean(dim=(-2, -1))
+        anchor_area_means = anchor_area.mean(dim=(0, 1))
+        if self.num_anchors > 1:
+            anchor_area_separation = anchor_area_means.max() - anchor_area_means.min()
+        else:
+            anchor_area_separation = torch.zeros((), device=device, dtype=dtype)
         function_vectors = self.canonical_sdf.flatten(1)
         function_vectors = F.normalize(function_vectors, dim=-1)
         pairwise = torch.matmul(function_vectors, function_vectors.transpose(0, 1))
@@ -318,25 +405,30 @@ class FAFModule(nn.Module):
             "aggregated_sdf": proposal_logits,
             "aggregated_residual": residual,
             "residual_logits": residual,
+            "safety_residual_logits": safety_residual,
             "trust": trust,
             "gate": gate,
             "anchor_trust_map": trust,
-            "coverage_score": sim_coverage.detach(),
-            "coverage_gap": (1.0 - sim_coverage).clamp_min(0.0).detach(),
-            "active_anchor_entropy": entropy.detach(),
-            "active_anchor_entropy_norm": (entropy / math.log(max(self.num_anchors, 2))).detach(),
-            "effective_anchor_number": effective.detach(),
+            "feature_modulation": feature_modulation,
+            "anchor_features": anchor_features,
+            "coverage_score": sim_coverage,
+            "coverage_gap": (1.0 - sim_coverage).clamp_min(0.0),
+            "active_anchor_entropy": entropy,
+            "active_anchor_entropy_norm": entropy / math.log(max(self.num_anchors, 2)),
+            "effective_anchor_number": effective,
             "top1_anchor_weight": top_values[..., 0].detach(),
             "top3_anchor_weight_sum": top_values.sum(dim=-1).detach(),
             "anchor_area": anchor_area,
             "proposal_area_std": anchor_area.std(dim=-1, unbiased=False),
             "proposal_area_range": anchor_area.amax(dim=-1) - anchor_area.amin(dim=-1),
-            "anchor_function_diversity": (1.0 - pairwise_similarity).detach(),
-            "anchor_area_diversity": anchor_area.std(dim=-1, unbiased=False).mean().detach(),
-            "anchor_pairwise_similarity": pairwise_similarity.detach(),
+            "anchor_function_diversity": 1.0 - pairwise_similarity,
+            "anchor_area_diversity": anchor_area.std(dim=-1, unbiased=False).mean(),
+            "anchor_area_separation": anchor_area_separation,
+            "anchor_pairwise_similarity": pairwise_similarity,
+            "anchor_phase_purity_proxy": top_values[..., 0].detach(),
             "affine_delta": affine_delta,
             "affine_state": affine_state.detach(),
-            "affine_delta_norm": affine_delta.detach().pow(2).mean(dim=-1).sqrt().mean(),
+            "affine_delta_norm": affine_delta.pow(2).mean(dim=-1).sqrt().mean(),
             "affine_velocity_norm": next_velocity.detach().pow(2).mean(dim=-1).sqrt().mean(),
             "ode_velocity_norm": next_velocity.detach().pow(2).mean(dim=-1).sqrt().mean(),
             "write_strength": write_strength.detach(),
@@ -349,16 +441,29 @@ class FAFModule(nn.Module):
             "dead_anchor_ratio": ((usage + weights.detach()) < 1.0e-3).float().mean(),
             "trust_mean": trust.detach().mean(),
             "trust_std": trust.detach().std(unbiased=False),
+            "trust_floor": trust_floor.detach(),
             "gate_mean": gate.detach().mean(),
             "anchor_trust_ratio": trust.detach().mean(),
             "image_trust_ratio": (1.0 - trust.detach()).mean(),
+            "trust_easy_mean": trust.detach().masked_select((query_aux["base_uncertainty_map"].detach() < 0.35)).mean()
+            if (query_aux["base_uncertainty_map"].detach() < 0.35).any()
+            else trust.detach().mean(),
+            "trust_hard_mean": trust.detach().masked_select((query_aux["base_uncertainty_map"].detach() >= 0.35)).mean()
+            if (query_aux["base_uncertainty_map"].detach() >= 0.35).any()
+            else trust.detach().mean(),
             "residual_l1": residual.detach().abs().mean(),
             "residual_l2": residual.detach().pow(2).mean().sqrt(),
+            "safety_residual_l1": safety_residual.detach().abs().mean(),
             "residual_clip_hit_ratio": (raw_residual.detach().abs() >= self.residual_clip * 0.99).float().mean(),
             "residual_scale": residual_scale.detach(),
             "trust_max": trust_max.detach(),
             "retrieval_temperature": temperature.detach(),
             "ode_dt": ode_dt.detach(),
+            "feature_modulation_l1": torch.stack(list(modulation_l1.values())).mean(),
+            "feature_modulation_l1_low": modulation_l1["low"],
+            "feature_modulation_l1_mid": modulation_l1["mid"],
+            "feature_modulation_l1_high": modulation_l1["high"],
+            "feature_modulation_l1_dec": modulation_l1["dec"],
             "memory_stats": {
                 "quality": next_quality,
                 "usage": (usage + weights.detach()).detach(),
@@ -377,5 +482,6 @@ class FAFModule(nn.Module):
             "age": (age + 1.0).detach(),
             "prev_query": query.detach(),
             "prev_proposal": proposal_logits.detach(),
+            "prev_area": area.detach(),
         }
         return final_logits, aux, next_state

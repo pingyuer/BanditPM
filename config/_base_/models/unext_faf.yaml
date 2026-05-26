@@ -25,7 +25,7 @@ model:
     num_classes: 2
     base_dim: 32
     value_dim: 128
-    num_anchors: 4
+    num_anchors: 5
     query_dim: 32
     code_dim: 32
     hidden_dim: 64
@@ -33,6 +33,8 @@ model:
     anchor_size: 32
     residual_clip: 0.25
     trust_max: 0.35
+    trust_min_warmup: 0.10
+    trust_curriculum_iters: 1500
     retrieval_temperature: 0.25
     temperature_init: 0.7
     temperature_warmup_iters: 500
@@ -43,6 +45,13 @@ model:
       init: 0.02
       max: 0.12
       warmup_iters: 1500
+    feature_modulation:
+      enabled: true
+      strengths:
+        low: 0.0
+        mid: 0.08
+        high: 0.12
+        dec: 0.06
     trust_warmup_iters: 500
     ode_update:
       dt_init: 0.5
@@ -57,5 +66,7 @@ model:
     lambda_faf_temporal: 0.02
     lambda_faf_write: 0.001
     lambda_faf_residual_smallness: 0.05
+    residual_smallness_start_iter: 1500
     lambda_faf_affine: 0.001
     lambda_faf_velocity: 0.001
+    lambda_faf_feature_modulation: 0.001

@@ -1,0 +1,11 @@
+defaults:
+  - unext_faf_echo_online
+  - _self_
+
+exp_id: "unext_faf_echo_ablate_no_trust_curriculum"
+ablation_type: "no_trust_curriculum"
+
+model:
+  unext_faf:
+    trust_min_warmup: 0.0
+    trust_curriculum_iters: 0

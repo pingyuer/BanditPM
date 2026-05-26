@@ -82,17 +82,47 @@ class UNeXtBackbone(nn.Module):
         mid: torch.Tensor,
         high: torch.Tensor,
         output_size: tuple[int, int],
+        modulation: dict[str, dict[str, torch.Tensor] | torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
+        low = self._apply_modulation(low, modulation, "low")
+        mid = self._apply_modulation(mid, modulation, "mid")
+        high = self._apply_modulation(high, modulation, "high")
         dec_mid = self.up1(high, mid)
         dec_low = self.up2(dec_mid, low)
         dec = F.interpolate(dec_low, size=output_size, mode="bilinear", align_corners=False)
         dec = self.full_res(dec)
+        dec = self._apply_modulation(dec, modulation, "dec")
         return {
             "logits": self.logit_head(dec),
             "decoder_feature": dec,
             "value": self.value_proj(dec_mid),
             "high_value": self.high_proj(high),
         }
+
+    def _apply_modulation(
+        self,
+        feat: torch.Tensor,
+        modulation: dict[str, dict[str, torch.Tensor] | torch.Tensor] | None,
+        level: str,
+    ) -> torch.Tensor:
+        if not modulation or level not in modulation:
+            return feat
+        item = modulation[level]
+        if torch.is_tensor(item):
+            shift = item
+            scale = None
+        else:
+            scale = item.get("scale")
+            shift = item.get("shift")
+        if scale is not None:
+            if scale.shape[-2:] != feat.shape[-2:]:
+                scale = F.interpolate(scale, size=feat.shape[-2:], mode="bilinear", align_corners=False)
+            feat = feat * (1.0 + scale)
+        if shift is not None:
+            if shift.shape[-2:] != feat.shape[-2:]:
+                shift = F.interpolate(shift, size=feat.shape[-2:], mode="bilinear", align_corners=False)
+            feat = feat + shift
+        return feat
 
     def logits_from_decoder_feature(self, decoder_feature: torch.Tensor) -> torch.Tensor:
         return self.logit_head(decoder_feature)

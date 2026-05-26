@@ -120,6 +120,8 @@ class LossComputer(nn.Module):
         self.lambda_faf_residual_smallness = float(faf_cfg.get("lambda_faf_residual_smallness", 0.05))
         self.lambda_faf_affine = float(faf_cfg.get("lambda_faf_affine", 0.0))
         self.lambda_faf_velocity = float(faf_cfg.get("lambda_faf_velocity", 0.0))
+        self.lambda_faf_feature_modulation = float(faf_cfg.get("lambda_faf_feature_modulation", 0.001))
+        self.faf_residual_smallness_start_iter = int(faf_cfg.get("residual_smallness_start_iter", 0))
 
     def _default_supervision_mask(
         self,
@@ -321,6 +323,13 @@ class LossComputer(nn.Module):
         residual_terms = []
         affine_terms = []
         velocity_terms = []
+        modulation_terms = []
+        current_iter = int(data.get("global_step", data.get("current_iter", 0)) or 0)
+        residual_smallness_weight = (
+            self.lambda_faf_residual_smallness
+            if current_iter >= self.faf_residual_smallness_start_iter
+            else 0.0
+        )
 
         for bi in range(batch_size):
             curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
@@ -365,9 +374,10 @@ class LossComputer(nn.Module):
                     ("active_anchor_entropy", sparse_terms, self.lambda_faf_sparse),
                     ("anchor_pairwise_similarity", diversity_terms, self.lambda_faf_diversity),
                     ("memory_update_norm", write_terms, self.lambda_faf_write),
-                    ("residual_logits", residual_terms, self.lambda_faf_residual_smallness),
+                    ("residual_logits", residual_terms, residual_smallness_weight),
                     ("affine_delta_norm", affine_terms, self.lambda_faf_affine),
                     ("affine_velocity_norm", velocity_terms, self.lambda_faf_velocity),
+                    ("feature_modulation_l1", modulation_terms, self.lambda_faf_feature_modulation),
                 ):
                     value = aux.get(src)
                     if torch.is_tensor(value) and weight > 0:
@@ -377,6 +387,9 @@ class LossComputer(nn.Module):
                             bucket.append(item.float().abs().mean())
                         else:
                             bucket.append(item.float().mean())
+                area_sep = aux.get("anchor_area_separation")
+                if torch.is_tensor(area_sep) and self.lambda_faf_diversity > 0:
+                    diversity_terms.append(torch.relu(0.10 - area_sep.float().mean()))
 
         for name, terms, weight in (
             ("anchor", anchor_terms, self.lambda_faf_anchor),
@@ -386,9 +399,10 @@ class LossComputer(nn.Module):
             ("diversity", diversity_terms, self.lambda_faf_diversity),
             ("temporal", temporal_terms, self.lambda_faf_temporal),
             ("write", write_terms, self.lambda_faf_write),
-            ("residual_smallness", residual_terms, self.lambda_faf_residual_smallness),
+            ("residual_smallness", residual_terms, residual_smallness_weight),
             ("affine", affine_terms, self.lambda_faf_affine),
             ("velocity", velocity_terms, self.lambda_faf_velocity),
+            ("feature_modulation", modulation_terms, self.lambda_faf_feature_modulation),
         ):
             if terms:
                 raw = torch.stack(terms).mean()

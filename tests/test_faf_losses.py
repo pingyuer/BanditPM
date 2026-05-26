@@ -41,6 +41,7 @@ def _cfg():
                     "lambda_faf_temporal": 0.02,
                     "lambda_faf_write": 0.001,
                     "lambda_faf_residual_smallness": 0.05,
+                    "lambda_faf_feature_modulation": 0.001,
                 },
             }
         }
@@ -83,6 +84,7 @@ class FAFLossTests(unittest.TestCase):
             "aux_faf_residual_smallness",
             "aux_faf_affine",
             "aux_faf_velocity",
+            "aux_faf_feature_modulation",
         ):
             self.assertIn(key, losses)
             self.assertTrue(torch.isfinite(losses[key]))

@@ -1126,6 +1126,8 @@ class Trainer:
                 "coverage_gap": [],
                 "anchor_function_diversity": [],
                 "anchor_area_diversity": [],
+                "anchor_area_separation": [],
+                "anchor_phase_purity_proxy": [],
                 "anchor_pairwise_similarity": [],
                 "write_strength_mean": [],
                 "memory_update_norm": [],
@@ -1135,13 +1137,21 @@ class Trainer:
                 "dead_anchor_ratio": [],
                 "recycled_anchor_ratio": [],
                 "trust_mean": [],
+                "trust_easy_mean": [],
+                "trust_hard_mean": [],
                 "anchor_trust_ratio": [],
                 "residual_l1": [],
                 "residual_l2": [],
+                "safety_residual_l1": [],
                 "residual_clip_hit_ratio": [],
                 "residual_scale": [],
                 "retrieval_temperature": [],
                 "ode_dt": [],
+                "feature_modulation_l1": [],
+                "feature_modulation_l1_low": [],
+                "feature_modulation_l1_mid": [],
+                "feature_modulation_l1_high": [],
+                "feature_modulation_l1_dec": [],
             }
             for key in memory_keys:
                 aux = data.get(key)
@@ -1802,6 +1812,9 @@ class Trainer:
                         anchor_area_values = []
                         proposal_area_values = []
                         final_area_values = []
+                        faf_base_area_values = []
+                        faf_proposal_area_values = []
+                        faf_final_area_values = []
                         original_sizes = batch_data.get("original_size")
                         sample_eval_indices = torch.nonzero(eval_indices[bi], as_tuple=False).flatten().tolist()
                         ed_frame, es_frame = self._resolve_phase_eval_frames(batch_data, bi, sample_eval_indices)
@@ -1817,6 +1830,8 @@ class Trainer:
                                 metric_totals[f"{key}_dice_count"] += 1.0
                             pred_bin = self._postprocess_binary_mask((pred > active_threshold).float())
                             gt_frame = gt[bi, ti, ...].unsqueeze(0).unsqueeze(0).float()
+                            faf_base_dice_curr = None
+                            faf_hard_curr = False
 
                             memory_aux = out.get(f"memory_aux_{ti}")
                             anchor_aux = memory_aux.get("anchor_ode_aux") if isinstance(memory_aux, dict) else None
@@ -1965,6 +1980,15 @@ class Trainer:
                                         aux_dice, _ = self._binary_overlap_metrics(aux_bin, gt_frame)
                                         metric_totals[f"{prefix}_dice_sum"] = metric_totals.get(f"{prefix}_dice_sum", 0.0) + aux_dice
                                         metric_totals[f"{prefix}_dice_count"] = metric_totals.get(f"{prefix}_dice_count", 0.0) + 1.0
+                                        if prefix == "faf_base":
+                                            faf_base_dice_curr = aux_dice
+                                            faf_base_area_values.append(aux_bin.float().mean().detach())
+                                        elif prefix == "faf_anchor":
+                                            faf_proposal_area_values.append(aux_bin.float().mean().detach())
+                                query_uncertainty = faf_aux.get("query_uncertainty")
+                                if torch.is_tensor(query_uncertainty):
+                                    item = query_uncertainty[bi : bi + 1] if query_uncertainty.shape[0] > bi else query_uncertainty
+                                    faf_hard_curr = bool(float(item.float().mean().item()) >= 0.35)
                                 anchor_proposals = faf_aux.get("anchor_proposals")
                                 active_weights = faf_aux.get("active_weights")
                                 if torch.is_tensor(anchor_proposals) and anchor_proposals.shape[0] > bi:
@@ -1994,6 +2018,8 @@ class Trainer:
                                     ("coverage_gap", "faf_coverage_gap_sum"),
                                     ("anchor_function_diversity", "faf_anchor_function_diversity_sum"),
                                     ("anchor_area_diversity", "faf_anchor_area_diversity_sum"),
+                                    ("anchor_area_separation", "faf_anchor_area_separation_sum"),
+                                    ("anchor_phase_purity_proxy", "faf_anchor_phase_purity_proxy_sum"),
                                     ("anchor_pairwise_similarity", "faf_anchor_pairwise_similarity_sum"),
                                     ("write_strength_mean", "faf_write_strength_mean_sum"),
                                     ("memory_update_norm", "faf_memory_update_norm_sum"),
@@ -2003,13 +2029,21 @@ class Trainer:
                                     ("dead_anchor_ratio", "faf_dead_anchor_ratio_sum"),
                                     ("recycled_anchor_ratio", "faf_recycled_anchor_ratio_sum"),
                                     ("trust_mean", "faf_trust_mean_sum"),
+                                    ("trust_easy_mean", "faf_trust_easy_mean_sum"),
+                                    ("trust_hard_mean", "faf_trust_hard_mean_sum"),
                                     ("anchor_trust_ratio", "faf_anchor_trust_ratio_sum"),
                                     ("residual_l1", "faf_residual_l1_sum"),
                                     ("residual_l2", "faf_residual_l2_sum"),
+                                    ("safety_residual_l1", "faf_safety_residual_l1_sum"),
                                     ("residual_clip_hit_ratio", "faf_residual_clip_hit_ratio_sum"),
                                     ("residual_scale", "faf_residual_scale_sum"),
                                     ("retrieval_temperature", "faf_retrieval_temperature_sum"),
                                     ("ode_dt", "faf_ode_dt_sum"),
+                                    ("feature_modulation_l1", "faf_feature_modulation_l1_sum"),
+                                    ("feature_modulation_l1_low", "faf_feature_modulation_l1_low_sum"),
+                                    ("feature_modulation_l1_mid", "faf_feature_modulation_l1_mid_sum"),
+                                    ("feature_modulation_l1_high", "faf_feature_modulation_l1_high_sum"),
+                                    ("feature_modulation_l1_dec", "faf_feature_modulation_l1_dec_sum"),
                                 ):
                                     value = faf_aux.get(src)
                                     if torch.is_tensor(value):
@@ -2017,6 +2051,8 @@ class Trainer:
                                 metric_totals["faf_aux_count"] = metric_totals.get("faf_aux_count", 0.0) + 1.0
 
                             dice_t, iou_t = self._binary_overlap_metrics(pred_bin, gt_frame)
+                            if isinstance(memory_aux, dict) and isinstance(memory_aux.get("faf_aux"), dict):
+                                faf_final_area_values.append(pred_bin.float().mean().detach())
                             metric_totals["dice_frame_sum"] += dice_t
                             metric_totals["dice_frame_count"] += 1.0
                             metric_totals["iou_frame_sum"] += iou_t
@@ -2054,6 +2090,22 @@ class Trainer:
                                 metric_totals[f"{phase_name}_hd95_resized_sum"] += hd95_resized
                                 metric_totals[f"{phase_name}_hd95_original_sum"] += hd95_original
                                 metric_totals[f"{phase_name}_hd95_count"] += 1.0
+                                if faf_base_dice_curr is not None:
+                                    metric_totals[f"faf_final_minus_base_by_{phase_name.upper()}_sum"] = (
+                                        metric_totals.get(f"faf_final_minus_base_by_{phase_name.upper()}_sum", 0.0)
+                                        + float(dice_t - faf_base_dice_curr)
+                                    )
+                                    metric_totals[f"faf_final_minus_base_by_{phase_name.upper()}_count"] = (
+                                        metric_totals.get(f"faf_final_minus_base_by_{phase_name.upper()}_count", 0.0) + 1.0
+                                    )
+                            if faf_base_dice_curr is not None and faf_hard_curr:
+                                metric_totals["faf_hard_frame_final_minus_base_sum"] = (
+                                    metric_totals.get("faf_hard_frame_final_minus_base_sum", 0.0)
+                                    + float(dice_t - faf_base_dice_curr)
+                                )
+                                metric_totals["faf_hard_frame_final_minus_base_count"] = (
+                                    metric_totals.get("faf_hard_frame_final_minus_base_count", 0.0) + 1.0
+                                )
 
                             if self.main_process:
                                 sample_name = ""
@@ -2145,6 +2197,30 @@ class Trainer:
                                 (final_series[0] / final_series[-1].clamp_min(1.0e-6)).item()
                             )
                             metric_totals["functional_anchor_ed_es_area_count"] += 1.0
+                        if len(faf_base_area_values) >= 3 and len(faf_final_area_values) >= 3:
+                            base_series = torch.stack(faf_base_area_values).float()
+                            final_series = torch.stack(faf_final_area_values).float()
+                            base_jitter = (base_series[2:] - 2.0 * base_series[1:-1] + base_series[:-2]).abs().mean()
+                            final_jitter = (final_series[2:] - 2.0 * final_series[1:-1] + final_series[:-2]).abs().mean()
+                            metric_totals["faf_temporal_jitter_delta_sum"] = (
+                                metric_totals.get("faf_temporal_jitter_delta_sum", 0.0)
+                                + float((base_jitter - final_jitter).item())
+                            )
+                            metric_totals["faf_temporal_jitter_delta_count"] = (
+                                metric_totals.get("faf_temporal_jitter_delta_count", 0.0) + 1.0
+                            )
+                        if len(faf_proposal_area_values) >= 2 and len(faf_final_area_values) >= 2:
+                            proposal_series = torch.stack(faf_proposal_area_values).float()
+                            final_series = torch.stack(faf_final_area_values).float()
+                            count = min(proposal_series.numel(), final_series.numel())
+                            proposal_series = proposal_series[:count]
+                            final_series = final_series[:count]
+                            proposal_centered = proposal_series - proposal_series.mean()
+                            final_centered = final_series - final_series.mean()
+                            denom = proposal_centered.pow(2).mean().sqrt() * final_centered.pow(2).mean().sqrt()
+                            corr = (proposal_centered * final_centered).mean() / denom.clamp_min(1.0e-6)
+                            metric_totals["faf_area_curve_corr_sum"] = metric_totals.get("faf_area_curve_corr_sum", 0.0) + float(corr.item())
+                            metric_totals["faf_area_curve_corr_count"] = metric_totals.get("faf_area_curve_corr_count", 0.0) + 1.0
                         if drift_values:
                             drift_mean = float(np.mean(drift_values))
                             metric_totals["temporal_drift_sum"] += drift_mean
@@ -2630,6 +2706,8 @@ class Trainer:
                     "faf/coverage_gap": faf_mean("faf_coverage_gap_sum"),
                     "faf/anchor_function_diversity": faf_mean("faf_anchor_function_diversity_sum"),
                     "faf/anchor_area_diversity": faf_mean("faf_anchor_area_diversity_sum"),
+                    "faf/anchor_area_separation": faf_mean("faf_anchor_area_separation_sum"),
+                    "faf/anchor_phase_purity_proxy": faf_mean("faf_anchor_phase_purity_proxy_sum"),
                     "faf/anchor_pairwise_similarity": faf_mean("faf_anchor_pairwise_similarity_sum"),
                     "faf/write_strength_mean": faf_mean("faf_write_strength_mean_sum"),
                     "faf/memory_update_norm": faf_mean("faf_memory_update_norm_sum"),
@@ -2639,13 +2717,34 @@ class Trainer:
                     "faf/dead_anchor_ratio": faf_mean("faf_dead_anchor_ratio_sum"),
                     "faf/recycled_anchor_ratio": faf_mean("faf_recycled_anchor_ratio_sum"),
                     "faf/trust_mean": faf_mean("faf_trust_mean_sum"),
+                    "faf/trust_easy_mean": faf_mean("faf_trust_easy_mean_sum"),
+                    "faf/trust_hard_mean": faf_mean("faf_trust_hard_mean_sum"),
                     "faf/anchor_trust_ratio": faf_mean("faf_anchor_trust_ratio_sum"),
                     "faf/residual_l1": faf_mean("faf_residual_l1_sum"),
                     "faf/residual_l2": faf_mean("faf_residual_l2_sum"),
+                    "faf/safety_residual_l1": faf_mean("faf_safety_residual_l1_sum"),
                     "faf/residual_clip_hit_ratio": faf_mean("faf_residual_clip_hit_ratio_sum"),
                     "faf/residual_scale": faf_mean("faf_residual_scale_sum"),
                     "faf/retrieval_temperature": faf_mean("faf_retrieval_temperature_sum"),
                     "faf/ode_dt": faf_mean("faf_ode_dt_sum"),
+                    "faf/feature_modulation_l1": faf_mean("faf_feature_modulation_l1_sum"),
+                    "faf/feature_modulation_l1_low": faf_mean("faf_feature_modulation_l1_low_sum"),
+                    "faf/feature_modulation_l1_mid": faf_mean("faf_feature_modulation_l1_mid_sum"),
+                    "faf/feature_modulation_l1_high": faf_mean("faf_feature_modulation_l1_high_sum"),
+                    "faf/feature_modulation_l1_dec": faf_mean("faf_feature_modulation_l1_dec_sum"),
+                    "faf/final_minus_base_by_ED": faf_mean(
+                        "faf_final_minus_base_by_ED_sum", "faf_final_minus_base_by_ED_count"
+                    ),
+                    "faf/final_minus_base_by_ES": faf_mean(
+                        "faf_final_minus_base_by_ES_sum", "faf_final_minus_base_by_ES_count"
+                    ),
+                    "faf/hard_frame_final_minus_base": faf_mean(
+                        "faf_hard_frame_final_minus_base_sum", "faf_hard_frame_final_minus_base_count"
+                    ),
+                    "faf/area_curve_corr": faf_mean("faf_area_curve_corr_sum", "faf_area_curve_corr_count"),
+                    "faf/temporal_jitter_delta": faf_mean(
+                        "faf_temporal_jitter_delta_sum", "faf_temporal_jitter_delta_count"
+                    ),
                 }
             )
             if reduced.get("faf_base_dice_count", 0.0) > 0:
