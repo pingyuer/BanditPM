@@ -9,15 +9,34 @@ UV="/home/tahara/miniconda3/bin/uv"
 
 echo "[$(date '+%H:%M:%S')] Waiting for CAMUS experiments..."
 
+has_training_descendant() {
+    local root_pid="$1"
+    local queue=("$root_pid")
+    local current child cmd
+
+    while [ "${#queue[@]}" -gt 0 ]; do
+        current="${queue[0]}"
+        queue=("${queue[@]:1}")
+
+        while read -r child; do
+            [ -z "$child" ] && continue
+            cmd="$(ps -p "$child" -o args= 2>/dev/null || true)"
+            if [[ "$cmd" == *"torchrun"* || "$cmd" == *"train.py"* ]]; then
+                return 0
+            fi
+            queue+=("$child")
+        done < <(pgrep -P "$current" 2>/dev/null || true)
+    done
+
+    return 1
+}
+
 while true; do
     alive=0
     for win in g0a g0b g1a g1b; do
         pane_pid=$(tmux display-message -t "${SESSION}:${win}" -p '#{pane_pid}' 2>/dev/null || echo "")
-        if [ -n "$pane_pid" ]; then
-            children=$(pgrep -P "$pane_pid" 2>/dev/null | wc -l)
-            if [ "$children" -gt 0 ]; then
-                alive=$((alive + 1))
-            fi
+        if [ -n "$pane_pid" ] && has_training_descendant "$pane_pid"; then
+            alive=$((alive + 1))
         fi
     done
     if [ "$alive" -eq 0 ]; then break; fi
