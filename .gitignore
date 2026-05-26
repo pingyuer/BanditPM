@@ -3,6 +3,7 @@
 *.DS_Store
 .vscode/
 .idea/
+AGENT.md
 
 # Python caches and build artifacts
 __pycache__/

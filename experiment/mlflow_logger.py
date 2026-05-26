@@ -253,6 +253,12 @@ class MLflowLogger:
                 out[f"loss/raw/functional_anchor/{key_str.removeprefix('raw_functional_anchor_')}"] = value
             elif key_str.startswith("lambda_functional_anchor_"):
                 out[f"lambda/functional_anchor/{key_str.removeprefix('lambda_functional_anchor_')}"] = value
+            elif key_str.startswith("aux_faf_"):
+                out[f"loss/weighted/faf/{key_str.removeprefix('aux_faf_')}"] = value
+            elif key_str.startswith("raw_faf_"):
+                out[f"loss/raw/faf/{key_str.removeprefix('raw_faf_')}"] = value
+            elif key_str.startswith("lambda_faf_"):
+                out[f"lambda/faf/{key_str.removeprefix('lambda_faf_')}"] = value
         self.log_metrics(out, step=step, prefix="train")
 
     def log_eval_summary(self, metrics: Mapping[str, Any], *, mode: str, step: int | None = None) -> None:
@@ -261,6 +267,9 @@ class MLflowLogger:
         functional = self._functional_anchor_metrics(metrics)
         if functional:
             self.log_metrics(functional, step=step, prefix=f"{mode}/functional_anchor")
+        faf = self._faf_metrics(metrics)
+        if faf:
+            self.log_metrics(faf, step=step, prefix=f"{mode}/faf")
         anchor = self._anchor_ode_metrics(metrics, require_explicit=True)
         if anchor:
             self.log_metrics(anchor, step=step, prefix=f"{mode}/anchor_ode")
@@ -322,6 +331,62 @@ class MLflowLogger:
 
     def log_functional_anchor_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
         self.log_metrics(self._functional_anchor_metrics(metrics), step=step, prefix="functional_anchor")
+
+    def log_faf_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
+        self.log_metrics(self._faf_metrics(metrics), step=step, prefix="faf")
+
+    @classmethod
+    def _faf_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:
+        aliases = {
+            "base_dice": ("base_dice", "faf/base_dice"),
+            "anchor_only_dice": ("anchor_only_dice", "faf/anchor_only_dice"),
+            "proposal_top1_dice": ("proposal_top1_dice", "faf/proposal_top1_dice"),
+            "proposal_oracle_dice": ("proposal_oracle_dice", "faf/proposal_oracle_dice"),
+            "proposal_mean_dice": ("proposal_mean_dice", "faf/proposal_mean_dice"),
+            "final_dice": ("final_dice", "dice_frame_mean", "dice", "faf/final_dice"),
+            "final_minus_base": ("final_minus_base", "faf/final_minus_base"),
+            "final_minus_base_by_ES": ("final_minus_base_by_ES", "faf/final_minus_base_by_ES"),
+            "effective_anchor_number": ("effective_anchor_number", "faf/effective_anchor_number"),
+            "active_anchor_entropy": ("active_anchor_entropy", "faf/active_anchor_entropy"),
+            "top1_anchor_weight": ("top1_anchor_weight", "faf/top1_anchor_weight"),
+            "top3_anchor_weight_sum": ("top3_anchor_weight_sum", "faf/top3_anchor_weight_sum"),
+            "coverage_score": ("coverage_score", "faf/coverage_score"),
+            "coverage_gap": ("coverage_gap", "faf/coverage_gap"),
+            "anchor_function_diversity": ("anchor_function_diversity", "faf/anchor_function_diversity"),
+            "anchor_area_diversity": ("anchor_area_diversity", "faf/anchor_area_diversity"),
+            "anchor_pairwise_similarity": ("anchor_pairwise_similarity", "faf/anchor_pairwise_similarity"),
+            "write_strength_mean": ("write_strength_mean", "faf/write_strength_mean"),
+            "memory_update_norm": ("memory_update_norm", "faf/memory_update_norm"),
+            "affine_delta_norm": ("affine_delta_norm", "faf/affine_delta_norm"),
+            "affine_velocity_norm": ("affine_velocity_norm", "ode_velocity_norm", "faf/affine_velocity_norm"),
+            "ode_velocity_norm": ("ode_velocity_norm", "faf/ode_velocity_norm"),
+            "dead_anchor_ratio": ("dead_anchor_ratio", "faf/dead_anchor_ratio"),
+            "recycled_anchor_ratio": ("recycled_anchor_ratio", "faf/recycled_anchor_ratio"),
+            "trust_mean": ("trust_mean", "faf/trust_mean"),
+            "anchor_trust_ratio": ("anchor_trust_ratio", "faf/anchor_trust_ratio"),
+            "residual_l1": ("residual_l1", "faf/residual_l1"),
+            "residual_l2": ("residual_l2", "faf/residual_l2"),
+            "residual_clip_hit_ratio": ("residual_clip_hit_ratio", "faf/residual_clip_hit_ratio"),
+            "residual_scale": ("residual_scale", "faf/residual_scale"),
+            "retrieval_temperature": ("retrieval_temperature", "faf/retrieval_temperature"),
+            "ode_dt": ("ode_dt", "faf/ode_dt"),
+        }
+        out = {}
+        for dst, keys in aliases.items():
+            for key in keys:
+                if key in metrics:
+                    out[dst] = metrics[key]
+                    break
+        if "final_minus_base" not in out and "final_dice" in out and "base_dice" in out:
+            final = cls._to_float(out["final_dice"])
+            base = cls._to_float(out["base_dice"])
+            if final is not None and base is not None:
+                out["final_minus_base"] = final - base
+        if not any(str(key).startswith("faf/") for key in metrics) and not any(
+            key in metrics for key in ("proposal_oracle_dice", "effective_anchor_number", "coverage_score")
+        ):
+            return {}
+        return out
 
     @classmethod
     def _functional_anchor_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:

@@ -53,6 +53,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'residual_heads.',
                 'injector.',
                 'fusion.',
+                'faf.',
             )):
                 temporal_params.append(param)
                 if print_log:

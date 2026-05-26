@@ -610,6 +610,7 @@ class Trainer:
                 self._log_dynakey_stats(data, it)
                 self._log_anchor_ode_stats(data, it)
                 self._log_functional_anchor_stats(data, it)
+                self._log_faf_stats(data, it)
                 self._log_functional_anchor_grad_stats(it)
 
         return loss.detach()
@@ -635,9 +636,20 @@ class Trainer:
                 ("lambda_functional_anchor_trust_l1", "trust_l1"),
                 ("lambda_functional_anchor_trust_entropy", "trust_entropy"),
                 ("lambda_functional_anchor_ode_raw_delta", "ode_raw_delta"),
+                ("lambda_faf_anchor", "anchor"),
+                ("lambda_faf_base", "base"),
+                ("lambda_faf_coverage", "coverage"),
+                ("lambda_faf_sparse", "sparse"),
+                ("lambda_faf_diversity", "diversity"),
+                ("lambda_faf_temporal", "temporal"),
+                ("lambda_faf_write", "write"),
+                ("lambda_faf_residual_smallness", "residual_smallness"),
+                ("lambda_faf_affine", "affine"),
+                ("lambda_faf_velocity", "velocity"),
             ):
                 if hasattr(self.loss_computer, attr):
-                    log_dict[f"lambda_functional_anchor_{name}"] = getattr(self.loss_computer, attr)
+                    prefix = "lambda_faf" if attr.startswith("lambda_faf_") else "lambda_functional_anchor"
+                    log_dict[f"{prefix}_{name}"] = getattr(self.loss_computer, attr)
             for group in self.optimizer.param_groups:
                 name = group.get("name")
                 if name == "functional_anchor_residual_heads":
@@ -1097,6 +1109,60 @@ class Trainer:
                 logger = getattr(self, "mlflow_logger", None)
                 if logger is not None:
                     logger.log_functional_anchor_diagnostics(metrics, step=it)
+        except Exception:
+            pass
+
+    def _log_faf_stats(self, data, it: int) -> None:
+        memory_keys = sorted(k for k in data.keys() if k.startswith("memory_aux_"))
+        if not memory_keys:
+            return
+        try:
+            buckets = {
+                "effective_anchor_number": [],
+                "active_anchor_entropy": [],
+                "top1_anchor_weight": [],
+                "top3_anchor_weight_sum": [],
+                "coverage_score": [],
+                "coverage_gap": [],
+                "anchor_function_diversity": [],
+                "anchor_area_diversity": [],
+                "anchor_pairwise_similarity": [],
+                "write_strength_mean": [],
+                "memory_update_norm": [],
+                "affine_delta_norm": [],
+                "affine_velocity_norm": [],
+                "ode_velocity_norm": [],
+                "dead_anchor_ratio": [],
+                "recycled_anchor_ratio": [],
+                "trust_mean": [],
+                "anchor_trust_ratio": [],
+                "residual_l1": [],
+                "residual_l2": [],
+                "residual_clip_hit_ratio": [],
+                "residual_scale": [],
+                "retrieval_temperature": [],
+                "ode_dt": [],
+            }
+            for key in memory_keys:
+                aux = data.get(key)
+                faf = aux.get("faf_aux") if isinstance(aux, dict) else None
+                if not isinstance(faf, dict):
+                    continue
+                for name in buckets:
+                    value = faf.get(name)
+                    if torch.is_tensor(value):
+                        buckets[name].append(value.float().detach().flatten())
+            metrics = {}
+            for name, tensors in buckets.items():
+                if not tensors:
+                    continue
+                value = torch.cat(tensors).mean().item()
+                self.log.log_scalar(f"faf/{name}", value, it)
+                metrics[name] = value
+            if metrics:
+                logger = getattr(self, "mlflow_logger", None)
+                if logger is not None:
+                    logger.log_faf_diagnostics(metrics, step=it)
         except Exception:
             pass
 
@@ -1886,6 +1952,70 @@ class Trainer:
                                     metric_totals["functional_anchor_phase_reliability_low_ratio_sum"] += float((rel < 0.5).float().mean().item())
                                 metric_totals["functional_anchor_aux_count"] += 1.0
 
+                            faf_aux = memory_aux.get("faf_aux") if isinstance(memory_aux, dict) else None
+                            if isinstance(faf_aux, dict):
+                                for src, prefix in (
+                                    ("base_object_logits", "faf_base"),
+                                    ("proposal_logits", "faf_anchor"),
+                                ):
+                                    aux_logits = faf_aux.get(src)
+                                    if torch.is_tensor(aux_logits) and aux_logits.shape[0] > bi:
+                                        aux_prob = torch.sigmoid(aux_logits[bi : bi + 1, :1])
+                                        aux_bin = self._postprocess_binary_mask((aux_prob > active_threshold).float())
+                                        aux_dice, _ = self._binary_overlap_metrics(aux_bin, gt_frame)
+                                        metric_totals[f"{prefix}_dice_sum"] = metric_totals.get(f"{prefix}_dice_sum", 0.0) + aux_dice
+                                        metric_totals[f"{prefix}_dice_count"] = metric_totals.get(f"{prefix}_dice_count", 0.0) + 1.0
+                                anchor_proposals = faf_aux.get("anchor_proposals")
+                                active_weights = faf_aux.get("active_weights")
+                                if torch.is_tensor(anchor_proposals) and anchor_proposals.shape[0] > bi:
+                                    proposals = anchor_proposals[bi : bi + 1, :1]
+                                    proposal_dices = []
+                                    for ai in range(proposals.shape[2]):
+                                        prop_prob = torch.sigmoid(proposals[:, :, ai])
+                                        prop_bin = self._postprocess_binary_mask((prop_prob > active_threshold).float())
+                                        prop_dice, _ = self._binary_overlap_metrics(prop_bin, gt_frame)
+                                        proposal_dices.append(prop_dice)
+                                    if proposal_dices:
+                                        dice_tensor = torch.tensor(proposal_dices, device=pred.device, dtype=torch.float32)
+                                        metric_totals["faf_proposal_oracle_dice_sum"] = metric_totals.get("faf_proposal_oracle_dice_sum", 0.0) + float(dice_tensor.max().item())
+                                        metric_totals["faf_proposal_mean_dice_sum"] = metric_totals.get("faf_proposal_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
+                                        metric_totals["faf_proposal_dice_count"] = metric_totals.get("faf_proposal_dice_count", 0.0) + 1.0
+                                        if torch.is_tensor(active_weights) and active_weights.shape[0] > bi:
+                                            top_idx = int(active_weights[bi, 0].argmax().item())
+                                            if top_idx < len(proposal_dices):
+                                                metric_totals["faf_proposal_top1_dice_sum"] = metric_totals.get("faf_proposal_top1_dice_sum", 0.0) + proposal_dices[top_idx]
+                                                metric_totals["faf_proposal_top1_dice_count"] = metric_totals.get("faf_proposal_top1_dice_count", 0.0) + 1.0
+                                for src, dst in (
+                                    ("effective_anchor_number", "faf_effective_anchor_number_sum"),
+                                    ("active_anchor_entropy", "faf_active_anchor_entropy_sum"),
+                                    ("top1_anchor_weight", "faf_top1_anchor_weight_sum"),
+                                    ("top3_anchor_weight_sum", "faf_top3_anchor_weight_sum"),
+                                    ("coverage_score", "faf_coverage_score_sum"),
+                                    ("coverage_gap", "faf_coverage_gap_sum"),
+                                    ("anchor_function_diversity", "faf_anchor_function_diversity_sum"),
+                                    ("anchor_area_diversity", "faf_anchor_area_diversity_sum"),
+                                    ("anchor_pairwise_similarity", "faf_anchor_pairwise_similarity_sum"),
+                                    ("write_strength_mean", "faf_write_strength_mean_sum"),
+                                    ("memory_update_norm", "faf_memory_update_norm_sum"),
+                                    ("affine_delta_norm", "faf_affine_delta_norm_sum"),
+                                    ("affine_velocity_norm", "faf_affine_velocity_norm_sum"),
+                                    ("ode_velocity_norm", "faf_ode_velocity_norm_sum"),
+                                    ("dead_anchor_ratio", "faf_dead_anchor_ratio_sum"),
+                                    ("recycled_anchor_ratio", "faf_recycled_anchor_ratio_sum"),
+                                    ("trust_mean", "faf_trust_mean_sum"),
+                                    ("anchor_trust_ratio", "faf_anchor_trust_ratio_sum"),
+                                    ("residual_l1", "faf_residual_l1_sum"),
+                                    ("residual_l2", "faf_residual_l2_sum"),
+                                    ("residual_clip_hit_ratio", "faf_residual_clip_hit_ratio_sum"),
+                                    ("residual_scale", "faf_residual_scale_sum"),
+                                    ("retrieval_temperature", "faf_retrieval_temperature_sum"),
+                                    ("ode_dt", "faf_ode_dt_sum"),
+                                ):
+                                    value = faf_aux.get(src)
+                                    if torch.is_tensor(value):
+                                        metric_totals[dst] = metric_totals.get(dst, 0.0) + float(value.float().mean().item())
+                                metric_totals["faf_aux_count"] = metric_totals.get("faf_aux_count", 0.0) + 1.0
+
                             dice_t, iou_t = self._binary_overlap_metrics(pred_bin, gt_frame)
                             metric_totals["dice_frame_sum"] += dice_t
                             metric_totals["dice_frame_count"] += 1.0
@@ -2479,6 +2609,47 @@ class Trainer:
                 metrics["functional_anchor/proposal_minus_anchor"] = (
                     metrics["functional_anchor/proposal_dice"] - metrics["functional_anchor/anchor_only_dice"]
                 )
+        if reduced.get("faf_aux_count", 0.0) > 0:
+            def faf_mean(sum_key: str, count_key: str = "faf_aux_count"):
+                count = reduced.get(count_key, 0.0)
+                return reduced.get(sum_key, 0.0) / count if count > 0 else 0.0
+
+            metrics.update(
+                {
+                    "faf/base_dice": faf_mean("faf_base_dice_sum", "faf_base_dice_count"),
+                    "faf/anchor_only_dice": faf_mean("faf_anchor_dice_sum", "faf_anchor_dice_count"),
+                    "faf/proposal_top1_dice": faf_mean("faf_proposal_top1_dice_sum", "faf_proposal_top1_dice_count"),
+                    "faf/proposal_oracle_dice": faf_mean("faf_proposal_oracle_dice_sum", "faf_proposal_dice_count"),
+                    "faf/proposal_mean_dice": faf_mean("faf_proposal_mean_dice_sum", "faf_proposal_dice_count"),
+                    "faf/final_dice": metrics["dice_frame_mean"],
+                    "faf/effective_anchor_number": faf_mean("faf_effective_anchor_number_sum"),
+                    "faf/active_anchor_entropy": faf_mean("faf_active_anchor_entropy_sum"),
+                    "faf/top1_anchor_weight": faf_mean("faf_top1_anchor_weight_sum"),
+                    "faf/top3_anchor_weight_sum": faf_mean("faf_top3_anchor_weight_sum"),
+                    "faf/coverage_score": faf_mean("faf_coverage_score_sum"),
+                    "faf/coverage_gap": faf_mean("faf_coverage_gap_sum"),
+                    "faf/anchor_function_diversity": faf_mean("faf_anchor_function_diversity_sum"),
+                    "faf/anchor_area_diversity": faf_mean("faf_anchor_area_diversity_sum"),
+                    "faf/anchor_pairwise_similarity": faf_mean("faf_anchor_pairwise_similarity_sum"),
+                    "faf/write_strength_mean": faf_mean("faf_write_strength_mean_sum"),
+                    "faf/memory_update_norm": faf_mean("faf_memory_update_norm_sum"),
+                    "faf/affine_delta_norm": faf_mean("faf_affine_delta_norm_sum"),
+                    "faf/affine_velocity_norm": faf_mean("faf_affine_velocity_norm_sum"),
+                    "faf/ode_velocity_norm": faf_mean("faf_ode_velocity_norm_sum"),
+                    "faf/dead_anchor_ratio": faf_mean("faf_dead_anchor_ratio_sum"),
+                    "faf/recycled_anchor_ratio": faf_mean("faf_recycled_anchor_ratio_sum"),
+                    "faf/trust_mean": faf_mean("faf_trust_mean_sum"),
+                    "faf/anchor_trust_ratio": faf_mean("faf_anchor_trust_ratio_sum"),
+                    "faf/residual_l1": faf_mean("faf_residual_l1_sum"),
+                    "faf/residual_l2": faf_mean("faf_residual_l2_sum"),
+                    "faf/residual_clip_hit_ratio": faf_mean("faf_residual_clip_hit_ratio_sum"),
+                    "faf/residual_scale": faf_mean("faf_residual_scale_sum"),
+                    "faf/retrieval_temperature": faf_mean("faf_retrieval_temperature_sum"),
+                    "faf/ode_dt": faf_mean("faf_ode_dt_sum"),
+                }
+            )
+            if reduced.get("faf_base_dice_count", 0.0) > 0:
+                metrics["faf/final_minus_base"] = metrics["dice_frame_mean"] - metrics["faf/base_dice"]
         for key in reduced:
             if key.startswith("thr_") and key.endswith("_dice_sum"):
                 prefix = key[: -len("_dice_sum")]

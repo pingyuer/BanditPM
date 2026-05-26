@@ -1,0 +1,11 @@
+defaults:
+  - unext_faf_camus_online
+  - _self_
+
+exp_id: "unext_faf_camus_ablate_no_update"
+ablation_type: "no_update"
+
+model:
+  unext_faf:
+    enable_memory_update: false
+    lambda_faf_write: 0.0

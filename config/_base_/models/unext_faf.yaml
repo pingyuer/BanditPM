@@ -1,0 +1,61 @@
+# @package _global_
+model_name: "UNeXtFAF"
+
+model:
+  name: "unext_faf"
+  allow_oracle_init_when_requested: false
+  use_first_frame_gt_init: false
+  use_kpff: false
+  memory_core:
+    type: "none"
+    dynakey: {}
+  temporal_memory:
+    type: "none"
+    bpm:
+      ENABLE: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0
+  unext_faf:
+    mode: "online"
+    offline_mode_reserved: false
+    in_channels: 1
+    num_classes: 2
+    base_dim: 32
+    value_dim: 128
+    num_anchors: 4
+    query_dim: 32
+    code_dim: 32
+    hidden_dim: 64
+    basis_dim: 4
+    anchor_size: 32
+    residual_clip: 0.25
+    trust_max: 0.35
+    retrieval_temperature: 0.25
+    temperature_init: 0.7
+    temperature_warmup_iters: 500
+    memory_ema: 0.9
+    enable_memory_update: true
+    disable_trust_gate: false
+    residual_scale:
+      init: 0.02
+      max: 0.12
+      warmup_iters: 1500
+    trust_warmup_iters: 500
+    ode_update:
+      dt_init: 0.5
+      dt_max: 1.0
+      warmup_iters: 1500
+      velocity_momentum: 0.8
+    lambda_faf_anchor: 0.3
+    lambda_faf_base: 0.5
+    lambda_faf_coverage: 0.05
+    lambda_faf_sparse: 0.002
+    lambda_faf_diversity: 0.001
+    lambda_faf_temporal: 0.02
+    lambda_faf_write: 0.001
+    lambda_faf_residual_smallness: 0.05
+    lambda_faf_affine: 0.001
+    lambda_faf_velocity: 0.001

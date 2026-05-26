@@ -108,6 +108,18 @@ class LossComputer(nn.Module):
         self.lambda_functional_anchor_trust_l1 = float(functional_cfg.get("trust_l1_weight", 0.0))
         self.lambda_functional_anchor_trust_entropy = float(functional_cfg.get("trust_entropy_weight", 0.0))
         self.lambda_functional_anchor_ode_raw_delta = float(functional_cfg.get("lambda_ode_raw_delta", 0.0))
+        faf_cfg = cfg.model.get("unext_faf", {})
+        self.is_faf = str(cfg.model.get("name", "")).lower() in {"unext_faf", "unext-faf", "faf"}
+        self.lambda_faf_anchor = float(faf_cfg.get("lambda_faf_anchor", 0.3))
+        self.lambda_faf_base = float(faf_cfg.get("lambda_faf_base", 0.5))
+        self.lambda_faf_coverage = float(faf_cfg.get("lambda_faf_coverage", 0.05))
+        self.lambda_faf_sparse = float(faf_cfg.get("lambda_faf_sparse", 0.002))
+        self.lambda_faf_diversity = float(faf_cfg.get("lambda_faf_diversity", 0.001))
+        self.lambda_faf_temporal = float(faf_cfg.get("lambda_faf_temporal", 0.02))
+        self.lambda_faf_write = float(faf_cfg.get("lambda_faf_write", 0.001))
+        self.lambda_faf_residual_smallness = float(faf_cfg.get("lambda_faf_residual_smallness", 0.05))
+        self.lambda_faf_affine = float(faf_cfg.get("lambda_faf_affine", 0.0))
+        self.lambda_faf_velocity = float(faf_cfg.get("lambda_faf_velocity", 0.0))
 
     def _default_supervision_mask(
         self,
@@ -267,6 +279,9 @@ class LossComputer(nn.Module):
         functional_anchor_terms = self._compute_functional_anchor_losses(data, supervised_mask)
         for k, v in functional_anchor_terms.items():
             losses[k] += v
+        faf_terms = self._compute_faf_losses(data, supervised_mask)
+        for k, v in faf_terms.items():
+            losses[k] += v
 
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
         for key, value in losses.items():
@@ -283,6 +298,105 @@ class LossComputer(nn.Module):
                 losses['total_loss'] = losses['total_loss'] + losses['policy_ce']
 
         return losses
+
+    def _compute_faf_losses(
+        self,
+        data: Dict[str, torch.Tensor],
+        supervised_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if not self.is_faf or "cls_gt" not in data:
+            return {}
+
+        batch_size = data["rgb"].shape[0]
+        device = data["rgb"].device
+        zero = torch.zeros((), device=device, dtype=torch.float32)
+        out: Dict[str, torch.Tensor] = {}
+        anchor_terms = []
+        base_terms = []
+        coverage_terms = []
+        sparse_terms = []
+        diversity_terms = []
+        temporal_terms = []
+        write_terms = []
+        residual_terms = []
+        affine_terms = []
+        velocity_terms = []
+
+        for bi in range(batch_size):
+            curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
+            frame_ids = self._frame_ids_for_sample(supervised_mask, bi)
+            prev_proposal = None
+            for ti in frame_ids:
+                memory_aux = data.get(f"memory_aux_{ti}")
+                aux = memory_aux.get("faf_aux") if isinstance(memory_aux, dict) else None
+                if not isinstance(aux, dict):
+                    continue
+                soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+                gt_mask = self._gt_object_masks(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+
+                proposal_obj = aux.get("proposal_logits", aux.get("anchor_logits"))
+                if torch.is_tensor(proposal_obj) and self.lambda_faf_anchor > 0:
+                    proposal_obj = proposal_obj[bi : bi + 1, :curr_num_obj]
+                    proposal_logits = aggregate(torch.sigmoid(proposal_obj), dim=1)
+                    ce, dice = self.mask_loss(proposal_logits, soft_gt)
+                    anchor_terms.append(ce + dice)
+                    if prev_proposal is not None and self.lambda_faf_temporal > 0:
+                        temporal_terms.append((torch.sigmoid(proposal_obj) - prev_proposal).abs().mean())
+                    prev_proposal = torch.sigmoid(proposal_obj).detach()
+
+                base_obj = aux.get("base_object_logits")
+                if torch.is_tensor(base_obj) and self.lambda_faf_base > 0:
+                    base_obj = base_obj[bi : bi + 1, :curr_num_obj]
+                    base_logits = aggregate(torch.sigmoid(base_obj), dim=1)
+                    ce, dice = self.mask_loss(base_logits, soft_gt)
+                    base_terms.append(ce + dice)
+
+                anchor_proposals = aux.get("anchor_proposals")
+                if torch.is_tensor(anchor_proposals) and self.lambda_faf_anchor > 0:
+                    proposals = anchor_proposals[bi : bi + 1, :curr_num_obj]
+                    gt = gt_mask[:, :curr_num_obj].to(device=proposals.device, dtype=proposals.dtype).unsqueeze(2)
+                    probs = torch.sigmoid(proposals)
+                    bce = F.binary_cross_entropy_with_logits(proposals, gt.expand_as(proposals), reduction="none").mean(dim=(-2, -1))
+                    oracle = bce.min(dim=-1).values.mean()
+                    anchor_terms.append(0.25 * oracle)
+
+                for src, bucket, weight in (
+                    ("coverage_gap", coverage_terms, self.lambda_faf_coverage),
+                    ("active_anchor_entropy", sparse_terms, self.lambda_faf_sparse),
+                    ("anchor_pairwise_similarity", diversity_terms, self.lambda_faf_diversity),
+                    ("memory_update_norm", write_terms, self.lambda_faf_write),
+                    ("residual_logits", residual_terms, self.lambda_faf_residual_smallness),
+                    ("affine_delta_norm", affine_terms, self.lambda_faf_affine),
+                    ("affine_velocity_norm", velocity_terms, self.lambda_faf_velocity),
+                ):
+                    value = aux.get(src)
+                    if torch.is_tensor(value) and weight > 0:
+                        item = value[bi : bi + 1] if value.dim() > 0 and value.shape[0] > bi else value
+                        if src == "residual_logits":
+                            item = item[:, :curr_num_obj]
+                            bucket.append(item.float().abs().mean())
+                        else:
+                            bucket.append(item.float().mean())
+
+        for name, terms, weight in (
+            ("anchor", anchor_terms, self.lambda_faf_anchor),
+            ("base", base_terms, self.lambda_faf_base),
+            ("coverage", coverage_terms, self.lambda_faf_coverage),
+            ("sparse", sparse_terms, self.lambda_faf_sparse),
+            ("diversity", diversity_terms, self.lambda_faf_diversity),
+            ("temporal", temporal_terms, self.lambda_faf_temporal),
+            ("write", write_terms, self.lambda_faf_write),
+            ("residual_smallness", residual_terms, self.lambda_faf_residual_smallness),
+            ("affine", affine_terms, self.lambda_faf_affine),
+            ("velocity", velocity_terms, self.lambda_faf_velocity),
+        ):
+            if terms:
+                raw = torch.stack(terms).mean()
+                out[f"raw_faf_{name}"] = raw.detach()
+                out[f"aux_faf_{name}"] = raw * weight
+        if not out:
+            out["aux_faf_zero"] = zero
+        return out
 
     def _compute_delay_ode_regularizers(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         if not self.is_delay_ode:

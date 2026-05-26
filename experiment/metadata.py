@@ -53,6 +53,8 @@ def resolve_mlflow_experiment_name(cfg: DictConfig) -> str:
     unext_uses_dynakey = bool(unext_cfg.get("use_dynakey", False)) if hasattr(unext_cfg, "get") else False
     uses_dynakey = memory_type == "dynakey" or unext_uses_dynakey
 
+    if model_name in {"unextfaf", "unext_faf", "unext-faf", "faf"} or "unext_faf" in exp_id:
+        return "unext_faf"
     if model_name == "functional_anchor" or "functional_anchor" in exp_id:
         return "functional_anchor"
     if model_name.startswith("anchor_ode") or "anchor_ode" in exp_id:
@@ -118,6 +120,12 @@ def build_mlflow_metadata(cfg: DictConfig, *, world_size: int) -> tuple[dict, di
     model_cfg = cfg.get("model", {})
     anchor_cfg = model_cfg.get("anchor_ode", model_cfg.get("memory_core", {})) if hasattr(model_cfg, "get") else {}
     functional_cfg = model_cfg.get("functional_anchor", {}) if hasattr(model_cfg, "get") else {}
+    faf_cfg = model_cfg.get("unext_faf", {}) if hasattr(model_cfg, "get") else {}
+    if method_family == "unext_faf" and hasattr(faf_cfg, "get"):
+        tags["ablation_type"] = str(cfg.get("ablation_type", "full"))
+        tags["faf_mode"] = str(faf_cfg.get("mode", "online"))
+        tags["num_anchors"] = int(faf_cfg.get("num_anchors", 0) or 0)
+        tags["memory_update"] = bool(faf_cfg.get("enable_memory_update", True))
     if method_family == "functional_anchor" and hasattr(functional_cfg, "get"):
         tags["prediction_mode"] = str(functional_cfg.get("prediction_mode", "base_primary"))
         tags["training_stage"] = str(functional_cfg.get("training_stage", stage_cfg.get("training_stage", "joint_residual") if hasattr(stage_cfg, "get") else "joint_residual"))
@@ -147,6 +155,11 @@ def build_mlflow_metadata(cfg: DictConfig, *, world_size: int) -> tuple[dict, di
         "functional_anchor.phase_dim": functional_cfg.get("phase_dim", None) if hasattr(functional_cfg, "get") else None,
         "functional_anchor.prediction_mode": functional_cfg.get("prediction_mode", None) if hasattr(functional_cfg, "get") else None,
         "functional_anchor.residual_clip": functional_cfg.get("residual_clip", None) if hasattr(functional_cfg, "get") else None,
+        "unext_faf.num_anchors": faf_cfg.get("num_anchors", None) if hasattr(faf_cfg, "get") else None,
+        "unext_faf.query_dim": faf_cfg.get("query_dim", None) if hasattr(faf_cfg, "get") else None,
+        "unext_faf.code_dim": faf_cfg.get("code_dim", None) if hasattr(faf_cfg, "get") else None,
+        "unext_faf.trust_max": faf_cfg.get("trust_max", None) if hasattr(faf_cfg, "get") else None,
+        "unext_faf.enable_memory_update": faf_cfg.get("enable_memory_update", None) if hasattr(faf_cfg, "get") else None,
         "postprocess.enabled": tags["has_postprocess"],
         "postprocess.min_area": post_cfg.get("min_area", None) if hasattr(post_cfg, "get") else None,
         "eval.threshold": eval_cfg.get("threshold", eval_cfg.get("default_threshold", 0.5)) if hasattr(eval_cfg, "get") else 0.5,
@@ -170,7 +183,8 @@ def resolve_mlflow_run_name(
     protocol = str(cfg.get("data", {}).get("protocol_name", "protocol"))
     mlflow_cfg = cfg.get("mlflow", {})
     run_type = str(mlflow_cfg.get("run_type", "train")) if hasattr(mlflow_cfg, "get") else "train"
+    exp_id = str(cfg.get("exp_id", "experiment"))
     seed = int(cfg.get("seed", 42))
     timestamp = timestamp or datetime.datetime.now().strftime("%m%d-%H%M")
     git_hash = git_hash or resolve_git_short_hash()
-    return f"{model_name}_{dataset_name}_{protocol}_{run_type}_s{seed}_{timestamp}_{git_hash}"
+    return f"{exp_id}_{model_name}_{dataset_name}_{protocol}_{run_type}_s{seed}_{timestamp}_{git_hash}"

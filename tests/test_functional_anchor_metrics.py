@@ -166,6 +166,64 @@ class FunctionalAnchorMetricsTests(unittest.TestCase):
         self.assertNotIn("functional_anchor/final_dice", merged)
         self.assertFalse(any(key.startswith("val/anchor_ode/") for key in merged))
 
+    def test_faf_diagnostics_use_faf_namespace(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_faf_diagnostics(
+                {
+                    "proposal_oracle_dice": 0.81,
+                    "effective_anchor_number": 2.4,
+                    "coverage_score": 0.7,
+                    "base_dice": 0.72,
+                    "final_dice": 0.8,
+                },
+                step=6,
+            )
+        self.assertIn(
+            (
+                "metrics",
+                {
+                    "faf/base_dice": 0.72,
+                    "faf/proposal_oracle_dice": 0.81,
+                    "faf/final_dice": 0.8,
+                    "faf/final_minus_base": 0.08000000000000007,
+                    "faf/effective_anchor_number": 2.4,
+                    "faf/coverage_score": 0.7,
+                },
+                6,
+            ),
+            calls,
+        )
+
+    def test_eval_summary_uses_split_faf_namespace(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_eval_summary(
+                {
+                    "dice_frame_mean": 0.8,
+                    "faf/base_dice": 0.72,
+                    "faf/proposal_oracle_dice": 0.77,
+                    "faf/final_minus_base": 0.08,
+                },
+                mode="val",
+                step=4,
+            )
+        merged = {}
+        for _, metrics, _ in calls:
+            merged.update(metrics)
+        self.assertEqual(merged["val/faf/base_dice"], 0.72)
+        self.assertEqual(merged["val/faf/proposal_oracle_dice"], 0.77)
+        self.assertEqual(merged["val/faf/final_minus_base"], 0.08)
+        self.assertNotIn("faf/proposal_oracle_dice", merged)
+
     def test_plain_eval_summary_does_not_emit_method_diagnostics(self):
         calls = []
         fake_mlflow = types.SimpleNamespace(
