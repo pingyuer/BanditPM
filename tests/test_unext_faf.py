@@ -31,11 +31,18 @@ def _cfg():
                     "trust_max": 0.8,
                     "retrieval_temperature": 0.25,
                     "memory_ema": 0.9,
-                    "prediction_mode": "proposal_primary",
-                    "residual_scale": {"init": 0.03, "max": 0.15, "warmup_iters": 1500},
+                    "prediction_mode": "affine_mixture_safe",
+                    "num_affine_slots": 4,
+                    "identity_slot_index": 0,
+                    "require_pretrained_unext": False,
+                    "residual_scale": {"init": 0.0, "max": 0.05, "warmup_iters": 1500},
+                    "selector": {"temperature_init": 1.0, "temperature_final": 0.35, "assignment_temperature": 0.15},
+                    "confidence": {"enabled": True, "init": 0.10, "max": 0.35, "warmup_iters": 1500},
+                    "residual": {"enabled": True, "init_scale": 0.0, "max_scale": 0.05, "clip": 0.15},
+                    "temporal_update": {"enabled": True, "dt_init": 0.1, "dt_max": 0.6, "truncated_bptt_steps": 0},
                     "lambda_faf_affine": 0.001,
                     "lambda_faf_velocity": 0.001,
-                    "lambda_faf_anchor": 0.3,
+                    "lambda_faf_mixture": 0.3,
                     "lambda_faf_oracle": 0.5,
                     "lambda_faf_top1": 0.2,
                     "lambda_faf_base": 0.1,
@@ -74,66 +81,62 @@ class UNeXtFAFTests(unittest.TestCase):
             for key in (
                 "base_logits",
                 "final_logits",
-                "proposal_logits",
+                "mixture_logits",
                 "anchor_logits",
-                "anchor_proposals",
-                "active_weights",
+                "warped_anchor_logits",
+                "slot_weights",
+                "slot_logits",
+                "slot_confidence",
                 "trust",
                 "coverage_score",
-                "effective_anchor_number",
+                "effective_slot_number",
                 "affine_delta",
                 "affine_delta_norm",
-                "retrieval_temperature",
+                "selector_temperature",
                 "residual_scale",
                 "safety_residual_logits",
-                "base_safety_logits",
-                "proposal_corrected_logits",
                 "prediction_mode",
-                "trust_easy_mean",
-                "trust_hard_mean",
-                "anchor_area_separation",
-                "canonical_sdf",
-                "basis_weights",
-                "function_codes",
+                "confidence_easy_mean",
+                "confidence_hard_mean",
+                "affine_identity_logits",
+                "affine_top1_logits",
             ):
                 self.assertIn(key, aux)
-            self.assertEqual(aux["anchor_proposals"].shape, (2, 1, 4, 32, 32))
-            self.assertTrue(torch.allclose(aux["active_weights"].sum(dim=-1), torch.ones(2, 1), atol=1.0e-5))
-            self.assertTrue(torch.isfinite(aux["effective_anchor_number"]).all())
-            self.assertTrue(torch.isfinite(aux["anchor_proposals"]).all())
-            self.assertTrue(torch.allclose(aux["anchor_logits"], aux["proposal_logits"]))
-            self.assertEqual(aux["prediction_mode"], "proposal_primary")
-            self.assertTrue(torch.allclose(aux["final_object_logits"], aux["proposal_corrected_logits"]))
-            self.assertLessEqual(float(aux["affine_delta"][..., 0].abs().max()), 0.0801)
-            self.assertLessEqual(float(aux["affine_delta"][..., 2].abs().max()), 0.0501)
+            self.assertEqual(aux["warped_anchor_logits"].shape, (2, 1, 4, 32, 32))
+            self.assertTrue(torch.allclose(aux["slot_weights"].sum(dim=-1), torch.ones(2, 1), atol=1.0e-5))
+            self.assertTrue(torch.isfinite(aux["effective_slot_number"]).all())
+            self.assertTrue(torch.isfinite(aux["warped_anchor_logits"]).all())
+            self.assertTrue(torch.allclose(aux["anchor_logits"], aux["base_object_logits"]))
+            self.assertEqual(aux["prediction_mode"], "affine_mixture_safe")
+            self.assertLessEqual(float(aux["affine_delta"][..., 0].abs().max()), 0.1501)
+            self.assertLessEqual(float(aux["affine_delta"][..., 2].abs().max()), 0.1201)
 
-    def test_proposal_primary_final_follows_proposal_not_base_safety(self):
+    def test_affine_mixture_safe_initializes_close_to_base(self):
         torch.manual_seed(302)
         model = UNeXtFAF(_cfg().model)
         data = _batch(batch_size=1, frames=2)
         data["current_iter"] = 0
         out = model(data)
         aux = out["memory_aux_1"]["faf_aux"]
-        final_to_proposal = (aux["final_object_logits"] - aux["proposal_corrected_logits"]).abs().mean()
         final_to_base = (aux["final_object_logits"] - aux["base_object_logits"]).abs().mean()
-        base_safety_to_base = (aux["base_safety_logits"] - aux["base_object_logits"]).abs().mean()
+        identity_to_base = (aux["affine_identity_logits"] - aux["base_object_logits"]).abs().mean()
+        self.assertLess(float(identity_to_base), 1.0e-5)
         self.assertTrue(torch.isfinite(final_to_base))
-        self.assertLess(float(final_to_proposal), 1.0e-6)
-        self.assertGreater(float(final_to_base), float(base_safety_to_base) + 0.01)
-        self.assertGreater(float(aux["trust"].mean()), 0.05)
+        self.assertLess(float(final_to_base), 0.05)
+        self.assertGreater(float(aux["slot_weights"][..., 0].mean()), 0.5)
+        self.assertLess(float(aux["confidence_mean"]), 0.12)
 
-    def test_base_safety_mode_preserves_previous_fusion_behavior(self):
+    def test_base_only_mode_outputs_base_logits(self):
         torch.manual_seed(302)
         cfg = _cfg()
-        cfg.model.unext_faf.prediction_mode = "base_safety"
+        cfg.model.unext_faf.prediction_mode = "base_only"
         model = UNeXtFAF(cfg.model)
         data = _batch(batch_size=1, frames=2)
         data["current_iter"] = 0
         out = model(data)
         aux = out["memory_aux_1"]["faf_aux"]
-        self.assertEqual(aux["prediction_mode"], "base_safety")
-        self.assertTrue(torch.allclose(aux["final_object_logits"], aux["base_safety_logits"]))
-        self.assertFalse(torch.allclose(aux["final_object_logits"], aux["proposal_corrected_logits"]))
+        self.assertEqual(aux["prediction_mode"], "base_only")
+        self.assertTrue(torch.allclose(aux["final_object_logits"], aux["base_object_logits"], atol=1.0e-5))
 
     def test_ode_update_can_be_disabled(self):
         torch.manual_seed(303)
@@ -145,40 +148,17 @@ class UNeXtFAFTests(unittest.TestCase):
         self.assertEqual(float(aux["write_strength_mean"]), 0.0)
         self.assertEqual(float(aux["memory_update_norm"]), 0.0)
 
-    def test_function_codes_are_diverse(self):
-        torch.manual_seed(304)
-        model = UNeXtFAF(_cfg().model)
-        codes = model.faf.field_memory.anchor_function_codes
-        self.assertEqual(codes.shape, (4, 16))
-        # Function codes should be different (randomly initialized)
-        pairwise_diff = (codes.unsqueeze(0) - codes.unsqueeze(1)).abs().mean(dim=-1)
-        off_diag = pairwise_diff[~torch.eye(4, dtype=torch.bool)]
-        self.assertGreater(float(off_diag.mean()), 0.001)
-
-    def test_initial_anchor_fields_are_diverse(self):
-        torch.manual_seed(305)
-        model = UNeXtFAF(_cfg().model)
-        canonical_sdf = model.faf.field_memory.decode_static_field()
-        basis_weights = model.faf.field_memory.get_basis_weights()
-
-        self.assertEqual(canonical_sdf.shape, (4, 1, 8, 8))
-        self.assertEqual(basis_weights.shape, (4, 4))
-        sdf_diff = (canonical_sdf.unsqueeze(0) - canonical_sdf.unsqueeze(1)).abs().mean(dim=(-1, -2, -3))
-        weight_diff = (basis_weights.unsqueeze(0) - basis_weights.unsqueeze(1)).abs().mean(dim=-1)
-        off_diag = ~torch.eye(4, dtype=torch.bool)
-        self.assertGreater(float(sdf_diff[off_diag].mean()), 0.01)
-        self.assertGreater(float(weight_diff[off_diag].mean()), 0.05)
-
-    def test_default_anchor_count_does_not_duplicate_basis_weights(self):
+    def test_default_slot_count_initializes_identity_bias(self):
         torch.manual_seed(306)
         cfg = _cfg()
         cfg.model.unext_faf.num_anchors = 8
-        cfg.model.unext_faf.basis_dim = 6
+        cfg.model.unext_faf.num_affine_slots = 8
         model = UNeXtFAF(cfg.model)
-        basis_weights = model.faf.field_memory.get_basis_weights()
-        weight_diff = (basis_weights.unsqueeze(0) - basis_weights.unsqueeze(1)).abs().mean(dim=-1)
-        off_diag = ~torch.eye(8, dtype=torch.bool)
-        self.assertGreater(float(weight_diff[off_diag].min()), 0.001)
+        data = _batch(batch_size=1, frames=1)
+        out = model(data)
+        weights = out["memory_aux_0"]["faf_aux"]["slot_weights"]
+        self.assertEqual(weights.shape[-1], 8)
+        self.assertEqual(int(weights.argmax(dim=-1).item()), 0)
 
     def test_faf_residual_modules_use_residual_lr_group(self):
         model = UNeXtFAF(_cfg().model)
@@ -198,11 +178,11 @@ class UNeXtFAFTests(unittest.TestCase):
         residual_ids = {id(param) for param in by_name["functional_anchor_residual_heads"]["params"]}
         method_ids = {id(param) for param in by_name["functional_anchor"]["params"]}
         self.assertAlmostEqual(by_name["functional_anchor_residual_heads"]["lr"], 5.0e-4)
-        for param in model.faf.residual_refiner.parameters():
+        for param in model.faf.fusion.parameters():
             self.assertIn(id(param), residual_ids)
-        for param in model.faf.trust_gate_net.parameters():
-            self.assertIn(id(param), residual_ids)
-        for param in model.faf.proposal_generator.parameters():
+        for param in model.faf.affine_mixture.parameters():
+            self.assertIn(id(param), method_ids)
+        for param in model.faf.selector.parameters():
             self.assertIn(id(param), method_ids)
 
 

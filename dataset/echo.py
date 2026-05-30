@@ -7,6 +7,7 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from dataset.frame_index import build_label_map
+from dataset.mask_utils import binarize_lv_mask
 
 
 LOGGER = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class EchoDataset(Dataset):
         size=128,
         merge_probability=0.0,
         augmentation=None,
+        lv_class_id=None,
     ):
         super().__init__()
         self.filepath = filepath
@@ -65,6 +67,7 @@ class EchoDataset(Dataset):
         self.size = size
         self.merge_probability = merge_probability
         self.augmentation = augmentation
+        self.lv_class_id = lv_class_id
 
         self.img_root = os.path.join(filepath, mode, 'img')
         self.label_root = os.path.join(filepath, mode, 'label')
@@ -170,7 +173,7 @@ class EchoDataset(Dataset):
                 if mask is not None:
                     if mask.shape != (self.size, self.size):
                         mask = cv2.resize(mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
-                    masks_np[i] = (mask > 0).astype(np.uint8)
+                    masks_np[i] = binarize_lv_mask(mask, self.lv_class_id)
 
         frames_t = torch.from_numpy(imgs_np).float().unsqueeze(1) / 255.0
         masks_t = torch.from_numpy(masks_np).long().unsqueeze(1)
@@ -179,6 +182,8 @@ class EchoDataset(Dataset):
 
         info = {
             'name': sample['subfolder'],
+            'case_id': sample['subfolder'],
+            'video_id': sample['subfolder'],
             'frames': img_files,
             'num_objects': 0
         }
@@ -189,11 +194,13 @@ class EchoDataset(Dataset):
         label_valid = torch.zeros(self.seq_length, dtype=torch.bool)
         eval_valid = torch.zeros(self.seq_length, dtype=torch.bool)
 
-        frame_indices_all = sample_meta.get('source_frames', list(range(total_frames)))
+        frame_indices_all = sample_meta.get('sampled_source_frames', sample_meta.get('source_frames', list(range(total_frames))))
+        source_frames_available = bool(sample_meta.get('sampled_source_frames') or sample_meta.get('source_frames'))
         if len(frame_indices_all) >= total_frames:
             frame_indices = [frame_indices_all[idx] for idx in selected_indices]
         else:
             frame_indices = selected_indices
+            source_frames_available = False
         original_size = sample_meta.get('original_size', [self.size, self.size])
         protocol_name = sample_meta.get('protocol_name', _infer_protocol_name(self.filepath))
         original_sizes = torch.tensor([original_size] * self.seq_length, dtype=torch.long)
@@ -215,6 +222,8 @@ class EchoDataset(Dataset):
             raise ValueError(f"EchoDataset sample {sample['subfolder']} has no labels after frame selection")
         info['valid_label_frames'] = [int(idx) for idx in sorted(local_label_map) if 0 <= idx < self.seq_length]
         info['has_first_frame_gt'] = bool(masks_t[0].max() > 0)
+        info['frame_indices'] = frame_indices
+        info['source_frames_available'] = source_frames_available
 
         data = {
             'rgb': frames_t,
@@ -228,6 +237,9 @@ class EchoDataset(Dataset):
             'resized_size': resized_sizes,
             'frame_indices': torch.tensor(frame_indices, dtype=torch.long),
             'protocol_name': protocol_name,
+            'case_id': sample['subfolder'],
+            'video_id': sample['subfolder'],
+            'source_frames_available': torch.tensor(source_frames_available, dtype=torch.bool),
         }
 
         return data

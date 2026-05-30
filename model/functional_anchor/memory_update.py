@@ -4,6 +4,12 @@ import torch
 import torch.nn as nn
 
 
+def _safe_rms_norm(x: torch.Tensor, dim=None, eps: float = 1.0e-8) -> torch.Tensor:
+    raw = x.float().pow(2).mean(dim=dim)
+    value = torch.where(raw > 0.0, (raw + eps).sqrt(), torch.zeros_like(raw))
+    return value.to(dtype=x.dtype)
+
+
 class MemoryUpdater:
     """Selective memory update with four-factor write strength.
 
@@ -97,7 +103,7 @@ class MemoryUpdater:
         # Quality EMA
         next_quality = (self.memory_ema * quality + (1.0 - self.memory_ema) * fq * weights).detach().clamp(0.0, 1.0)
 
-        update_norm = (ode_dt * write_strength.unsqueeze(-1) * next_velocity).detach().pow(2).mean(dim=-1).sqrt()
+        update_norm = _safe_rms_norm((ode_dt * write_strength.unsqueeze(-1) * next_velocity).detach(), dim=-1)
 
         next_state = {
             "affine_state": next_affine,
@@ -114,6 +120,6 @@ class MemoryUpdater:
             "write_strength_std": write_strength.detach().std(unbiased=False),
             "memory_update_norm": update_norm.mean(),
             "quality_weighted_write": (write_strength.detach() * fq.detach()).mean(),
-            "affine_velocity_norm": next_velocity.detach().pow(2).mean(dim=-1).sqrt().mean(),
+            "affine_velocity_norm": _safe_rms_norm(next_velocity.detach(), dim=-1).mean(),
             "dead_anchor_ratio": ((usage + weights.detach()) < 1.0e-3).float().mean(),
         }

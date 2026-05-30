@@ -1,72 +1,79 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
 
-class ConfidenceFusion(nn.Module):
-    """Prediction-mode switch for UNeXt-primary and anchor ablations."""
+def _logit(value: float) -> float:
+    value = min(max(float(value), 1.0e-5), 1.0 - 1.0e-5)
+    return math.log(value / (1.0 - value))
 
-    def __init__(
-        self,
-        prediction_mode: str,
-        residual_clip: float,
-        *,
-        trust_max: float = 1.0,
-        residual_scale: float = 1.0,
-    ) -> None:
+
+class ConfidenceFusion(nn.Module):
+    def __init__(self, dec_dim: int, hidden_dim: int, *, confidence_init: float, residual_clip: float) -> None:
         super().__init__()
-        self.prediction_mode = prediction_mode.lower()
         self.residual_clip = float(residual_clip)
-        self.trust_max = float(trust_max)
-        self.residual_scale = float(residual_scale)
-        if self.prediction_mode not in {"anchor_primary", "base_primary", "learned_blend", "residual_only"}:
-            raise ValueError(f"Unsupported functional_anchor prediction_mode: {prediction_mode}")
+        self.head = nn.Sequential(
+            nn.Conv2d(dec_dim + 5, hidden_dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, 2, 1),
+        )
+        nn.init.normal_(self.head[-1].weight, mean=0.0, std=1.0e-3)
+        with torch.no_grad():
+            self.head[-1].bias[0] = _logit(confidence_init)
+            self.head[-1].bias[1] = 0.0
+            self.head[-1].weight[1].zero_()
 
     def forward(
         self,
-        *,
-        anchor_logits: torch.Tensor,
+        decoder_feature: torch.Tensor,
         base_logits: torch.Tensor,
-        shape_residual: torch.Tensor,
-        boundary_residual: torch.Tensor,
-        anchor_trust: torch.Tensor,
-        residual_scale: torch.Tensor | float | None = None,
+        mixture_logits: torch.Tensor,
+        uncertainty_map: torch.Tensor,
+        boundary_map: torch.Tensor,
+        *,
+        confidence_max: torch.Tensor,
+        residual_scale: torch.Tensor,
+        disable_confidence: bool = False,
+        disable_residual: bool = False,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        scale = self.residual_scale if residual_scale is None else residual_scale
-        if not torch.is_tensor(scale):
-            scale = torch.as_tensor(scale, device=shape_residual.device, dtype=shape_residual.dtype)
-        scale = scale.to(device=shape_residual.device, dtype=shape_residual.dtype)
-        raw_residual = shape_residual + boundary_residual
-        residual = scale * torch.tanh(raw_residual)
-        trust = anchor_trust.clamp(0.0, self.trust_max)
-        if trust.shape[-2:] != residual.shape[-2:]:
-            trust = torch.nn.functional.interpolate(trust, size=residual.shape[-2:], mode="bilinear", align_corners=False)
-        trust = trust.expand(-1, residual.shape[1], -1, -1)
-        proposal = anchor_logits + residual
-        delta = proposal - base_logits
-        if self.prediction_mode == "anchor_primary":
-            final = proposal
-        elif self.prediction_mode == "base_primary":
-            final = base_logits + trust * delta
-        elif self.prediction_mode == "learned_blend":
-            # Algebraically equivalent to base + trust * delta, kept as an
-            # explicit ablation path so tests/configs can exercise it.
-            final = (1.0 - trust) * base_logits + trust * proposal
+        B, N, H, W = base_logits.shape
+        diff = mixture_logits - base_logits
+        fusion_in = torch.cat(
+            [
+                decoder_feature.unsqueeze(1).expand(-1, N, -1, -1, -1).flatten(0, 1),
+                base_logits.flatten(0, 1).unsqueeze(1),
+                mixture_logits.flatten(0, 1).unsqueeze(1),
+                diff.flatten(0, 1).unsqueeze(1),
+                uncertainty_map.flatten(0, 1).unsqueeze(1),
+                boundary_map.flatten(0, 1).unsqueeze(1),
+            ],
+            dim=1,
+        )
+        raw = self.head(fusion_in).view(B, N, 2, H, W)
+        if disable_confidence:
+            confidence = torch.ones(B, N, H, W, device=base_logits.device, dtype=base_logits.dtype)
         else:
-            final = anchor_logits + 0.5 * residual
+            confidence = torch.sigmoid(raw[:, :, 0]) * confidence_max
+        if disable_residual:
+            residual = torch.zeros_like(base_logits)
+        else:
+            residual = torch.tanh(raw[:, :, 1].clamp(-self.residual_clip, self.residual_clip)) * residual_scale
+            residual = residual * boundary_map.detach().clamp(0.0, 1.0)
+        final = base_logits + confidence * diff + residual
+        easy = uncertainty_map.detach() < 0.35
+        hard = ~easy
         return final, {
+            "confidence_gate": confidence,
+            "trust": confidence,
             "residual_logits": residual,
-            "proposal_logits": proposal,
-            "delta_logits": delta,
-            "raw_residual_logits": raw_residual,
-            "residual_scale": scale.detach().reshape(()),
-            "trust_mean": trust.detach().mean(),
-            "trust_std": trust.detach().std(unbiased=False),
-            "residual_abs_mean": residual.detach().abs().mean(),
-            "residual_abs_max": residual.detach().abs().amax(),
-            "residual_clip_hit_ratio": (residual.detach().abs() >= (scale.detach().abs() * 0.99).clamp_min(1.0e-8)).float().mean(),
-            "delta_abs_mean": delta.detach().abs().mean(),
-            "anchor_trust_ratio": trust.detach().mean(),
-            "image_trust_ratio": (1.0 - trust.detach()).mean(),
+            "safety_residual_logits": confidence * diff + residual,
+            "confidence_mean": confidence.detach().mean(),
+            "confidence_easy_mean": confidence.detach().masked_select(easy).mean() if easy.any() else confidence.detach().mean(),
+            "confidence_hard_mean": confidence.detach().masked_select(hard).mean() if hard.any() else confidence.detach().mean(),
+            "residual_l1": residual.detach().abs().mean(),
+            "residual_l2": residual.detach().float().pow(2).mean().sqrt().to(dtype=residual.dtype),
+            "residual_clip_hit_ratio": (raw[:, :, 1].detach().abs() >= self.residual_clip * 0.99).float().mean(),
         }

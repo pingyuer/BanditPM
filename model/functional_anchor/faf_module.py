@@ -1,26 +1,17 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from model.functional_anchor.field_memory import FieldMemory
-from model.functional_anchor.retriever import Retriever
-from model.functional_anchor.proposal_generator import ProposalGenerator
-from model.functional_anchor.residual_refiner import ResidualRefiner
-from model.functional_anchor.trust_gate import TrustGate
-from model.functional_anchor.memory_update import MemoryUpdater
+from model.functional_anchor.anchor_provider import AnchorProvider
+from model.functional_anchor.affine_selector import AffineSelector
+from model.functional_anchor.affine_mixture import AffineMixtureGenerator
+from model.functional_anchor.confidence_fusion import ConfidenceFusion
+from model.functional_anchor.temporal_affine_update import TemporalAffineUpdater
 
 
 class FAFModule(nn.Module):
-    """Functional Anchor Field — orchestrator.
-
-    Data flow per frame:
-        morphology query → soft retrieval → SDF proposal →
-        proposal-conditioned residual → trust-gated correction → selective memory update
-    """
+    """UNeXt-as-anchor FAF with a temporal affine mixture bank."""
 
     def __init__(
         self,
@@ -38,50 +29,91 @@ class FAFModule(nn.Module):
         memory_ema: float,
         enable_memory_update: bool = True,
         disable_trust_gate: bool = False,
-        temperature_init: float = 0.7,
-        temperature_warmup_iters: int = 500,
-        residual_scale_init: float = 0.02,
-        residual_scale_max: float = 0.12,
+        temperature_init: float = 1.0,
+        temperature_warmup_iters: int = 1500,
+        residual_scale_init: float = 0.0,
+        residual_scale_max: float = 0.05,
         residual_warmup_iters: int = 1500,
-        trust_warmup_iters: int = 500,
-        trust_min_warmup: float = 0.10,
+        trust_warmup_iters: int = 1500,
+        trust_min_warmup: float = 0.0,
         trust_curriculum_iters: int = 1500,
-        ode_dt_init: float = 0.5,
-        ode_dt_max: float = 1.0,
+        ode_dt_init: float = 0.1,
+        ode_dt_max: float = 0.6,
         ode_warmup_iters: int = 1500,
         velocity_momentum: float = 0.8,
         feature_modulation: dict | None = None,
         disable_proposal_in_residual: bool = False,
         disable_feature_modulation: bool = False,
+        num_affine_slots: int | None = None,
+        identity_slot_index: int = 0,
+        affine_cfg: dict | None = None,
+        selector_cfg: dict | None = None,
+        confidence_cfg: dict | None = None,
+        residual_cfg: dict | None = None,
+        temporal_update_cfg: dict | None = None,
     ) -> None:
         super().__init__()
-        self.num_anchors = int(num_anchors)
-        self.residual_clip = float(residual_clip)
-        self.trust_max = float(trust_max)
-        self.temperature_init = float(temperature_init)
-        self.temperature_final = float(retrieval_temperature)
-        self.temperature_warmup_iters = int(temperature_warmup_iters)
-        self.residual_scale_init = float(residual_scale_init)
-        self.residual_scale_max = float(residual_scale_max)
-        self.residual_warmup_iters = int(residual_warmup_iters)
-        self.trust_warmup_iters = int(trust_warmup_iters)
-        self.trust_min_warmup = float(trust_min_warmup)
-        self.trust_curriculum_iters = int(trust_curriculum_iters)
-        self.ode_dt_init = float(ode_dt_init)
-        self.ode_dt_max = float(ode_dt_max)
-        self.ode_warmup_iters = int(ode_warmup_iters)
-        self.disable_trust_gate = bool(disable_trust_gate)
-        self.disable_proposal_in_residual = bool(disable_proposal_in_residual)
-
+        del code_dim, basis_dim, anchor_size, memory_ema, feature_modulation, disable_proposal_in_residual, disable_feature_modulation
+        self.num_slots = int(num_affine_slots or num_anchors)
+        self.num_anchors = self.num_slots
+        self.identity_slot_index = int(identity_slot_index)
         pooled_dim = sum(feature_dims.values())
         dec_dim = feature_dims["dec"]
 
-        self.field_memory = FieldMemory(num_anchors, query_dim, code_dim, basis_dim, anchor_size, hidden_dim)
-        self.retriever = Retriever(query_dim, hidden_dim, pooled_dim)
-        self.proposal_generator = ProposalGenerator(query_dim, hidden_dim, num_anchors)
-        self.residual_refiner = ResidualRefiner(dec_dim, hidden_dim, residual_clip)
-        self.trust_gate_net = TrustGate(dec_dim, hidden_dim)
-        self.memory_updater = MemoryUpdater(memory_ema, velocity_momentum, enable_memory_update)
+        affine_cfg = affine_cfg or {}
+        selector_cfg = selector_cfg or {}
+        confidence_cfg = confidence_cfg or {}
+        residual_cfg = residual_cfg or {}
+        temporal_update_cfg = temporal_update_cfg or {}
+
+        self.temperature_init = float(selector_cfg.get("temperature_init", temperature_init))
+        self.temperature_final = float(selector_cfg.get("temperature_final", retrieval_temperature))
+        self.temperature_warmup_iters = int(selector_cfg.get("warmup_iters", temperature_warmup_iters))
+        self.confidence_init = float(confidence_cfg.get("init", 0.10))
+        self.confidence_max = float(confidence_cfg.get("max", trust_max))
+        self.confidence_warmup_iters = int(confidence_cfg.get("warmup_iters", trust_warmup_iters))
+        self.residual_scale_init = float(residual_cfg.get("init_scale", residual_scale_init))
+        self.residual_scale_max = float(residual_cfg.get("max_scale", residual_scale_max))
+        self.residual_warmup_iters = int(residual_cfg.get("warmup_iters", residual_warmup_iters))
+        self.ode_dt_init = float(temporal_update_cfg.get("dt_init", ode_dt_init))
+        self.ode_dt_max = float(temporal_update_cfg.get("dt_max", ode_dt_max))
+        self.ode_warmup_iters = int(temporal_update_cfg.get("warmup_iters", ode_warmup_iters))
+        self.disable_confidence = bool(disable_trust_gate) or not bool(confidence_cfg.get("enabled", True))
+        self.disable_residual = not bool(residual_cfg.get("enabled", True))
+        self.enable_memory_update = bool(enable_memory_update) and bool(temporal_update_cfg.get("enabled", True))
+
+        self.anchor_provider = AnchorProvider()
+        self.selector = AffineSelector(
+            pooled_dim=pooled_dim,
+            query_dim=query_dim,
+            hidden_dim=hidden_dim,
+            num_slots=self.num_slots,
+            identity_slot_index=self.identity_slot_index,
+            identity_bias=float(affine_cfg.get("init_identity_bias", selector_cfg.get("init_identity_bias", 2.0))),
+            confidence_init=self.confidence_init,
+        )
+        limits = affine_cfg.get("limits", {})
+        self.affine_mixture = AffineMixtureGenerator(
+            query_dim=query_dim,
+            hidden_dim=hidden_dim,
+            num_slots=self.num_slots,
+            translate_limit=float(limits.get("translate", 0.15)),
+            scale_log_limit=float(limits.get("scale_log", 0.12)),
+            rotation_deg_limit=float(limits.get("rotation_deg", 10.0)),
+            shear_limit=float(limits.get("shear", 0.08)),
+        )
+        self.temporal_updater = TemporalAffineUpdater(
+            enable=self.enable_memory_update,
+            velocity_momentum=float(temporal_update_cfg.get("velocity_momentum", velocity_momentum)),
+            decay_min=float(temporal_update_cfg.get("decay_min", 0.85)),
+            truncated_bptt_steps=int(temporal_update_cfg.get("truncated_bptt_steps", 0)),
+        )
+        self.fusion = ConfidenceFusion(
+            dec_dim=dec_dim,
+            hidden_dim=hidden_dim,
+            confidence_init=self.confidence_init,
+            residual_clip=float(residual_cfg.get("clip", residual_clip)),
+        )
 
     def _scheduled(self, step, init: float, final: float, warmup_iters: int, device, dtype) -> torch.Tensor:
         if step is None or warmup_iters <= 0:
@@ -90,19 +122,8 @@ class FAFModule(nn.Module):
         ratio = min(max(step_value / float(warmup_iters), 0.0), 1.0)
         return torch.tensor(init + ratio * (final - init), device=device, dtype=dtype)
 
-    def _trust_floor(self, step, device, dtype) -> torch.Tensor:
-        if step is None or self.trust_curriculum_iters <= 0:
-            return torch.zeros((), device=device, dtype=dtype)
-        step_value = float(step.detach().flatten()[0].item()) if torch.is_tensor(step) else float(step or 0)
-        ratio = min(max(step_value / float(self.trust_curriculum_iters), 0.0), 1.0)
-        return torch.tensor(self.trust_min_warmup * (1.0 - ratio), device=device, dtype=dtype)
-
     def initial_state(self, batch_size: int, num_objects: int, device, dtype) -> dict:
-        state = self.memory_updater.initial_state(batch_size, num_objects, self.num_anchors, device, dtype)
-        state["prev_query"] = None
-        state["prev_proposal"] = None
-        state["prev_area"] = None
-        return state
+        return self.temporal_updater.initial_state(batch_size, num_objects, self.num_slots, device, dtype)
 
     def forward_step(
         self,
@@ -111,136 +132,110 @@ class FAFModule(nn.Module):
         state: dict,
         *,
         global_step=None,
-        canonical_sdf: torch.Tensor | None = None,
+        mode: str = "affine_mixture_safe",
     ) -> tuple[torch.Tensor, dict, dict]:
-        B, N, H, W = base_logits.shape
         dtype = base_logits.dtype
         device = base_logits.device
-
         temperature = self._scheduled(global_step, self.temperature_init, self.temperature_final, self.temperature_warmup_iters, device, dtype)
+        confidence_max = self._scheduled(global_step, self.confidence_init, self.confidence_max, self.confidence_warmup_iters, device, dtype)
         residual_scale = self._scheduled(global_step, self.residual_scale_init, self.residual_scale_max, self.residual_warmup_iters, device, dtype)
-        trust_max = self._scheduled(global_step, 0.05, self.trust_max, self.trust_warmup_iters, device, dtype)
-        trust_floor = self._trust_floor(global_step, device, dtype)
         ode_dt = self._scheduled(global_step, self.ode_dt_init, self.ode_dt_max, self.ode_warmup_iters, device, dtype)
 
-        # 1. Retriever
-        weights, retrieval_aux = self.retriever(
-            feats, base_logits, self.field_memory.anchor_keys, state["quality"], state.get("prev_query"), temperature,
+        anchor = self.anchor_provider(feats, base_logits)
+        slot_weights, selector_aux = self.selector(anchor, state, temperature)
+        if mode == "affine_identity_only":
+            slot_weights = torch.zeros_like(slot_weights)
+            slot_weights[..., self.identity_slot_index] = 1.0
+            selector_aux["slot_weights"] = slot_weights
+        warped, mixture_logits, mixture_aux = self.affine_mixture(
+            base_logits,
+            selector_aux["query"],
+            state["affine_state"],
+            slot_weights,
+            selector_aux["slot_confidence"],
         )
+        if mode == "affine_hard_top1":
+            hard = torch.zeros_like(slot_weights)
+            hard.scatter_(-1, slot_weights.argmax(dim=-1, keepdim=True), 1.0)
+            mixture_logits = (hard.unsqueeze(-1).unsqueeze(-1) * warped).sum(dim=2)
+        elif mode == "base_only":
+            mixture_logits = base_logits
+        if mode == "affine_no_temporal":
+            update_delta = torch.zeros_like(mixture_aux["affine_delta"])
+        else:
+            update_delta = mixture_aux["affine_delta"]
 
-        # 2. Proposal generator (uses cached canonical_sdf)
-        if canonical_sdf is None:
-            canonical_sdf = self.field_memory.decode_static_field()
-        proposals, proposal_logits, proposal_aux = self.proposal_generator(
-            retrieval_aux["query"], self.field_memory.anchor_keys, canonical_sdf,
-            state["affine_state"], weights, (H, W),
-        )
-
-        # 3. Residual refiner
-        raw_residual, bounded_residual, proposal_minus_base = self.residual_refiner(
-            feats["dec"], base_logits, proposal_logits,
-            retrieval_aux["base_uncertainty_map"], retrieval_aux["base_boundary_map"],
-            disable_proposal=self.disable_proposal_in_residual,
-        )
-        residual = residual_scale * bounded_residual
-
-        # 4. Trust gate
-        residual_in_concat = torch.cat([
-            feats["dec"].unsqueeze(1).expand(-1, N, -1, -1, -1).flatten(0, 1),
-            base_logits.flatten(0, 1).unsqueeze(1),
-            proposal_logits.flatten(0, 1).unsqueeze(1),
-            proposal_minus_base.flatten(0, 1).unsqueeze(1),
-            retrieval_aux["base_uncertainty_map"].flatten(0, 1).unsqueeze(1),
-            retrieval_aux["base_boundary_map"].flatten(0, 1).unsqueeze(1),
-        ], dim=1)
-        trust, gate = self.trust_gate_net(
-            residual_in_concat, trust_max, trust_floor, disable=self.disable_trust_gate,
-        )
-        trust = trust.view(B, N, H, W)
-        gate = gate.view(B, N, H, W)
-        safety_residual = gate * trust * residual
-        base_safety_logits = base_logits + safety_residual
-        proposal_corrected_logits = proposal_logits + safety_residual
-
-        # 5. Memory update
-        frame_quality = (1.0 - retrieval_aux["query_uncertainty"]).clamp(0.05, 1.0)
-        prev_area = state.get("prev_area")
-        area = retrieval_aux["query_area"]
+        prev_area = state.get("prev_anchor_area")
+        area = anchor["query_area"]
         area_motion = (area - prev_area).abs().clamp(0.0, 0.25) * 4.0 if torch.is_tensor(prev_area) else torch.zeros_like(area)
-        coverage_gap = (1.0 - torch.sigmoid(proposals).amax(dim=2).mean(dim=(-2, -1))).clamp(0.0, 1.0)
-
-        next_state, update_aux = self.memory_updater.update(
-            state, weights, proposal_aux["affine_delta"], frame_quality, area_motion, coverage_gap, ode_dt,
+        frame_quality = (1.0 - anchor["query_uncertainty"]).clamp(0.05, 1.0)
+        next_state, update_aux = self.temporal_updater.update(
+            state,
+            slot_weights,
+            selector_aux["slot_confidence"],
+            update_delta,
+            frame_quality,
+            area_motion,
+            ode_dt,
         )
-        next_state["prev_query"] = retrieval_aux["query"].detach()
-        next_state["prev_proposal"] = proposal_logits.detach()
-        next_state["prev_area"] = area.detach()
+        next_state["prev_query"] = selector_aux["query"].detach()
+        next_state["prev_anchor_area"] = area.detach()
 
-        # 6. Diagnostics
-        proposal_coverage = 1.0 - coverage_gap
-        anchor_area = proposal_aux["anchor_area"]
-        anchor_area_means = anchor_area.mean(dim=(0, 1))
-        anchor_area_separation = (anchor_area_means.max() - anchor_area_means.min()) if self.num_anchors > 1 else torch.zeros((), device=device, dtype=dtype)
-        code_similarity = self.field_memory.code_pairwise_similarity()
+        final_logits, fusion_aux = self.fusion(
+            feats["dec"],
+            base_logits,
+            mixture_logits,
+            anchor["base_uncertainty_map"],
+            anchor["base_boundary_map"],
+            confidence_max=confidence_max,
+            residual_scale=residual_scale,
+            disable_confidence=(mode == "affine_no_confidence"),
+            disable_residual=(self.disable_residual or mode == "affine_no_residual"),
+        )
+        if mode == "affine_mixture":
+            final_logits = mixture_logits + fusion_aux["residual_logits"]
+        elif mode in {"base_only", "affine_identity_only"}:
+            final_logits = base_logits + fusion_aux["residual_logits"]
 
-        # Residual proposal sensitivity (debug only, expensive)
-        residual_proposal_sensitivity = torch.zeros((), device=device, dtype=dtype)
-
+        slot_area = mixture_aux["slot_area"]
         aux = {
-            # Core outputs
-            "safety_residual_logits": safety_residual,
-            "base_safety_logits": base_safety_logits,
-            "proposal_corrected_logits": proposal_corrected_logits,
-            "proposal_logits": proposal_logits,
-            "anchor_proposals": proposals,
-            "active_weights": weights,
-            "trust": trust,
-            "gate": gate,
-            "anchor_trust_map": trust,
-            # Field info
-            "function_codes": self.field_memory.anchor_function_codes.detach().view(1, 1, self.num_anchors, -1).expand(B, N, -1, -1),
-            "canonical_sdf": canonical_sdf.detach(),
-            "basis_weights": self.field_memory.get_basis_weights().detach(),
-            # Coverage
-            "coverage_score": proposal_coverage,
-            "coverage_gap": coverage_gap,
-            # Residual
-            "residual_logits": residual,
-            "residual_l1": residual.detach().abs().mean(),
-            "residual_l2": residual.detach().pow(2).mean().sqrt(),
-            "safety_residual_l1": safety_residual.detach().abs().mean(),
-            "residual_clip_hit_ratio": (raw_residual.detach().abs() >= self.residual_clip * 0.99).float().mean(),
-            "residual_proposal_sensitivity": residual_proposal_sensitivity,
-            "residual_scale": residual_scale.detach(),
-            # Trust
-            "trust_mean": trust.detach().mean(),
-            "trust_std": trust.detach().std(unbiased=False),
-            "trust_floor": trust_floor.detach(),
-            "gate_mean": gate.detach().mean(),
-            "anchor_trust_ratio": trust.detach().mean(),
-            "image_trust_ratio": (1.0 - trust.detach()).mean(),
-            "trust_easy_mean": trust.detach().masked_select((retrieval_aux["base_uncertainty_map"].detach() < 0.35)).mean()
-            if (retrieval_aux["base_uncertainty_map"].detach() < 0.35).any() else trust.detach().mean(),
-            "trust_hard_mean": trust.detach().masked_select((retrieval_aux["base_uncertainty_map"].detach() >= 0.35)).mean()
-            if (retrieval_aux["base_uncertainty_map"].detach() >= 0.35).any() else trust.detach().mean(),
-            # Anchor diversity
-            "anchor_area": anchor_area,
-            "anchor_area_diversity": anchor_area.std(dim=-1, unbiased=False).mean(),
-            "anchor_area_separation": anchor_area_separation,
-            "anchor_pairwise_similarity": code_similarity,
-            "anchor_function_diversity": 1.0 - code_similarity,
-            "anchor_phase_purity_proxy": weights.max(dim=-1).values.detach(),
-            # Scheduling
-            "retrieval_temperature": temperature.detach(),
-            "ode_dt": ode_dt.detach(),
-            "trust_max": trust_max.detach(),
-            # Affine
-            "affine_delta": proposal_aux["affine_delta"],
+            "anchor_logits": base_logits,
+            "base_object_logits": base_logits,
+            "base_logits": base_logits,
+            "unext_anchor_logits": base_logits,
+            "warped_anchor_logits": warped,
+            "mixture_logits": mixture_logits,
+            "proposal_logits": mixture_logits,
+            "final_logits": final_logits,
+            "final_object_logits": final_logits,
+            "slot_weights": slot_weights,
+            "active_weights": slot_weights,
+            "slot_logits": selector_aux["slot_logits"],
+            "slot_confidence": selector_aux["slot_confidence"],
+            "affine_delta": mixture_aux["affine_delta"],
             "affine_state": state["affine_state"].detach(),
-            "affine_delta_norm": proposal_aux["affine_delta"].pow(2).mean(dim=-1).sqrt().mean(),
+            "affine_state_norm": mixture_aux["affine_state_norm"],
+            "affine_delta_norm": mixture_aux["affine_delta_norm"],
+            "affine_identity_logits": warped[:, :, self.identity_slot_index],
+            "affine_top1_logits": warped.gather(
+                2,
+                slot_weights.argmax(dim=-1).view(*slot_weights.shape[:2], 1, 1, 1).expand(-1, -1, -1, *warped.shape[-2:]),
+            ).squeeze(2),
+            "slot_area": slot_area,
+            "slot_usage_hist": slot_weights.detach().mean(dim=(0, 1)),
+            "slot_area_diversity": slot_area.std(dim=-1, unbiased=False).mean(),
+            "coverage_score": 1.0 - (1.0 - torch.sigmoid(warped).amax(dim=2).mean(dim=(-2, -1))).clamp(0.0, 1.0),
+            "coverage_gap": (1.0 - torch.sigmoid(warped).amax(dim=2).mean(dim=(-2, -1))).clamp(0.0, 1.0),
+            "retrieval_temperature": temperature.detach(),
+            "selector_temperature": temperature.detach(),
+            "confidence_max": confidence_max.detach(),
+            "residual_scale": residual_scale.detach(),
+            "ode_dt": ode_dt.detach(),
+            "mode": "online",
         }
-        aux.update(retrieval_aux)
-        aux.update(proposal_aux)
+        aux.update(anchor)
+        aux.update(selector_aux)
+        aux.update(mixture_aux)
         aux.update(update_aux)
-
-        return base_safety_logits, aux, next_state
+        aux.update(fusion_aux)
+        return final_logits, aux, next_state

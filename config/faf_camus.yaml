@@ -21,6 +21,16 @@ main_training:
   use_ema: false
   ema_eval: false
 
+model:
+  unext_faf:
+    base_dim: 64
+    prediction_mode: "affine_mixture_safe"
+    anchor_source: "unext_logits"
+    num_affine_slots: 8
+    identity_slot_index: 0
+    require_pretrained_unext: true
+    pretrained_unext_path: null
+
 evaluation:
   protocol_version: "v3_unext_faf"
   threshold_search_during_training: false

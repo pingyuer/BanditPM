@@ -27,6 +27,7 @@ from utils.frame_validity import (
     normalize_frame_validity_mask,
     summarize_frame_mask,
 )
+from utils.model_capacity import infer_unext_capacity
 
 from monai.metrics import (
     HausdorffDistanceMetric,
@@ -114,6 +115,7 @@ class Trainer:
         self.rank = dist.get_rank() if self.is_distributed else 0
         self.world_size = dist.get_world_size() if self.is_distributed else 1
         self.main_process = self.rank == 0
+        self._logged_eval_protocol_summaries = set()
 
         model = build_model_from_cfg(cfg, self.device)
         model = model.to(memory_format=torch.channels_last)
@@ -131,9 +133,50 @@ class Trainer:
 
         if self.main_process:
             try:
-                param_count = sum(p.nelement() for p in self.model.parameters()) / 1e6
-                self.log.info(f"Model Parameters: {param_count:.2f}M")
-                self._log_metrics({"model/parameters_m": param_count}, step=0)
+                capacity = infer_unext_capacity(self.model, self.cfg)
+                self.log.info(
+                    "[ModelCapacity] "
+                    f"total={capacity['parameters_m_total']:.3f}M | "
+                    f"backbone={capacity['parameters_m_backbone']:.3f}M | "
+                    f"method={capacity['parameters_m_method']:.3f}M | "
+                    f"faf={capacity['parameters_m_faf']:.3f}M | "
+                    f"selector={capacity['parameters_m_faf_selector']:.3f}M | "
+                    f"affine={capacity['parameters_m_faf_affine_mixture']:.3f}M | "
+                    f"fusion={capacity['parameters_m_faf_fusion']:.3f}M | "
+                    f"base_dim={capacity['unext_base_dim']} | "
+                    f"channels={capacity['unext_channels']} | "
+                    f"value_dim={capacity['value_dim']}"
+                )
+                self._log_metrics(
+                    {
+                        "model/parameters_m_total": capacity["parameters_m_total"],
+                        "model/parameters_m_backbone": capacity["parameters_m_backbone"],
+                        "model/parameters_m_faf": capacity["parameters_m_faf"],
+                        "model/parameters_m_faf_selector": capacity["parameters_m_faf_selector"],
+                        "model/parameters_m_faf_affine_mixture": capacity["parameters_m_faf_affine_mixture"],
+                        "model/parameters_m_faf_fusion": capacity["parameters_m_faf_fusion"],
+                        "model/parameters_m_method": capacity["parameters_m_method"],
+                        "model/unext_base_dim": capacity["unext_base_dim"] or 0,
+                        "model/value_dim": capacity["value_dim"] or 0,
+                    },
+                    step=0,
+                )
+                logger = getattr(self, "mlflow_logger", None)
+                if logger is not None:
+                    logger.log_params(
+                        {
+                            "model/parameters_m_total": capacity["parameters_m_total"],
+                            "model/parameters_m_backbone": capacity["parameters_m_backbone"],
+                            "model/parameters_m_faf": capacity["parameters_m_faf"],
+                            "model/parameters_m_faf_selector": capacity["parameters_m_faf_selector"],
+                            "model/parameters_m_faf_affine_mixture": capacity["parameters_m_faf_affine_mixture"],
+                            "model/parameters_m_faf_fusion": capacity["parameters_m_faf_fusion"],
+                            "model/parameters_m_method": capacity["parameters_m_method"],
+                            "model/unext_base_dim": capacity["unext_base_dim"],
+                            "model/unext_channels": capacity["unext_channels"],
+                            "model/value_dim": capacity["value_dim"],
+                        }
+                    )
             except Exception:
                 self.log.info("Model Parameters: Count failed")
 
@@ -304,6 +347,52 @@ class Trainer:
             frame_mask = self._resolve_supervised_indices(data)
         return self._apply_eval_exclusions(frame_mask)
 
+    def _eval_protocol_name(self) -> str:
+        eval_cfg = self.cfg.get("evaluation", {})
+        explicit = eval_cfg.get("eval_protocol", None)
+        if explicit:
+            return str(explicit)
+        dataset = str(self.cfg.get("dataset_name", "")).lower()
+        frame_scope = str(eval_cfg.get("frame_scope", "supervised_only"))
+        exclude_init = bool(eval_cfg.get("exclude_init_frame", False))
+        if dataset in {"echonet", "echo"} and frame_scope == "supervised_only":
+            return "echonet_supervised_noinit" if exclude_init else "echonet_supervised_all"
+        return f"{frame_scope}_{'noinit' if exclude_init else 'withinit'}"
+
+    def _log_eval_first_batch_protocol(self, mode: str, it: int, eval_indices: torch.Tensor) -> None:
+        if not self.main_process:
+            return
+        key = (mode, self._eval_protocol_name())
+        if key in self._logged_eval_protocol_summaries:
+            return
+        self._logged_eval_protocol_summaries.add(key)
+        indices_per_sample = [
+            torch.nonzero(row.detach().cpu(), as_tuple=False).flatten().tolist()
+            for row in eval_indices
+        ]
+        valid_counts = [len(indices) for indices in indices_per_sample]
+        summary = {
+            "mode": mode,
+            "iteration": int(it),
+            "eval_protocol": self._eval_protocol_name(),
+            "frame_scope": str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only")),
+            "exclude_init_frame": bool(self.cfg.get("evaluation", {}).get("exclude_init_frame", False)),
+            "indices_first_batch": indices_per_sample,
+            "valid_count_first_batch": valid_counts,
+        }
+        logger = getattr(self, "mlflow_logger", None)
+        if logger is not None:
+            logger.log_params(
+                {
+                    f"eval/{mode}/protocol": summary["eval_protocol"],
+                    f"eval/{mode}/indices_first_batch": indices_per_sample,
+                    f"eval/{mode}/valid_count_first_batch": valid_counts,
+                }
+            )
+            path = self.run_path / f"eval_protocol_{mode}.json"
+            path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+            logger.log_artifact(path, artifact_path="data")
+
     def _apply_eval_exclusions(self, frame_mask: torch.Tensor) -> torch.Tensor:
         eval_cfg = self.cfg.get("evaluation", {})
         if not bool(eval_cfg.get("exclude_init_frame", False)):
@@ -424,6 +513,7 @@ class Trainer:
             "experiment_name": self.exp_id,
             "dataset": str(self.cfg.get("dataset_name", "")),
             "protocol_name": str(self.cfg.get("data", {}).get("protocol_name", "unknown")),
+            "eval_protocol": self._eval_protocol_name(),
             "init_mode": init_mode,
             "oracle_gt_init_allowed": self._oracle_init_allowed(),
             "uses_oracle_gt": uses_oracle_gt,
@@ -636,7 +726,11 @@ class Trainer:
                 ("lambda_functional_anchor_trust_l1", "trust_l1"),
                 ("lambda_functional_anchor_trust_entropy", "trust_entropy"),
                 ("lambda_functional_anchor_ode_raw_delta", "ode_raw_delta"),
-                ("lambda_faf_anchor", "anchor"),
+                ("lambda_faf_mixture", "mixture"),
+                ("lambda_faf_oracle", "oracle"),
+                ("lambda_faf_top1", "top1"),
+                ("lambda_faf_selector", "selector"),
+                ("lambda_faf_confidence", "confidence"),
                 ("lambda_faf_base", "base"),
                 ("lambda_faf_coverage", "coverage"),
                 ("lambda_faf_sparse", "sparse"),
@@ -1118,28 +1212,22 @@ class Trainer:
             return
         try:
             buckets = {
-                "effective_anchor_number": [],
-                "active_anchor_entropy": [],
-                "top1_anchor_weight": [],
-                "top3_anchor_weight_sum": [],
+                "effective_slot_number": [],
+                "slot_entropy": [],
+                "top1_slot_weight": [],
+                "top3_slot_weight_sum": [],
                 "coverage_score": [],
                 "coverage_gap": [],
-                "anchor_function_diversity": [],
-                "anchor_area_diversity": [],
-                "anchor_area_separation": [],
-                "anchor_phase_purity_proxy": [],
-                "anchor_pairwise_similarity": [],
+                "slot_area_diversity": [],
                 "write_strength_mean": [],
                 "memory_update_norm": [],
                 "affine_delta_norm": [],
-                "affine_velocity_norm": [],
-                "ode_velocity_norm": [],
-                "dead_anchor_ratio": [],
-                "recycled_anchor_ratio": [],
-                "trust_mean": [],
-                "trust_easy_mean": [],
-                "trust_hard_mean": [],
-                "anchor_trust_ratio": [],
+                "affine_state_norm": [],
+                "velocity_norm": [],
+                "confidence_mean": [],
+                "confidence_easy_mean": [],
+                "confidence_hard_mean": [],
+                "identity_slot_usage": [],
                 "residual_l1": [],
                 "residual_l2": [],
                 "safety_residual_l1": [],
@@ -1647,11 +1735,13 @@ class Trainer:
                             f"oracle_gt_init_allowed={self._oracle_init_allowed()} | "
                             f"uses_oracle_gt={uses_oracle_gt} | "
                             f"metric_space={str(self.cfg.get('evaluation', {}).get('metric_space', 'original'))} | "
+                            f"eval_protocol={self._eval_protocol_name()} | "
                             f"exclude_init_frame={bool(self.cfg.get('evaluation', {}).get('exclude_init_frame', False))} | "
                             f"supervised_indices={self._format_frame_mask(supervised_indices)} | "
                             f"eval_indices={self._format_frame_mask(eval_indices)} | "
                             f"valid_mask_frame_counts={valid_mask_counts}"
                         )
+                        self._log_eval_first_batch_protocol(mode, it, eval_indices)
 
                     if not all(k in out for k in mask_keys):
                         continue
@@ -1971,7 +2061,9 @@ class Trainer:
                             if isinstance(faf_aux, dict):
                                 for src, prefix in (
                                     ("base_object_logits", "faf_base"),
-                                    ("proposal_logits", "faf_anchor"),
+                                    ("anchor_logits", "faf_unext_anchor"),
+                                    ("mixture_logits", "faf_affine_mixture"),
+                                    ("affine_identity_logits", "faf_affine_identity"),
                                 ):
                                     aux_logits = faf_aux.get(src)
                                     if torch.is_tensor(aux_logits) and aux_logits.shape[0] > bi:
@@ -1983,16 +2075,16 @@ class Trainer:
                                         if prefix == "faf_base":
                                             faf_base_dice_curr = aux_dice
                                             faf_base_area_values.append(aux_bin.float().mean().detach())
-                                        elif prefix == "faf_anchor":
+                                        elif prefix == "faf_affine_mixture":
                                             faf_proposal_area_values.append(aux_bin.float().mean().detach())
                                 query_uncertainty = faf_aux.get("query_uncertainty")
                                 if torch.is_tensor(query_uncertainty):
                                     item = query_uncertainty[bi : bi + 1] if query_uncertainty.shape[0] > bi else query_uncertainty
                                     faf_hard_curr = bool(float(item.float().mean().item()) >= 0.35)
-                                anchor_proposals = faf_aux.get("anchor_proposals")
-                                active_weights = faf_aux.get("active_weights")
-                                if torch.is_tensor(anchor_proposals) and anchor_proposals.shape[0] > bi:
-                                    proposals = anchor_proposals[bi : bi + 1, :1]
+                                warped_anchor_logits = faf_aux.get("warped_anchor_logits")
+                                slot_weights = faf_aux.get("slot_weights", faf_aux.get("active_weights"))
+                                if torch.is_tensor(warped_anchor_logits) and warped_anchor_logits.shape[0] > bi:
+                                    proposals = warped_anchor_logits[bi : bi + 1, :1]
                                     proposal_dices = []
                                     for ai in range(proposals.shape[2]):
                                         prop_prob = torch.sigmoid(proposals[:, :, ai])
@@ -2001,37 +2093,35 @@ class Trainer:
                                         proposal_dices.append(prop_dice)
                                     if proposal_dices:
                                         dice_tensor = torch.tensor(proposal_dices, device=pred.device, dtype=torch.float32)
-                                        metric_totals["faf_proposal_oracle_dice_sum"] = metric_totals.get("faf_proposal_oracle_dice_sum", 0.0) + float(dice_tensor.max().item())
-                                        metric_totals["faf_proposal_mean_dice_sum"] = metric_totals.get("faf_proposal_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
-                                        metric_totals["faf_proposal_dice_count"] = metric_totals.get("faf_proposal_dice_count", 0.0) + 1.0
-                                        if torch.is_tensor(active_weights) and active_weights.shape[0] > bi:
-                                            top_idx = int(active_weights[bi, 0].argmax().item())
+                                        metric_totals["faf_affine_oracle_dice_sum"] = metric_totals.get("faf_affine_oracle_dice_sum", 0.0) + float(dice_tensor.max().item())
+                                        metric_totals["faf_affine_mean_dice_sum"] = metric_totals.get("faf_affine_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
+                                        metric_totals["faf_affine_dice_count"] = metric_totals.get("faf_affine_dice_count", 0.0) + 1.0
+                                        identity_idx = int(faf_aux.get("identity_slot_index", 0)) if not torch.is_tensor(faf_aux.get("identity_slot_index")) else int(faf_aux["identity_slot_index"].item())
+                                        if identity_idx < len(proposal_dices):
+                                            metric_totals["faf_affine_identity_dice_sum"] = metric_totals.get("faf_affine_identity_dice_sum", 0.0) + proposal_dices[identity_idx]
+                                            metric_totals["faf_affine_identity_dice_count"] = metric_totals.get("faf_affine_identity_dice_count", 0.0) + 1.0
+                                        if torch.is_tensor(slot_weights) and slot_weights.shape[0] > bi:
+                                            top_idx = int(slot_weights[bi, 0].argmax().item())
                                             if top_idx < len(proposal_dices):
-                                                metric_totals["faf_proposal_top1_dice_sum"] = metric_totals.get("faf_proposal_top1_dice_sum", 0.0) + proposal_dices[top_idx]
-                                                metric_totals["faf_proposal_top1_dice_count"] = metric_totals.get("faf_proposal_top1_dice_count", 0.0) + 1.0
+                                                metric_totals["faf_affine_top1_dice_sum"] = metric_totals.get("faf_affine_top1_dice_sum", 0.0) + proposal_dices[top_idx]
+                                                metric_totals["faf_affine_top1_dice_count"] = metric_totals.get("faf_affine_top1_dice_count", 0.0) + 1.0
                                 for src, dst in (
-                                    ("effective_anchor_number", "faf_effective_anchor_number_sum"),
-                                    ("active_anchor_entropy", "faf_active_anchor_entropy_sum"),
-                                    ("top1_anchor_weight", "faf_top1_anchor_weight_sum"),
-                                    ("top3_anchor_weight_sum", "faf_top3_anchor_weight_sum"),
+                                    ("effective_slot_number", "faf_effective_slot_number_sum"),
+                                    ("slot_entropy", "faf_slot_entropy_sum"),
+                                    ("top1_slot_weight", "faf_top1_slot_weight_sum"),
+                                    ("top3_slot_weight_sum", "faf_top3_slot_weight_sum"),
                                     ("coverage_score", "faf_coverage_score_sum"),
                                     ("coverage_gap", "faf_coverage_gap_sum"),
-                                    ("anchor_function_diversity", "faf_anchor_function_diversity_sum"),
-                                    ("anchor_area_diversity", "faf_anchor_area_diversity_sum"),
-                                    ("anchor_area_separation", "faf_anchor_area_separation_sum"),
-                                    ("anchor_phase_purity_proxy", "faf_anchor_phase_purity_proxy_sum"),
-                                    ("anchor_pairwise_similarity", "faf_anchor_pairwise_similarity_sum"),
+                                    ("slot_area_diversity", "faf_slot_area_diversity_sum"),
                                     ("write_strength_mean", "faf_write_strength_mean_sum"),
                                     ("memory_update_norm", "faf_memory_update_norm_sum"),
                                     ("affine_delta_norm", "faf_affine_delta_norm_sum"),
-                                    ("affine_velocity_norm", "faf_affine_velocity_norm_sum"),
-                                    ("ode_velocity_norm", "faf_ode_velocity_norm_sum"),
-                                    ("dead_anchor_ratio", "faf_dead_anchor_ratio_sum"),
-                                    ("recycled_anchor_ratio", "faf_recycled_anchor_ratio_sum"),
-                                    ("trust_mean", "faf_trust_mean_sum"),
-                                    ("trust_easy_mean", "faf_trust_easy_mean_sum"),
-                                    ("trust_hard_mean", "faf_trust_hard_mean_sum"),
-                                    ("anchor_trust_ratio", "faf_anchor_trust_ratio_sum"),
+                                    ("affine_state_norm", "faf_affine_state_norm_sum"),
+                                    ("velocity_norm", "faf_velocity_norm_sum"),
+                                    ("confidence_mean", "faf_confidence_mean_sum"),
+                                    ("confidence_easy_mean", "faf_confidence_easy_mean_sum"),
+                                    ("confidence_hard_mean", "faf_confidence_hard_mean_sum"),
+                                    ("identity_slot_usage", "faf_identity_slot_usage_sum"),
                                     ("residual_l1", "faf_residual_l1_sum"),
                                     ("residual_l2", "faf_residual_l2_sum"),
                                     ("safety_residual_l1", "faf_safety_residual_l1_sum"),
@@ -2581,6 +2671,9 @@ class Trainer:
         }
         metrics["overall_dice"] = metrics["dice"]
         metrics["overall_hd95"] = metrics["hd95"]
+        protocol_name = self._eval_protocol_name()
+        if protocol_name:
+            metrics[f"dice/{protocol_name}"] = metrics["dice_frame_mean"]
         if reduced.get("base_only_dice_count", 0.0) > 0:
             metrics["anchor_ode/final_dice"] = metrics["dice_frame_mean"]
             metrics["anchor_ode/base_dice"] = metrics["base_only_dice_frame_mean"]
@@ -2693,33 +2786,29 @@ class Trainer:
             metrics.update(
                 {
                     "faf/base_dice": faf_mean("faf_base_dice_sum", "faf_base_dice_count"),
-                    "faf/anchor_only_dice": faf_mean("faf_anchor_dice_sum", "faf_anchor_dice_count"),
-                    "faf/proposal_top1_dice": faf_mean("faf_proposal_top1_dice_sum", "faf_proposal_top1_dice_count"),
-                    "faf/proposal_oracle_dice": faf_mean("faf_proposal_oracle_dice_sum", "faf_proposal_dice_count"),
-                    "faf/proposal_mean_dice": faf_mean("faf_proposal_mean_dice_sum", "faf_proposal_dice_count"),
+                    "faf/unext_anchor_dice": faf_mean("faf_unext_anchor_dice_sum", "faf_unext_anchor_dice_count"),
+                    "faf/affine_identity_dice": faf_mean("faf_affine_identity_dice_sum", "faf_affine_identity_dice_count"),
+                    "faf/affine_mixture_dice": faf_mean("faf_affine_mixture_dice_sum", "faf_affine_mixture_dice_count"),
+                    "faf/affine_top1_dice": faf_mean("faf_affine_top1_dice_sum", "faf_affine_top1_dice_count"),
+                    "faf/affine_oracle_dice": faf_mean("faf_affine_oracle_dice_sum", "faf_affine_dice_count"),
+                    "faf/affine_mean_dice": faf_mean("faf_affine_mean_dice_sum", "faf_affine_dice_count"),
                     "faf/final_dice": metrics["dice_frame_mean"],
-                    "faf/effective_anchor_number": faf_mean("faf_effective_anchor_number_sum"),
-                    "faf/active_anchor_entropy": faf_mean("faf_active_anchor_entropy_sum"),
-                    "faf/top1_anchor_weight": faf_mean("faf_top1_anchor_weight_sum"),
-                    "faf/top3_anchor_weight_sum": faf_mean("faf_top3_anchor_weight_sum"),
+                    "faf/effective_slot_number": faf_mean("faf_effective_slot_number_sum"),
+                    "faf/slot_entropy": faf_mean("faf_slot_entropy_sum"),
+                    "faf/top1_slot_weight": faf_mean("faf_top1_slot_weight_sum"),
+                    "faf/top3_slot_weight_sum": faf_mean("faf_top3_slot_weight_sum"),
                     "faf/coverage_score": faf_mean("faf_coverage_score_sum"),
                     "faf/coverage_gap": faf_mean("faf_coverage_gap_sum"),
-                    "faf/anchor_function_diversity": faf_mean("faf_anchor_function_diversity_sum"),
-                    "faf/anchor_area_diversity": faf_mean("faf_anchor_area_diversity_sum"),
-                    "faf/anchor_area_separation": faf_mean("faf_anchor_area_separation_sum"),
-                    "faf/anchor_phase_purity_proxy": faf_mean("faf_anchor_phase_purity_proxy_sum"),
-                    "faf/anchor_pairwise_similarity": faf_mean("faf_anchor_pairwise_similarity_sum"),
+                    "faf/slot_area_diversity": faf_mean("faf_slot_area_diversity_sum"),
                     "faf/write_strength_mean": faf_mean("faf_write_strength_mean_sum"),
                     "faf/memory_update_norm": faf_mean("faf_memory_update_norm_sum"),
                     "faf/affine_delta_norm": faf_mean("faf_affine_delta_norm_sum"),
-                    "faf/affine_velocity_norm": faf_mean("faf_affine_velocity_norm_sum"),
-                    "faf/ode_velocity_norm": faf_mean("faf_ode_velocity_norm_sum"),
-                    "faf/dead_anchor_ratio": faf_mean("faf_dead_anchor_ratio_sum"),
-                    "faf/recycled_anchor_ratio": faf_mean("faf_recycled_anchor_ratio_sum"),
-                    "faf/trust_mean": faf_mean("faf_trust_mean_sum"),
-                    "faf/trust_easy_mean": faf_mean("faf_trust_easy_mean_sum"),
-                    "faf/trust_hard_mean": faf_mean("faf_trust_hard_mean_sum"),
-                    "faf/anchor_trust_ratio": faf_mean("faf_anchor_trust_ratio_sum"),
+                    "faf/affine_state_norm": faf_mean("faf_affine_state_norm_sum"),
+                    "faf/velocity_norm": faf_mean("faf_velocity_norm_sum"),
+                    "faf/confidence_mean": faf_mean("faf_confidence_mean_sum"),
+                    "faf/confidence_easy_mean": faf_mean("faf_confidence_easy_mean_sum"),
+                    "faf/confidence_hard_mean": faf_mean("faf_confidence_hard_mean_sum"),
+                    "faf/identity_slot_usage": faf_mean("faf_identity_slot_usage_sum"),
                     "faf/residual_l1": faf_mean("faf_residual_l1_sum"),
                     "faf/residual_l2": faf_mean("faf_residual_l2_sum"),
                     "faf/safety_residual_l1": faf_mean("faf_safety_residual_l1_sum"),
@@ -2748,7 +2837,11 @@ class Trainer:
                 }
             )
             if reduced.get("faf_base_dice_count", 0.0) > 0:
-                metrics["faf/final_minus_base"] = metrics["dice_frame_mean"] - metrics["faf/base_dice"]
+                metrics["faf/final_minus_base_dice"] = metrics["dice_frame_mean"] - metrics["faf/base_dice"]
+                metrics["faf/final_gap_to_base"] = metrics["faf/final_minus_base_dice"]
+                metrics["faf/final_below_base_alert"] = 1.0 if metrics["faf/final_minus_base_dice"] < -0.02 else 0.0
+            if reduced.get("faf_affine_dice_count", 0.0) > 0 and reduced.get("faf_base_dice_count", 0.0) > 0:
+                metrics["faf/oracle_gap_to_base"] = metrics["faf/affine_oracle_dice"] - metrics["faf/base_dice"]
         for key in reduced:
             if key.startswith("thr_") and key.endswith("_dice_sum"):
                 prefix = key[: -len("_dice_sum")]
@@ -2762,6 +2855,11 @@ class Trainer:
 
         log_str = f"[{mode.capitalize()}] Iter={it} | " + " | ".join(log_items)
         self.log.info(log_str)
+        if metrics.get("faf/final_below_base_alert", 0.0) >= 1.0:
+            self.log.warning(
+                "FAF final_dice is below base_dice by more than 0.02; "
+                "inspect affine mixture safety before extending this run."
+            )
 
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:

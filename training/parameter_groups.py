@@ -41,7 +41,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 if print_log:
                     log.info(f'{name} counted as a UNeXt/base segmenter parameter.')
             elif method_group_name == "functional_anchor" and name.startswith(
-                ('residual_heads.', 'faf.residual_head.', 'faf.residual_refiner.', 'faf.trust_gate_net.')
+                ('residual_heads.', 'faf.residual_head.', 'faf.residual_refiner.', 'faf.trust_gate_net.', 'faf.fusion.')
             ):
                 residual_params.append(param)
                 if print_log:

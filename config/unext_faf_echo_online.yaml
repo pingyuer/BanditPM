@@ -23,6 +23,7 @@ main_training:
 
 model:
   unext_faf:
+    base_dim: 64
     trust_max: 0.8
     residual_scale:
       max: 0.15

@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 exp_id: "unext_faf_camus_ablate_anchor_primary_oracle_debug"
-ablation_type: "anchor_primary_oracle_debug"
+ablation_type: "affine_mixture_oracle_debug"
 
 model:
   unext_faf:
@@ -12,6 +12,7 @@ model:
       init: 0.10
       max: 0.25
       warmup_iters: 500
-    lambda_faf_anchor: 1.0
-    lambda_faf_base: 0.1
+    prediction_mode: "affine_mixture"
+    lambda_faf_mixture: 1.0
+    lambda_faf_base: 1.0
     lambda_faf_residual_smallness: 0.0

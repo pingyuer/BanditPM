@@ -175,12 +175,12 @@ class FunctionalAnchorMetricsTests(unittest.TestCase):
             logger = MLflowLogger({"required": True}, run_dir=tmp, enabled=True, main_process=True)
             logger.log_faf_diagnostics(
                 {
-                    "proposal_oracle_dice": 0.81,
-                    "effective_anchor_number": 2.4,
+                    "affine_oracle_dice": 0.81,
+                    "effective_slot_number": 2.4,
                     "coverage_score": 0.7,
                     "base_dice": 0.72,
                     "final_dice": 0.8,
-                    "trust_hard_mean": 0.3,
+                    "confidence_hard_mean": 0.3,
                     "feature_modulation_l1": 0.02,
                     "hard_frame_final_minus_base": 0.04,
                 },
@@ -191,12 +191,12 @@ class FunctionalAnchorMetricsTests(unittest.TestCase):
                 "metrics",
                 {
                     "faf/base_dice": 0.72,
-                    "faf/proposal_oracle_dice": 0.81,
+                    "faf/affine_oracle_dice": 0.81,
                     "faf/final_dice": 0.8,
-                    "faf/final_minus_base": 0.08000000000000007,
-                    "faf/effective_anchor_number": 2.4,
+                    "faf/final_minus_base_dice": 0.08000000000000007,
+                    "faf/effective_slot_number": 2.4,
                     "faf/coverage_score": 0.7,
-                    "faf/trust_hard_mean": 0.3,
+                    "faf/confidence_hard_mean": 0.3,
                     "faf/feature_modulation_l1": 0.02,
                     "faf/hard_frame_final_minus_base": 0.04,
                 },
@@ -216,8 +216,8 @@ class FunctionalAnchorMetricsTests(unittest.TestCase):
                 {
                     "dice_frame_mean": 0.8,
                     "faf/base_dice": 0.72,
-                    "faf/proposal_oracle_dice": 0.77,
-                    "faf/final_minus_base": 0.08,
+                    "faf/affine_oracle_dice": 0.77,
+                    "faf/final_minus_base_dice": 0.08,
                 },
                 mode="val",
                 step=4,
@@ -226,9 +226,9 @@ class FunctionalAnchorMetricsTests(unittest.TestCase):
         for _, metrics, _ in calls:
             merged.update(metrics)
         self.assertEqual(merged["val/faf/base_dice"], 0.72)
-        self.assertEqual(merged["val/faf/proposal_oracle_dice"], 0.77)
-        self.assertEqual(merged["val/faf/final_minus_base"], 0.08)
-        self.assertNotIn("faf/proposal_oracle_dice", merged)
+        self.assertEqual(merged["val/faf/affine_oracle_dice"], 0.77)
+        self.assertEqual(merged["val/faf/final_minus_base_dice"], 0.08)
+        self.assertNotIn("faf/affine_oracle_dice", merged)
 
     def test_plain_eval_summary_does_not_emit_method_diagnostics(self):
         calls = []

@@ -139,6 +139,7 @@ class UNeXtDynaKeySegmenter(nn.Module):
         self.num_classes = int(model_cfg.get("num_classes", 2))
         self.in_channels = int(model_cfg.get("in_channels", 1))
         base_dim = int(model_cfg.get("base_dim", 32))
+        self.base_dim = base_dim
         residual_init = float(model_cfg.get("temporal_residual_init_scale", model_cfg.get("refine_alpha_init", 0.1)))
         residual_init = min(max(residual_init, 1e-4), 1.0 - 1e-4)
         self.temporal_residual_scale_logit = nn.Parameter(torch.tensor(math.log(residual_init / (1.0 - residual_init))))

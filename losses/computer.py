@@ -110,10 +110,12 @@ class LossComputer(nn.Module):
         self.lambda_functional_anchor_ode_raw_delta = float(functional_cfg.get("lambda_ode_raw_delta", 0.0))
         faf_cfg = cfg.model.get("unext_faf", {})
         self.is_faf = str(cfg.model.get("name", "")).lower() in {"unext_faf", "unext-faf", "faf"}
-        self.lambda_faf_anchor = float(faf_cfg.get("lambda_faf_anchor", 0.15))
-        self.lambda_faf_oracle = float(faf_cfg.get("lambda_faf_oracle", 0.5))
-        self.lambda_faf_top1 = float(faf_cfg.get("lambda_faf_top1", 0.2))
-        self.lambda_faf_base = float(faf_cfg.get("lambda_faf_base", 0.5))
+        self.lambda_faf_mixture = float(faf_cfg.get("lambda_faf_mixture", 0.2))
+        self.lambda_faf_oracle = float(faf_cfg.get("lambda_faf_oracle", 0.2))
+        self.lambda_faf_top1 = float(faf_cfg.get("lambda_faf_top1", 0.0))
+        self.lambda_faf_selector = float(faf_cfg.get("lambda_faf_selector", 0.1))
+        self.lambda_faf_confidence = float(faf_cfg.get("lambda_faf_confidence", 0.05))
+        self.lambda_faf_base = float(faf_cfg.get("lambda_faf_base", 1.0))
         self.lambda_faf_coverage = float(faf_cfg.get("lambda_faf_coverage", 0.05))
         self.lambda_faf_sparse = float(faf_cfg.get("lambda_faf_sparse", 0.002))
         self.lambda_faf_diversity = float(faf_cfg.get("lambda_faf_diversity", 0.005))
@@ -123,6 +125,8 @@ class LossComputer(nn.Module):
         self.lambda_faf_affine = float(faf_cfg.get("lambda_faf_affine", 0.0))
         self.lambda_faf_velocity = float(faf_cfg.get("lambda_faf_velocity", 0.0))
         self.lambda_faf_feature_modulation = float(faf_cfg.get("lambda_faf_feature_modulation", 0.001))
+        selector_cfg = faf_cfg.get("selector", {})
+        self.faf_assignment_temperature = float(selector_cfg.get("assignment_temperature", 0.15)) if hasattr(selector_cfg, "get") else 0.15
         self.faf_residual_smallness_start_iter = int(faf_cfg.get("residual_smallness_start_iter", 0))
 
     def _default_supervision_mask(
@@ -315,9 +319,11 @@ class LossComputer(nn.Module):
         device = data["rgb"].device
         zero = torch.zeros((), device=device, dtype=torch.float32)
         out: Dict[str, torch.Tensor] = {}
-        anchor_oracle_terms = []
-        anchor_top1_terms = []
-        anchor_aggregated_terms = []
+        oracle_terms = []
+        top1_terms = []
+        mixture_terms = []
+        selector_terms = []
+        confidence_terms = []
         base_terms = []
         coverage_terms = []
         sparse_terms = []
@@ -347,33 +353,43 @@ class LossComputer(nn.Module):
                 soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
                 gt_mask = self._gt_object_masks(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
 
-                # --- Oracle proposal loss: min over anchors (strong signal) ---
-                anchor_proposals = aux.get("anchor_proposals")
-                if torch.is_tensor(anchor_proposals) and self.lambda_faf_oracle > 0:
-                    proposals = anchor_proposals[bi : bi + 1, :curr_num_obj]
+                warped = aux.get("warped_anchor_logits")
+                slot_weights = aux.get("slot_weights")
+                slot_logits = aux.get("slot_logits")
+                slot_confidence = aux.get("slot_confidence")
+                per_slot_dice = None
+                if torch.is_tensor(warped):
+                    proposals = warped[bi : bi + 1, :curr_num_obj]
                     gt = gt_mask[:, :curr_num_obj].to(device=proposals.device, dtype=proposals.dtype).unsqueeze(2)
                     bce = F.binary_cross_entropy_with_logits(proposals, gt.expand_as(proposals), reduction="none").mean(dim=(-2, -1))
-                    oracle = bce.min(dim=-1).values.mean()
-                    anchor_oracle_terms.append(oracle)
-
-                    # --- Top1 assignment loss: BCE of the highest-weight anchor ---
-                    active_weights = aux.get("active_weights")
-                    if torch.is_tensor(active_weights) and self.lambda_faf_top1 > 0:
-                        top1_idx = active_weights[bi, 0].argmax().item()
+                    pred = torch.sigmoid(proposals)
+                    inter = (pred * gt).sum(dim=(-2, -1))
+                    denom = pred.sum(dim=(-2, -1)) + gt.sum(dim=(-2, -1))
+                    per_slot_dice = ((2.0 * inter + 1.0) / (denom + 1.0)).detach()
+                    if self.lambda_faf_oracle > 0:
+                        oracle_terms.append(bce.min(dim=-1).values.mean())
+                    if torch.is_tensor(slot_weights) and self.lambda_faf_top1 > 0:
+                        top1_idx = slot_weights[bi, 0].argmax().item()
                         if top1_idx < proposals.shape[2]:
-                            top1_bce = bce[:, :, top1_idx].mean()
-                            anchor_top1_terms.append(top1_bce)
+                            top1_terms.append(bce[:, :, top1_idx].mean())
+                    if torch.is_tensor(slot_logits) and self.lambda_faf_selector > 0:
+                        logits = slot_logits[bi : bi + 1, :curr_num_obj]
+                        target = torch.softmax(per_slot_dice / max(self.faf_assignment_temperature, 1.0e-4), dim=-1)
+                        selector_terms.append(F.kl_div(F.log_softmax(logits, dim=-1), target, reduction="batchmean"))
+                    if torch.is_tensor(slot_confidence) and self.lambda_faf_confidence > 0:
+                        conf = slot_confidence[bi : bi + 1, :curr_num_obj]
+                        target = per_slot_dice.clamp(0.0, 1.0)
+                        confidence_terms.append(F.binary_cross_entropy(conf, target))
 
-                # --- Aggregated proposal loss (weak auxiliary, reduced weight) ---
-                proposal_obj = aux.get("proposal_logits", aux.get("anchor_logits"))
-                if torch.is_tensor(proposal_obj) and self.lambda_faf_anchor > 0:
-                    proposal_obj = proposal_obj[bi : bi + 1, :curr_num_obj]
-                    proposal_binary_logits = aggregate(torch.sigmoid(proposal_obj), dim=1)
-                    ce, dice = self.mask_loss(proposal_binary_logits, soft_gt)
-                    anchor_aggregated_terms.append(ce + dice)
+                mixture_obj = aux.get("mixture_logits", aux.get("proposal_logits"))
+                if torch.is_tensor(mixture_obj) and self.lambda_faf_mixture > 0:
+                    mixture_obj = mixture_obj[bi : bi + 1, :curr_num_obj]
+                    mixture_binary_logits = aggregate(torch.sigmoid(mixture_obj), dim=1)
+                    ce, dice = self.mask_loss(mixture_binary_logits, soft_gt)
+                    mixture_terms.append(ce + dice)
                     if prev_proposal is not None and self.lambda_faf_temporal > 0:
-                        temporal_terms.append((torch.sigmoid(proposal_obj) - prev_proposal).abs().mean())
-                    prev_proposal = torch.sigmoid(proposal_obj).detach()
+                        temporal_terms.append((torch.sigmoid(mixture_obj) - prev_proposal).abs().mean())
+                    prev_proposal = torch.sigmoid(mixture_obj).detach()
 
                 base_obj = aux.get("base_object_logits")
                 if torch.is_tensor(base_obj) and self.lambda_faf_base > 0:
@@ -384,12 +400,12 @@ class LossComputer(nn.Module):
 
                 for src, bucket, weight in (
                     ("coverage_gap", coverage_terms, self.lambda_faf_coverage),
-                    ("active_anchor_entropy", sparse_terms, self.lambda_faf_sparse),
-                    ("anchor_pairwise_similarity", diversity_terms, self.lambda_faf_diversity),
+                    ("slot_entropy", sparse_terms, self.lambda_faf_sparse),
+                    ("slot_area_diversity", diversity_terms, self.lambda_faf_diversity),
                     ("memory_update_norm", write_terms, self.lambda_faf_write),
                     ("residual_logits", residual_terms, residual_smallness_weight),
                     ("affine_delta_norm", affine_terms, self.lambda_faf_affine),
-                    ("affine_velocity_norm", velocity_terms, self.lambda_faf_velocity),
+                    ("velocity_norm", velocity_terms, self.lambda_faf_velocity),
                     ("feature_modulation_l1", modulation_terms, self.lambda_faf_feature_modulation),
                 ):
                     value = aux.get(src)
@@ -400,14 +416,12 @@ class LossComputer(nn.Module):
                             bucket.append(item.float().abs().mean())
                         else:
                             bucket.append(item.float().mean())
-                area_sep = aux.get("anchor_area_separation")
-                if torch.is_tensor(area_sep) and self.lambda_faf_diversity > 0:
-                    diversity_terms.append(torch.relu(0.10 - area_sep.float().mean()))
-
         for name, terms, weight in (
-            ("anchor_oracle", anchor_oracle_terms, self.lambda_faf_oracle),
-            ("anchor_top1", anchor_top1_terms, self.lambda_faf_top1),
-            ("anchor_aggregated", anchor_aggregated_terms, self.lambda_faf_anchor),
+            ("oracle", oracle_terms, self.lambda_faf_oracle),
+            ("top1", top1_terms, self.lambda_faf_top1),
+            ("mixture", mixture_terms, self.lambda_faf_mixture),
+            ("selector", selector_terms, self.lambda_faf_selector),
+            ("confidence", confidence_terms, self.lambda_faf_confidence),
             ("base", base_terms, self.lambda_faf_base),
             ("coverage", coverage_terms, self.lambda_faf_coverage),
             ("sparse", sparse_terms, self.lambda_faf_sparse),

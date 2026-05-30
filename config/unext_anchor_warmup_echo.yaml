@@ -1,0 +1,31 @@
+defaults:
+  - faf_echo
+  - _self_
+
+exp_id: "unext_anchor_warmup_echo"
+model_name: "UNeXtFAFBaseOnly"
+
+model:
+  unext_faf:
+    prediction_mode: "base_only"
+    require_pretrained_unext: false
+    pretrained_unext_path: null
+    confidence:
+      enabled: false
+    residual:
+      enabled: false
+    temporal_update:
+      enabled: false
+    lambda_faf_mixture: 0.0
+    lambda_faf_oracle: 0.0
+    lambda_faf_top1: 0.0
+    lambda_faf_selector: 0.0
+    lambda_faf_confidence: 0.0
+    lambda_faf_affine: 0.0
+    lambda_faf_velocity: 0.0
+    lambda_faf_diversity: 0.0
+    lambda_faf_residual_smallness: 0.0
+    lambda_faf_coverage: 0.0
+    lambda_faf_temporal: 0.0
+    lambda_faf_write: 0.0
+    lambda_faf_sparse: 0.0

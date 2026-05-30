@@ -312,10 +312,13 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
                 "dataset": "camus",
                 "mode": args.sampling_mode,
                 "protocol_name": protocol_name,
+                "sampling_mode": args.sampling_mode,
                 "num_frames": args.num_frames,
                 "label_indices": list(range(args.num_frames)),
                 "source_frames": indices,
+                "sampled_source_frames": indices,
                 "original_size": list(half_seq.shape[1:3]),
+                "target_size": [256, 256],
                 "resized_size": [256, 256],
                 "patient_id": patient_id,
             }

@@ -22,6 +22,8 @@ def _cfg():
                     "base_dim": 8,
                     "value_dim": 16,
                     "num_anchors": 4,
+                    "num_affine_slots": 4,
+                    "identity_slot_index": 0,
                     "query_dim": 16,
                     "code_dim": 16,
                     "hidden_dim": 24,
@@ -31,10 +33,20 @@ def _cfg():
                     "trust_max": 0.6,
                     "retrieval_temperature": 0.4,
                     "memory_ema": 0.9,
+                    "prediction_mode": "affine_mixture_safe",
+                    "require_pretrained_unext": False,
+                    "selector": {"temperature_init": 1.0, "temperature_final": 0.35, "assignment_temperature": 0.15},
+                    "confidence": {"enabled": True, "init": 0.10, "max": 0.35, "warmup_iters": 1500},
+                    "residual": {"enabled": True, "init_scale": 0.0, "max_scale": 0.05, "clip": 0.15},
+                    "temporal_update": {"enabled": True, "dt_init": 0.1, "dt_max": 0.6, "truncated_bptt_steps": 0},
                     "lambda_faf_affine": 0.001,
                     "lambda_faf_velocity": 0.001,
-                    "lambda_faf_anchor": 0.3,
-                    "lambda_faf_base": 0.2,
+                    "lambda_faf_mixture": 0.3,
+                    "lambda_faf_oracle": 0.2,
+                    "lambda_faf_top1": 0.1,
+                    "lambda_faf_selector": 0.1,
+                    "lambda_faf_confidence": 0.05,
+                    "lambda_faf_base": 1.0,
                     "lambda_faf_coverage": 0.05,
                     "lambda_faf_sparse": 0.002,
                     "lambda_faf_diversity": 0.001,
@@ -74,9 +86,11 @@ class FAFLossTests(unittest.TestCase):
         )
         losses = LossComputer(cfg, stage_cfg).compute(data, [1, 1])
         for key in (
-            "aux_faf_anchor_oracle",
-            "aux_faf_anchor_top1",
-            "aux_faf_anchor_aggregated",
+            "aux_faf_oracle",
+            "aux_faf_top1",
+            "aux_faf_mixture",
+            "aux_faf_selector",
+            "aux_faf_confidence",
             "aux_faf_base",
             "aux_faf_coverage",
             "aux_faf_sparse",
@@ -90,6 +104,32 @@ class FAFLossTests(unittest.TestCase):
             self.assertIn(key, losses)
             self.assertTrue(torch.isfinite(losses[key]))
         self.assertTrue(torch.isfinite(losses["total_loss"]))
+
+    def test_affine_regularizer_has_finite_grad_at_zero_init(self):
+        torch.manual_seed(402)
+        cfg = _cfg()
+        model = UNeXtFAF(cfg.model)
+        data = _batch(batch_size=1, frames=2)
+        data.update(model(data))
+        stage_cfg = OmegaConf.create(
+            {
+                "point_supervision": False,
+                "train_num_points": 64,
+                "oversample_ratio": 1.0,
+                "importance_sample_ratio": 0.5,
+            }
+        )
+        losses = LossComputer(cfg, stage_cfg).compute(data, [1])
+
+        self.assertIn("aux_faf_affine", losses)
+        self.assertTrue(torch.isfinite(losses["aux_faf_affine"]))
+        losses["aux_faf_affine"].backward()
+        bad_grads = [
+            name
+            for name, param in model.named_parameters()
+            if param.grad is not None and not torch.isfinite(param.grad).all()
+        ]
+        self.assertEqual(bad_grads, [])
 
     def test_proposal_oracle_dice_separates_assignment_from_coverage(self):
         gt = torch.zeros(1, 1, 8, 8)

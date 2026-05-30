@@ -1,6 +1,10 @@
 import os
 import math
 import logging
+import json
+import random
+from collections import Counter
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -39,6 +43,107 @@ from experiment.metadata import (
 def resolve_dataset_class(cfg: DictConfig):
     """Resolve the dataset class through the dataset registry."""
     return resolve_dataset_class_from_cfg(cfg)
+
+
+def _tensor_unique_preview(tensor: torch.Tensor, limit: int = 16) -> list:
+    values = torch.unique(tensor.detach().cpu())
+    preview = values[:limit].tolist()
+    return [int(v) if float(v).is_integer() else float(v) for v in preview]
+
+
+def _label_valid_hist(label_valid: torch.Tensor | None) -> dict[str, int]:
+    if label_valid is None:
+        return {}
+    counts = label_valid.detach().cpu().bool().sum(dim=1).tolist()
+    hist = Counter(int(v) for v in counts)
+    return {str(k): int(v) for k, v in sorted(hist.items())}
+
+
+def _probe_dataset_batch(loader, batch_size: int) -> dict:
+    dataset = getattr(loader, "dataset", None)
+    if dataset is None or len(dataset) == 0:
+        return {"sample_count": 0}
+    torch_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    python_state = random.getstate()
+    probe_batch_size = max(1, min(int(batch_size), len(dataset)))
+    try:
+        probe_loader = data.DataLoader(dataset, batch_size=probe_batch_size, shuffle=False, num_workers=0)
+        batch = next(iter(probe_loader))
+    finally:
+        torch.random.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+        random.setstate(python_state)
+    rgb = batch["rgb"]
+    cls_gt = batch["cls_gt"]
+    label_valid = batch.get("label_valid")
+    return {
+        "sample_count": len(dataset),
+        "rgb_shape": list(rgb.shape),
+        "cls_gt_shape": list(cls_gt.shape),
+        "rgb_min": float(rgb.min().item()),
+        "rgb_max": float(rgb.max().item()),
+        "cls_gt_unique": _tensor_unique_preview(cls_gt),
+        "label_valid_hist": _label_valid_hist(label_valid),
+    }
+
+
+def _log_data_flow_summary(
+    *,
+    cfg: DictConfig,
+    dataset_name: str,
+    stage_cfg: DictConfig,
+    train_loader,
+    val_loader,
+    test_loader,
+    run_dir: str,
+    mlflow_logger: MLflowLogger,
+    main_process: bool,
+) -> None:
+    if not main_process:
+        return
+    data_path = os.path.expanduser(str(cfg.data_path))
+    train_probe = _probe_dataset_batch(train_loader, int(stage_cfg.batch_size))
+    val_probe = {"sample_count": len(getattr(val_loader, "dataset", []))}
+    test_probe = {"sample_count": len(getattr(test_loader, "dataset", []))}
+    summary = {
+        "dataset": dataset_name,
+        "data_path": data_path,
+        "processed_root": str(cfg.get("processed_root", Path(data_path).parent)),
+        "seq_length": int(stage_cfg.seq_length),
+        "crop_size": list(stage_cfg.crop_size),
+        "splits": {
+            "train": train_probe.get("sample_count", 0),
+            "val": val_probe.get("sample_count", 0),
+            "test": test_probe.get("sample_count", 0),
+        },
+        "first_train_batch": train_probe,
+        "evaluation": {
+            "frame_scope": str(cfg.get("evaluation", {}).get("frame_scope", "supervised_only")),
+            "exclude_init_frame": bool(cfg.get("evaluation", {}).get("exclude_init_frame", False)),
+            "eval_protocol": str(cfg.get("evaluation", {}).get("eval_protocol", "")),
+        },
+    }
+    info_if_rank_zero("[DataFlow] " + json.dumps(summary, sort_keys=True, default=str))
+    params = {
+        "data/name": dataset_name,
+        "data/path": data_path,
+        "data/seq_length": summary["seq_length"],
+        "data/crop_size": summary["crop_size"],
+        "data/split_count/train": summary["splits"]["train"],
+        "data/split_count/val": summary["splits"]["val"],
+        "data/split_count/test": summary["splits"]["test"],
+        "data/mask_unique_sample": train_probe.get("cls_gt_unique", []),
+        "data/label_valid_hist_sample": train_probe.get("label_valid_hist", {}),
+        "eval/frame_scope": summary["evaluation"]["frame_scope"],
+        "eval/exclude_init_frame": summary["evaluation"]["exclude_init_frame"],
+        "eval/protocol": summary["evaluation"]["eval_protocol"],
+    }
+    mlflow_logger.log_params(params)
+    path = Path(run_dir) / "data_flow_summary.json"
+    path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    mlflow_logger.log_artifact(path, artifact_path="data")
 
 
 @hydra.main(version_base="1.3.2", config_path="config", config_name="config_banditpm_baseline.yaml")
@@ -153,6 +258,7 @@ def train(cfg: DictConfig):
                 )
 
         def build_loader(mode, *, shuffle, drop_last):
+            data_cfg = cfg.get("data", {})
             dataset = dataset_cls(
                 filepath=os.path.expanduser(str(cfg.data_path)),
                 mode=mode,
@@ -160,6 +266,7 @@ def train(cfg: DictConfig):
                 max_num_obj=stage_cfg.num_objects,
                 size=stage_cfg.crop_size[0],
                 augmentation=cfg.get("augmentation", {}) if mode == "train" else {},
+                lv_class_id=data_cfg.get("lv_class_id", None) if hasattr(data_cfg, "get") else None,
             )
             if world_size > 1 and dist.is_initialized():
                 sampler = DistributedSampler(
@@ -183,6 +290,18 @@ def train(cfg: DictConfig):
         train_loader, train_sampler = build_loader("train", shuffle=True, drop_last=True)
         val_loader, val_sampler = build_loader("val", shuffle=False, drop_last=False)
         test_loader, test_sampler = build_loader("test", shuffle=False, drop_last=False)
+
+        _log_data_flow_summary(
+            cfg=cfg,
+            dataset_name=dataset_name,
+            stage_cfg=stage_cfg,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            run_dir=run_dir,
+            mlflow_logger=mlflow_logger,
+            main_process=main_process,
+        )
 
         # -------- Trainer --------
         trainer = Trainer(

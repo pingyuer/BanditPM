@@ -21,6 +21,10 @@ main_training:
   use_ema: false
   ema_eval: false
 
+model:
+  unext_faf:
+    base_dim: 64
+
 evaluation:
   protocol_version: "v3_unext_faf"
   threshold_search_during_training: false

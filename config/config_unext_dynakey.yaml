@@ -51,7 +51,7 @@ model:
   unext_dynakey:
     in_channels: 1
     num_classes: 2
-    base_dim: 32
+    base_dim: 64
     value_dim: 128
     use_dynakey: true
     dynakey_memory_mode: "global"   # global | spatial

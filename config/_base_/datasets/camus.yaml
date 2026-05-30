@@ -5,7 +5,15 @@ data_path: "${processed_root}/camus_png256_10f"
 data:
   protocol_name: "camus_short_dense"
 
+main_training:
+  crop_size: [256, 256]
+
+eval_stage:
+  crop_size: [256, 256]
+
 evaluation:
   init_mode: "pred_or_zero"
   exclude_init_frame: true
+  frame_scope: "all_available"
+  eval_protocol: "camus_dense_noinit"
   protocol_version: "v3_canonical_no_leak"

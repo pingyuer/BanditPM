@@ -478,16 +478,32 @@ def preprocess_dataset(args: argparse.Namespace) -> Path:
             save_png(label_first, case_label_dir / f"{sample_plan.label_indices[0]:04d}.png")
             save_png(label_last, case_label_dir / f"{sample_plan.label_indices[-1]:04d}.png")
 
+            first_area = int((label_first > 0).sum())
+            last_area = int((label_last > 0).sum())
+            if first_area >= last_area:
+                ed_source_frame = annotated_frames[0]
+                es_source_frame = annotated_frames[1]
+            else:
+                ed_source_frame = annotated_frames[1]
+                es_source_frame = annotated_frames[0]
             sample_meta = {
                 "dataset": "echonet",
                 "mode": args.sampling_mode,
                 "protocol_name": resolve_protocol_name(args.sampling_mode),
+                "sampling_mode": args.sampling_mode,
                 "num_frames": args.num_frames,
                 "label_indices": sample_plan.label_indices,
+                "label_valid_local_indices": sample_plan.label_indices,
                 "source_frames": sampled_indices,
+                "sampled_source_frames": sampled_indices,
+                "annotated_source_frames": annotated_frames,
+                "ed_source_frame": ed_source_frame,
+                "es_source_frame": es_source_frame,
+                "ed_es_source": "mask_area",
                 "window_start": sample_plan.window_start,
                 "window_end": sample_plan.window_end,
                 "original_size": [frame_height, frame_width],
+                "target_size": [128, 128],
                 "resized_size": [128, 128],
                 "case_name": case_name,
                 "split": split,

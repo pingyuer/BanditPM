@@ -7,6 +7,7 @@ import cv2
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
+from dataset.mask_utils import binarize_lv_mask
 from dataset.utils import sort_by_number
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class TenCamusDataset(Dataset):
         size=256,
         merge_probability=0.0,
         augmentation=None,
+        lv_class_id=None,
     ):
         super().__init__()
         self.filepath = filepath
@@ -37,6 +39,7 @@ class TenCamusDataset(Dataset):
         self.size = size
         self.merge_probability = merge_probability
         self.augmentation = augmentation
+        self.lv_class_id = lv_class_id
 
         json_path = os.path.join(filepath, 'camus_public_datasplit_20250706.json')
         if not os.path.isfile(json_path):
@@ -112,7 +115,7 @@ class TenCamusDataset(Dataset):
                 if mask is not None:
                     if mask.shape != (self.size, self.size):
                         mask = cv2.resize(mask, (self.size, self.size), interpolation=cv2.INTER_NEAREST)
-                    masks_np[i] = (mask == 1).astype(np.uint8)
+                    masks_np[i] = binarize_lv_mask(mask, self.lv_class_id)
 
         frames_t = torch.from_numpy(imgs_np).float().unsqueeze(1) / 255.0
         masks_t = torch.from_numpy(masks_np).long().unsqueeze(1)
@@ -141,6 +144,7 @@ class TenCamusDataset(Dataset):
 
         info = {
             'name': sample['patient_id'],
+            'case_id': sample['patient_id'],
             'frames': sampled_names,
             'num_objects': 0
         }
@@ -151,13 +155,21 @@ class TenCamusDataset(Dataset):
         label_valid = torch.ones(self.seq_length, dtype=torch.bool)
         eval_valid = torch.ones(self.seq_length, dtype=torch.bool)
 
-        frame_indices = sample_meta.get('source_frames')
-        if not frame_indices:
+        frame_indices_all = sample_meta.get('sampled_source_frames', sample_meta.get('source_frames'))
+        source_frames_available = bool(frame_indices_all)
+        if frame_indices_all and len(frame_indices_all) >= total_frames:
+            frame_indices = frame_indices_all[start_frame_idx : start_frame_idx + self.seq_length]
+        else:
             frame_indices = list(range(start_frame_idx, start_frame_idx + self.seq_length))
+        if len(frame_indices) != self.seq_length:
+            frame_indices = list(range(start_frame_idx, start_frame_idx + self.seq_length))
+            source_frames_available = False
         original_size = sample_meta.get('original_size', [self.size, self.size])
         protocol_name = sample_meta.get('protocol_name', _infer_camus_protocol(self.filepath))
         original_sizes = torch.tensor([original_size] * self.seq_length, dtype=torch.long)
         resized_sizes = torch.tensor([[self.size, self.size]] * self.seq_length, dtype=torch.long)
+        info['frame_indices'] = frame_indices
+        info['source_frames_available'] = source_frames_available
 
         if masks_t[0].max() > 0:
             selector[0] = 1.0
@@ -179,6 +191,8 @@ class TenCamusDataset(Dataset):
             'resized_size': resized_sizes,
             'frame_indices': torch.tensor(frame_indices, dtype=torch.long),
             'protocol_name': protocol_name,
+            'case_id': sample['patient_id'],
+            'source_frames_available': torch.tensor(source_frames_available, dtype=torch.bool),
         }
 
         return data

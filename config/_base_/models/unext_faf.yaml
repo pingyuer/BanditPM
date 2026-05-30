@@ -23,9 +23,11 @@ model:
   unext_faf:
     in_channels: 1
     num_classes: 2
-    base_dim: 32
+    base_dim: 64
     value_dim: 128
     num_anchors: 8
+    num_affine_slots: 8
+    identity_slot_index: 0
     query_dim: 32
     code_dim: 32
     hidden_dim: 64
@@ -33,19 +35,65 @@ model:
     anchor_size: 32
 
     residual_clip: 0.25
-    trust_max: 0.8
-    retrieval_temperature: 0.25
+    trust_max: 0.35
+    retrieval_temperature: 0.35
     temperature_init: 0.7
     temperature_warmup_iters: 500
     memory_ema: 0.9
     enable_memory_update: true
     disable_trust_gate: false
     disable_proposal_in_residual: false
-    prediction_mode: "proposal_primary"
+    anchor_source: "unext_logits"
+    prediction_mode: "affine_mixture_safe"
+    require_pretrained_unext: false
+    pretrained_unext_path: null
+    pretrained_unext_strict_backbone: false
+    freeze_unext_stage_iters: 0
+    unext_lr_ratio_after_warmup: 0.25
+
+    affine:
+      limits:
+        translate: 0.15
+        scale_log: 0.12
+        rotation_deg: 10.0
+        shear: 0.08
+      init_identity_bias: 2.0
+      delta_activation: "tanh"
+
+    selector:
+      activation: "softmax"
+      temperature_init: 1.0
+      temperature_final: 0.35
+      warmup_iters: 1500
+      use_soft_oracle_assignment: true
+      assignment_temperature: 0.15
+
+    confidence:
+      enabled: true
+      init: 0.10
+      max: 0.35
+      warmup_iters: 1500
+      focal_gamma: 2.0
+
+    residual:
+      enabled: true
+      init_scale: 0.0
+      max_scale: 0.05
+      warmup_iters: 1500
+      clip: 0.15
+      boundary_only: true
+
+    temporal_update:
+      enabled: true
+      dt_init: 0.1
+      dt_max: 0.6
+      velocity_momentum: 0.8
+      decay_min: 0.85
+      truncated_bptt_steps: 0
 
     residual_scale:
-      init: 0.03
-      max: 0.15
+      init: 0.0
+      max: 0.05
       warmup_iters: 1500
 
     trust_warmup_iters: 500
@@ -62,17 +110,19 @@ model:
       velocity_momentum: 0.8
       truncated_bptt_steps: 0
 
-    # Loss weights — FAF-main design
-    lambda_faf_base: 0.1
-    lambda_faf_oracle: 0.5
-    lambda_faf_top1: 0.2
-    lambda_faf_anchor: 0.3
+    # Loss weights — UNeXt-anchor affine mixture design
+    lambda_faf_base: 1.0
+    lambda_faf_mixture: 0.2
+    lambda_faf_oracle: 0.2
+    lambda_faf_top1: 0.0
+    lambda_faf_selector: 0.1
+    lambda_faf_confidence: 0.05
     lambda_faf_coverage: 0.02
     lambda_faf_sparse: 0.0         # off, just record
     lambda_faf_diversity: 0.001
     lambda_faf_temporal: 0.01
     lambda_faf_write: 0.0005
-    lambda_faf_residual_smallness: 0.02
+    lambda_faf_residual_smallness: 0.01
     residual_smallness_start_iter: 1500
     lambda_faf_affine: 0.0005
     lambda_faf_velocity: 0.0005

@@ -339,39 +339,38 @@ class MLflowLogger:
     def _faf_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:
         aliases = {
             "base_dice": ("base_dice", "faf/base_dice"),
-            "anchor_only_dice": ("anchor_only_dice", "faf/anchor_only_dice"),
-            "proposal_top1_dice": ("proposal_top1_dice", "faf/proposal_top1_dice"),
-            "proposal_oracle_dice": ("proposal_oracle_dice", "faf/proposal_oracle_dice"),
-            "proposal_mean_dice": ("proposal_mean_dice", "faf/proposal_mean_dice"),
+            "unext_anchor_dice": ("unext_anchor_dice", "faf/unext_anchor_dice"),
+            "affine_identity_dice": ("affine_identity_dice", "faf/affine_identity_dice"),
+            "affine_mixture_dice": ("affine_mixture_dice", "faf/affine_mixture_dice"),
+            "affine_top1_dice": ("affine_top1_dice", "faf/affine_top1_dice"),
+            "affine_oracle_dice": ("affine_oracle_dice", "faf/affine_oracle_dice"),
+            "affine_mean_dice": ("affine_mean_dice", "faf/affine_mean_dice"),
             "final_dice": ("final_dice", "dice_frame_mean", "dice", "faf/final_dice"),
-            "final_minus_base": ("final_minus_base", "faf/final_minus_base"),
+            "final_minus_base_dice": ("final_minus_base_dice", "final_minus_base", "faf/final_minus_base_dice"),
+            "oracle_gap_to_base": ("oracle_gap_to_base", "faf/oracle_gap_to_base"),
+            "final_gap_to_base": ("final_gap_to_base", "faf/final_gap_to_base"),
+            "final_below_base_alert": ("final_below_base_alert", "faf/final_below_base_alert"),
             "final_minus_base_by_ED": ("final_minus_base_by_ED", "faf/final_minus_base_by_ED"),
             "final_minus_base_by_ES": ("final_minus_base_by_ES", "faf/final_minus_base_by_ES"),
             "hard_frame_final_minus_base": ("hard_frame_final_minus_base", "faf/hard_frame_final_minus_base"),
             "area_curve_corr": ("area_curve_corr", "faf/area_curve_corr"),
             "temporal_jitter_delta": ("temporal_jitter_delta", "faf/temporal_jitter_delta"),
-            "effective_anchor_number": ("effective_anchor_number", "faf/effective_anchor_number"),
-            "active_anchor_entropy": ("active_anchor_entropy", "faf/active_anchor_entropy"),
-            "top1_anchor_weight": ("top1_anchor_weight", "faf/top1_anchor_weight"),
-            "top3_anchor_weight_sum": ("top3_anchor_weight_sum", "faf/top3_anchor_weight_sum"),
+            "effective_slot_number": ("effective_slot_number", "faf/effective_slot_number"),
+            "slot_entropy": ("slot_entropy", "faf/slot_entropy"),
+            "top1_slot_weight": ("top1_slot_weight", "faf/top1_slot_weight"),
+            "top3_slot_weight_sum": ("top3_slot_weight_sum", "faf/top3_slot_weight_sum"),
             "coverage_score": ("coverage_score", "faf/coverage_score"),
             "coverage_gap": ("coverage_gap", "faf/coverage_gap"),
-            "anchor_function_diversity": ("anchor_function_diversity", "faf/anchor_function_diversity"),
-            "anchor_area_diversity": ("anchor_area_diversity", "faf/anchor_area_diversity"),
-            "anchor_area_separation": ("anchor_area_separation", "faf/anchor_area_separation"),
-            "anchor_phase_purity_proxy": ("anchor_phase_purity_proxy", "faf/anchor_phase_purity_proxy"),
-            "anchor_pairwise_similarity": ("anchor_pairwise_similarity", "faf/anchor_pairwise_similarity"),
+            "slot_area_diversity": ("slot_area_diversity", "faf/slot_area_diversity"),
             "write_strength_mean": ("write_strength_mean", "faf/write_strength_mean"),
             "memory_update_norm": ("memory_update_norm", "faf/memory_update_norm"),
             "affine_delta_norm": ("affine_delta_norm", "faf/affine_delta_norm"),
-            "affine_velocity_norm": ("affine_velocity_norm", "ode_velocity_norm", "faf/affine_velocity_norm"),
-            "ode_velocity_norm": ("ode_velocity_norm", "faf/ode_velocity_norm"),
-            "dead_anchor_ratio": ("dead_anchor_ratio", "faf/dead_anchor_ratio"),
-            "recycled_anchor_ratio": ("recycled_anchor_ratio", "faf/recycled_anchor_ratio"),
-            "trust_mean": ("trust_mean", "faf/trust_mean"),
-            "trust_easy_mean": ("trust_easy_mean", "faf/trust_easy_mean"),
-            "trust_hard_mean": ("trust_hard_mean", "faf/trust_hard_mean"),
-            "anchor_trust_ratio": ("anchor_trust_ratio", "faf/anchor_trust_ratio"),
+            "affine_state_norm": ("affine_state_norm", "faf/affine_state_norm"),
+            "velocity_norm": ("velocity_norm", "faf/velocity_norm"),
+            "confidence_mean": ("confidence_mean", "faf/confidence_mean"),
+            "confidence_easy_mean": ("confidence_easy_mean", "faf/confidence_easy_mean"),
+            "confidence_hard_mean": ("confidence_hard_mean", "faf/confidence_hard_mean"),
+            "identity_slot_usage": ("identity_slot_usage", "faf/identity_slot_usage"),
             "residual_l1": ("residual_l1", "faf/residual_l1"),
             "residual_l2": ("residual_l2", "faf/residual_l2"),
             "safety_residual_l1": ("safety_residual_l1", "faf/safety_residual_l1"),
@@ -391,13 +390,13 @@ class MLflowLogger:
                 if key in metrics:
                     out[dst] = metrics[key]
                     break
-        if "final_minus_base" not in out and "final_dice" in out and "base_dice" in out:
+        if "final_minus_base_dice" not in out and "final_dice" in out and "base_dice" in out:
             final = cls._to_float(out["final_dice"])
             base = cls._to_float(out["base_dice"])
             if final is not None and base is not None:
-                out["final_minus_base"] = final - base
+                out["final_minus_base_dice"] = final - base
         if not any(str(key).startswith("faf/") for key in metrics) and not any(
-            key in metrics for key in ("proposal_oracle_dice", "effective_anchor_number", "coverage_score")
+            key in metrics for key in ("affine_oracle_dice", "effective_slot_number", "coverage_score")
         ):
             return {}
         return out

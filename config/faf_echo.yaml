@@ -23,9 +23,15 @@ main_training:
 
 model:
   unext_faf:
-    trust_max: 0.8
+    base_dim: 64
+    prediction_mode: "affine_mixture_safe"
+    anchor_source: "unext_logits"
+    num_affine_slots: 8
+    identity_slot_index: 0
+    require_pretrained_unext: true
+    pretrained_unext_path: null
     residual_scale:
-      max: 0.15
+      max: 0.05
 
 evaluation:
   protocol_version: "v3_unext_faf"

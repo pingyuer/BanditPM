@@ -2,7 +2,7 @@ defaults:
   - config_unext_dynakey
   - _self_
 
-exp_id: "unext_only_v2_no_leak"
+exp_id: "unext_only_base64_v2_no_leak"
 model_name: "UNeXtOnly"
 
 
@@ -12,7 +12,7 @@ model:
   temporal_memory:
     type: "none"
   unext_dynakey:
-    base_dim: 32
+    base_dim: 64
     use_dynakey: false
     use_temporal_refine: false
     use_mask_memory: false
