@@ -130,6 +130,7 @@ class UNeXtFAF(nn.Module):
             confidence_cfg=_cfg_get(method_cfg, "confidence", {}),
             residual_cfg=_cfg_get(method_cfg, "residual", {}),
             temporal_update_cfg=_cfg_get(method_cfg, "temporal_update", _cfg_get(method_cfg, "ode_update", {})),
+            dense_momentum_cfg=_cfg_get(method_cfg, "dense_momentum", {}),
         )
 
     def _load_pretrained_unext_if_requested(self) -> None:

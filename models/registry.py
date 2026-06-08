@@ -87,6 +87,9 @@ def build_functional_anchor(cfg, *, device: torch.device | str):
 @MODEL_REGISTRY.register("unext_faf")
 @MODEL_REGISTRY.register("unext-faf")
 @MODEL_REGISTRY.register("faf")
+@MODEL_REGISTRY.register("unext_ode_affine")
+@MODEL_REGISTRY.register("unext-ode-affine")
+@MODEL_REGISTRY.register("ode_affine")
 def build_unext_faf(cfg, *, device: torch.device | str):
     return UNeXtFAF(_model_cfg(cfg)).to(device)
 

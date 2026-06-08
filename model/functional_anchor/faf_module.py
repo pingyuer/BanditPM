@@ -7,6 +7,7 @@ from model.functional_anchor.anchor_provider import AnchorProvider
 from model.functional_anchor.affine_selector import AffineSelector
 from model.functional_anchor.affine_mixture import AffineMixtureGenerator
 from model.functional_anchor.confidence_fusion import ConfidenceFusion
+from model.functional_anchor.dense_momentum import DenseMomentumWarp
 from model.functional_anchor.temporal_affine_update import TemporalAffineUpdater
 
 
@@ -51,6 +52,7 @@ class FAFModule(nn.Module):
         confidence_cfg: dict | None = None,
         residual_cfg: dict | None = None,
         temporal_update_cfg: dict | None = None,
+        dense_momentum_cfg: dict | None = None,
     ) -> None:
         super().__init__()
         del code_dim, basis_dim, anchor_size, memory_ema, feature_modulation, disable_proposal_in_residual, disable_feature_modulation
@@ -65,6 +67,7 @@ class FAFModule(nn.Module):
         confidence_cfg = confidence_cfg or {}
         residual_cfg = residual_cfg or {}
         temporal_update_cfg = temporal_update_cfg or {}
+        dense_momentum_cfg = dense_momentum_cfg or {}
 
         self.temperature_init = float(selector_cfg.get("temperature_init", temperature_init))
         self.temperature_final = float(selector_cfg.get("temperature_final", retrieval_temperature))
@@ -81,6 +84,7 @@ class FAFModule(nn.Module):
         self.disable_confidence = bool(disable_trust_gate) or not bool(confidence_cfg.get("enabled", True))
         self.disable_residual = not bool(residual_cfg.get("enabled", True))
         self.enable_memory_update = bool(enable_memory_update) and bool(temporal_update_cfg.get("enabled", True))
+        self.use_dense_momentum = bool(dense_momentum_cfg.get("enabled", False))
 
         self.anchor_provider = AnchorProvider()
         self.selector = AffineSelector(
@@ -108,6 +112,13 @@ class FAFModule(nn.Module):
             decay_min=float(temporal_update_cfg.get("decay_min", 0.85)),
             truncated_bptt_steps=int(temporal_update_cfg.get("truncated_bptt_steps", 0)),
         )
+        self.dense_momentum = DenseMomentumWarp(
+            decoder_dim=dec_dim,
+            hidden_dim=int(dense_momentum_cfg.get("hidden_dim", hidden_dim)),
+            flow_size=int(dense_momentum_cfg.get("flow_size", 16)),
+            max_displacement=float(dense_momentum_cfg.get("max_displacement", 0.08)),
+            integration_steps=int(dense_momentum_cfg.get("integration_steps", 4)),
+        ) if self.use_dense_momentum else None
         self.fusion = ConfidenceFusion(
             dec_dim=dec_dim,
             hidden_dim=hidden_dim,
@@ -160,6 +171,16 @@ class FAFModule(nn.Module):
             mixture_logits = (hard.unsqueeze(-1).unsqueeze(-1) * warped).sum(dim=2)
         elif mode == "base_only":
             mixture_logits = base_logits
+        dense_aux: dict[str, torch.Tensor] = {}
+        dense_prewarp_logits = mixture_logits
+        if self.dense_momentum is not None and mode not in {"base_only", "affine_identity_only"}:
+            mixture_logits, dense_aux = self.dense_momentum(
+                feats["dec"],
+                base_logits,
+                mixture_logits,
+                anchor["base_uncertainty_map"],
+                anchor["base_boundary_map"],
+            )
         if mode == "affine_no_temporal":
             update_delta = torch.zeros_like(mixture_aux["affine_delta"])
         else:
@@ -206,6 +227,7 @@ class FAFModule(nn.Module):
             "warped_anchor_logits": warped,
             "mixture_logits": mixture_logits,
             "proposal_logits": mixture_logits,
+            "affine_mixture_logits": dense_prewarp_logits,
             "final_logits": final_logits,
             "final_object_logits": final_logits,
             "slot_weights": slot_weights,
@@ -231,11 +253,13 @@ class FAFModule(nn.Module):
             "confidence_max": confidence_max.detach(),
             "residual_scale": residual_scale.detach(),
             "ode_dt": ode_dt.detach(),
+            "dense_momentum_enabled": torch.tensor(float(self.use_dense_momentum), device=device, dtype=dtype),
             "mode": "online",
         }
         aux.update(anchor)
         aux.update(selector_aux)
         aux.update(mixture_aux)
+        aux.update(dense_aux)
         aux.update(update_aux)
         aux.update(fusion_aux)
         return final_logits, aux, next_state

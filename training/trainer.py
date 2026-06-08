@@ -2134,6 +2134,10 @@ class Trainer:
                                     ("feature_modulation_l1_mid", "faf_feature_modulation_l1_mid_sum"),
                                     ("feature_modulation_l1_high", "faf_feature_modulation_l1_high_sum"),
                                     ("feature_modulation_l1_dec", "faf_feature_modulation_l1_dec_sum"),
+                                    ("dense_flow_abs_mean", "faf_dense_flow_abs_mean_sum"),
+                                    ("dense_flow_abs_max", "faf_dense_flow_abs_max_sum"),
+                                    ("dense_flow_smoothness", "faf_dense_flow_smoothness_sum"),
+                                    ("dense_warp_delta_abs_mean", "faf_dense_warp_delta_abs_mean_sum"),
                                 ):
                                     value = faf_aux.get(src)
                                     if torch.is_tensor(value):
@@ -2821,6 +2825,10 @@ class Trainer:
                     "faf/feature_modulation_l1_mid": faf_mean("faf_feature_modulation_l1_mid_sum"),
                     "faf/feature_modulation_l1_high": faf_mean("faf_feature_modulation_l1_high_sum"),
                     "faf/feature_modulation_l1_dec": faf_mean("faf_feature_modulation_l1_dec_sum"),
+                    "faf/dense_flow_abs_mean": faf_mean("faf_dense_flow_abs_mean_sum"),
+                    "faf/dense_flow_abs_max": faf_mean("faf_dense_flow_abs_max_sum"),
+                    "faf/dense_flow_smoothness": faf_mean("faf_dense_flow_smoothness_sum"),
+                    "faf/dense_warp_delta_abs_mean": faf_mean("faf_dense_warp_delta_abs_mean_sum"),
                     "faf/final_minus_base_by_ED": faf_mean(
                         "faf_final_minus_base_by_ED_sum", "faf_final_minus_base_by_ED_count"
                     ),

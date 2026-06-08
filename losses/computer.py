@@ -109,7 +109,14 @@ class LossComputer(nn.Module):
         self.lambda_functional_anchor_trust_entropy = float(functional_cfg.get("trust_entropy_weight", 0.0))
         self.lambda_functional_anchor_ode_raw_delta = float(functional_cfg.get("lambda_ode_raw_delta", 0.0))
         faf_cfg = cfg.model.get("unext_faf", {})
-        self.is_faf = str(cfg.model.get("name", "")).lower() in {"unext_faf", "unext-faf", "faf"}
+        self.is_faf = str(cfg.model.get("name", "")).lower() in {
+            "unext_faf",
+            "unext-faf",
+            "faf",
+            "unext_ode_affine",
+            "unext-ode-affine",
+            "ode_affine",
+        }
         self.lambda_faf_mixture = float(faf_cfg.get("lambda_faf_mixture", 0.2))
         self.lambda_faf_oracle = float(faf_cfg.get("lambda_faf_oracle", 0.2))
         self.lambda_faf_top1 = float(faf_cfg.get("lambda_faf_top1", 0.0))
@@ -125,6 +132,8 @@ class LossComputer(nn.Module):
         self.lambda_faf_affine = float(faf_cfg.get("lambda_faf_affine", 0.0))
         self.lambda_faf_velocity = float(faf_cfg.get("lambda_faf_velocity", 0.0))
         self.lambda_faf_feature_modulation = float(faf_cfg.get("lambda_faf_feature_modulation", 0.001))
+        self.lambda_faf_dense_flow = float(faf_cfg.get("lambda_faf_dense_flow", 0.0))
+        self.lambda_faf_dense_smooth = float(faf_cfg.get("lambda_faf_dense_smooth", 0.0))
         selector_cfg = faf_cfg.get("selector", {})
         self.faf_assignment_temperature = float(selector_cfg.get("assignment_temperature", 0.15)) if hasattr(selector_cfg, "get") else 0.15
         self.faf_residual_smallness_start_iter = int(faf_cfg.get("residual_smallness_start_iter", 0))
@@ -334,6 +343,8 @@ class LossComputer(nn.Module):
         affine_terms = []
         velocity_terms = []
         modulation_terms = []
+        dense_flow_terms = []
+        dense_smooth_terms = []
         current_iter = int(data.get("global_step", data.get("current_iter", 0)) or 0)
         residual_smallness_weight = (
             self.lambda_faf_residual_smallness
@@ -379,7 +390,9 @@ class LossComputer(nn.Module):
                     if torch.is_tensor(slot_confidence) and self.lambda_faf_confidence > 0:
                         conf = slot_confidence[bi : bi + 1, :curr_num_obj]
                         target = per_slot_dice.clamp(0.0, 1.0)
-                        confidence_terms.append(F.binary_cross_entropy(conf, target))
+                        with torch.amp.autocast(device_type=conf.device.type, enabled=False):
+                            confidence_loss = F.binary_cross_entropy(conf.float(), target.float())
+                        confidence_terms.append(confidence_loss.to(dtype=conf.dtype))
 
                 mixture_obj = aux.get("mixture_logits", aux.get("proposal_logits"))
                 if torch.is_tensor(mixture_obj) and self.lambda_faf_mixture > 0:
@@ -407,6 +420,8 @@ class LossComputer(nn.Module):
                     ("affine_delta_norm", affine_terms, self.lambda_faf_affine),
                     ("velocity_norm", velocity_terms, self.lambda_faf_velocity),
                     ("feature_modulation_l1", modulation_terms, self.lambda_faf_feature_modulation),
+                    ("dense_flow_abs_mean", dense_flow_terms, self.lambda_faf_dense_flow),
+                    ("dense_flow_smoothness", dense_smooth_terms, self.lambda_faf_dense_smooth),
                 ):
                     value = aux.get(src)
                     if torch.is_tensor(value) and weight > 0:
@@ -432,6 +447,8 @@ class LossComputer(nn.Module):
             ("affine", affine_terms, self.lambda_faf_affine),
             ("velocity", velocity_terms, self.lambda_faf_velocity),
             ("feature_modulation", modulation_terms, self.lambda_faf_feature_modulation),
+            ("dense_flow", dense_flow_terms, self.lambda_faf_dense_flow),
+            ("dense_smooth", dense_smooth_terms, self.lambda_faf_dense_smooth),
         ):
             if terms:
                 raw = torch.stack(terms).mean()

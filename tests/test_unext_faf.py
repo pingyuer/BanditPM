@@ -59,6 +59,21 @@ def _cfg():
     )
 
 
+def _ode_affine_cfg():
+    cfg = _cfg()
+    cfg.model.name = "unext_ode_affine"
+    cfg.model.unext_faf.dense_momentum = {
+        "enabled": True,
+        "flow_size": 8,
+        "hidden_dim": 16,
+        "max_displacement": 0.08,
+        "integration_steps": 2,
+    }
+    cfg.model.unext_faf.lambda_faf_dense_flow = 0.001
+    cfg.model.unext_faf.lambda_faf_dense_smooth = 0.01
+    return cfg
+
+
 def _batch(batch_size=2, frames=3, height=32, width=32):
     return {
         "rgb": torch.rand(batch_size, frames, 1, height, width),
@@ -184,6 +199,24 @@ class UNeXtFAFTests(unittest.TestCase):
             self.assertIn(id(param), method_ids)
         for param in model.faf.selector.parameters():
             self.assertIn(id(param), method_ids)
+
+    def test_unext_ode_affine_dense_momentum_contract(self):
+        torch.manual_seed(307)
+        model = build_model(_ode_affine_cfg(), device="cpu")
+        self.assertIsInstance(model, UNeXtFAF)
+        data = _batch(batch_size=1, frames=2)
+        data["current_iter"] = 0
+        out = model(data)
+        aux = out["memory_aux_1"]["faf_aux"]
+        self.assertEqual(aux["prediction_mode"], "affine_mixture_safe")
+        self.assertEqual(float(aux["dense_momentum_enabled"]), 1.0)
+        self.assertIn("affine_mixture_logits", aux)
+        self.assertIn("dense_displacement", aux)
+        self.assertIn("dense_flow_smoothness", aux)
+        self.assertEqual(aux["dense_displacement"].shape, (1, 1, 2, 8, 8))
+        self.assertTrue(torch.isfinite(aux["dense_displacement"]).all())
+        self.assertLess(float(aux["dense_flow_abs_mean"]), 1.0e-6)
+        self.assertTrue(torch.allclose(aux["mixture_logits"], aux["affine_mixture_logits"], atol=1.0e-6))
 
 
 if __name__ == "__main__":

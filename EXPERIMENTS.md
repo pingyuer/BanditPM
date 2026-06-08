@@ -58,3 +58,23 @@ python scripts/summarize_and_clean_outputs.py --clean
 ```
 
 Legacy scripts and configs are intentionally kept for old ablations, but new experiments should use the canonical configs above.
+
+## Experimental Methods
+
+`unext_ode_affine` is an experimental UNeXt-anchor method:
+
+- UNeXt predicts the per-frame anchor logits.
+- An online affine ODE slot bank keeps interpretable geometric state
+  `[tx, ty, log_sx, log_sy, rot, shear]`.
+- A low-resolution stationary velocity field optionally performs
+  VoxelMorph-style proposal resampling with `grid_sample`.
+- The final prediction keeps the FAF safety pattern: anchor/proposal trust
+  fusion plus a small residual branch.
+
+Entry configs:
+
+```text
+unext_ode_affine_echo
+unext_ode_affine_camus
+unext_ode_affine_domain
+```

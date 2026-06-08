@@ -60,6 +60,21 @@ def _cfg():
     )
 
 
+def _ode_affine_cfg():
+    cfg = _cfg()
+    cfg.model.name = "unext_ode_affine"
+    cfg.model.unext_faf.dense_momentum = {
+        "enabled": True,
+        "flow_size": 8,
+        "hidden_dim": 16,
+        "max_displacement": 0.08,
+        "integration_steps": 2,
+    }
+    cfg.model.unext_faf.lambda_faf_dense_flow = 0.001
+    cfg.model.unext_faf.lambda_faf_dense_smooth = 0.01
+    return cfg
+
+
 def _batch(batch_size=2, frames=3, height=32, width=32):
     return {
         "rgb": torch.rand(batch_size, frames, 1, height, width),
@@ -143,6 +158,26 @@ class FAFLossTests(unittest.TestCase):
         oracle_dice = dice.max(dim=-1).values
         self.assertLess(float(top1_dice.mean()), 0.5)
         self.assertGreater(float(oracle_dice.mean()), 0.9)
+
+    def test_unext_ode_affine_dense_regularizers_are_wired(self):
+        torch.manual_seed(403)
+        cfg = _ode_affine_cfg()
+        model = UNeXtFAF(cfg.model)
+        data = _batch(batch_size=1, frames=2)
+        data.update(model(data))
+        stage_cfg = OmegaConf.create(
+            {
+                "point_supervision": False,
+                "train_num_points": 64,
+                "oversample_ratio": 1.0,
+                "importance_sample_ratio": 0.5,
+            }
+        )
+        losses = LossComputer(cfg, stage_cfg).compute(data, [1])
+        self.assertIn("aux_faf_dense_flow", losses)
+        self.assertIn("aux_faf_dense_smooth", losses)
+        self.assertTrue(torch.isfinite(losses["aux_faf_dense_flow"]))
+        self.assertTrue(torch.isfinite(losses["aux_faf_dense_smooth"]))
 
 
 if __name__ == "__main__":
