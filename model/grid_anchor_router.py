@@ -44,15 +44,15 @@ class GridAnchorRouter(nn.Module):
         *,
         num_heads: int = 4,
         hidden_dim: int | None = None,
-        max_offset: float = 0.12,
+        max_offset_px: float = 2.0,
         padding_mode: str = "border",
         align_corners: bool = False,
-        update_gate_bias: float = 1.0,
+        write_gate_bias: float = -0.5,
     ) -> None:
         super().__init__()
         self.channels = int(channels)
         self.num_heads = int(num_heads)
-        self.max_offset = float(max_offset)
+        self.max_offset_px = float(max_offset_px)
         self.padding_mode = str(padding_mode)
         self.align_corners = bool(align_corners)
 
@@ -60,15 +60,16 @@ class GridAnchorRouter(nn.Module):
         hidden = self.relation.out_dim
         self.offset_head = nn.Conv2d(hidden, self.num_heads * 2, kernel_size=1)
         self.selector = nn.Conv2d(hidden, self.num_heads, kernel_size=1)
-        self.trust_gate = nn.Conv2d(hidden, 1, kernel_size=1)
-        self.update_gate = nn.Conv2d(hidden, 1, kernel_size=1)
+        self.write_head = nn.Conv2d(hidden, 1, kernel_size=1)
         self.delta_proj = nn.Conv2d(self.channels, self.channels, kernel_size=1)
         self.fusion_gate = nn.Conv2d(self.channels * 3, self.channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(()))
+        self.raw_gamma = nn.Parameter(torch.tensor(-3.0))
 
         nn.init.zeros_(self.offset_head.weight)
         nn.init.zeros_(self.offset_head.bias)
-        nn.init.constant_(self.update_gate.bias, float(update_gate_bias))
+        nn.init.zeros_(self.delta_proj.weight)
+        nn.init.zeros_(self.delta_proj.bias)
+        nn.init.constant_(self.write_head.bias, float(write_gate_bias))
 
     def _identity_grid(self, batch: int, height: int, width: int, device, dtype) -> torch.Tensor:
         if self.align_corners:
@@ -94,7 +95,10 @@ class GridAnchorRouter(nn.Module):
         B, C, H, W = current.shape
         relation = self.relation(current, anchor_prev)
         raw_offsets = self.offset_head(relation).view(B, self.num_heads, 2, H, W)
-        offsets = torch.tanh(raw_offsets) * self.max_offset
+        offset_px = torch.tanh(raw_offsets) * self.max_offset_px
+        offset_x = offset_px[:, :, 0] * (2.0 / float(W))
+        offset_y = offset_px[:, :, 1] * (2.0 / float(H))
+        offsets = torch.stack([offset_x, offset_y], dim=2)
 
         base_grid = self._identity_grid(B, H, W, current.device, current.dtype)
         grid = base_grid[:, None] + offsets.permute(0, 1, 3, 4, 2)
@@ -109,36 +113,49 @@ class GridAnchorRouter(nn.Module):
         head_logits = self.selector(relation)
         head_weights = torch.softmax(head_logits, dim=1)
         routed = (sampled * head_weights[:, :, None]).sum(dim=1)
-        trust = torch.sigmoid(self.trust_gate(relation))
+        write = torch.sigmoid(self.write_head(relation))
 
         delta = self.delta_proj(routed - current)
         gate = torch.sigmoid(self.fusion_gate(torch.cat([current, routed, delta], dim=1)))
-        out = current + self.gamma * trust * gate * delta
+        gamma = F.softplus(self.raw_gamma)
+        out = current + gamma * write * gate * delta
 
-        update = torch.sigmoid(self.update_gate(relation))
-        next_anchor = update * out.detach() + (1.0 - update) * routed.detach()
+        write_detached = write.detach()
+        next_anchor = write_detached * out.detach() + (1.0 - write_detached) * routed.detach()
 
         weights_flat = head_weights.flatten(2)
         entropy = -(weights_flat * weights_flat.clamp_min(1.0e-6).log()).sum(dim=1).mean(dim=-1)
         entropy = entropy / max(math.log(float(self.num_heads)), 1.0e-6)
         top_usage = F.one_hot(head_weights.argmax(dim=1), num_classes=self.num_heads).permute(0, 3, 1, 2).float()
-        offset_abs = offsets.detach().abs()
+        head_usage = top_usage.detach().mean(dim=(2, 3))
+        usage_entropy = -(head_usage * head_usage.clamp_min(1.0e-6).log()).sum(dim=1)
+        usage_entropy = usage_entropy / max(math.log(float(self.num_heads)), 1.0e-6)
+        offset_px_abs = offset_px.detach().abs()
+        flow_dx = offset_px[:, :, :, :, 1:] - offset_px[:, :, :, :, :-1]
+        flow_dy = offset_px[:, :, :, 1:, :] - offset_px[:, :, :, :-1, :]
+        flow_smooth = flow_dx.abs().mean(dim=(1, 2, 3, 4)) + flow_dy.abs().mean(dim=(1, 2, 3, 4))
+        write_flat = write.detach().flatten(1).float()
         aux = {
             "relation": relation,
             "warped_features": sampled,
             "head_logits": head_logits,
             "head_weights": head_weights,
-            "trust": trust,
-            "update_gate": update,
+            "selector_logits": head_logits.mean(dim=(2, 3)),
+            "write": write,
             "offsets": offsets,
-            "gamma": self.gamma.detach().reshape(1),
-            "offset_abs_mean": offset_abs.mean(dim=(1, 2, 3, 4)),
-            "offset_abs_p95": torch.quantile(offset_abs.flatten(1).float(), 0.95, dim=1).to(offset_abs.dtype),
-            "trust_mean": trust.detach().mean(dim=(1, 2, 3)),
-            "update_gate_mean": update.detach().mean(dim=(1, 2, 3)),
+            "offset_px": offset_px,
+            "gamma": gamma.detach().reshape(1),
+            "offset_px_mean": offset_px_abs.mean(dim=(1, 2, 3, 4)),
+            "offset_px_p95": torch.quantile(offset_px_abs.flatten(1).float(), 0.95, dim=1).to(offset_px_abs.dtype),
+            "flow_smooth": flow_smooth,
+            "write_mean": write.detach().mean(dim=(1, 2, 3)),
+            "write_p05": torch.quantile(write_flat, 0.05, dim=1).to(write.dtype),
+            "write_p95": torch.quantile(write_flat, 0.95, dim=1).to(write.dtype),
             "head_entropy": entropy.detach(),
-            "head_usage": top_usage.detach().mean(dim=(2, 3)),
-            "head_top1_usage": top_usage.detach().mean(dim=(1, 2, 3)),
+            "head_usage": head_usage,
+            "head_usage_entropy": usage_entropy.detach(),
+            "head_usage_max": head_usage.max(dim=1).values,
+            "head_usage_min": head_usage.min(dim=1).values,
             "head_max_weight": head_weights.detach().amax(dim=1).mean(dim=(1, 2)),
         }
         return out, next_anchor, aux
@@ -154,17 +171,23 @@ class BoundaryAwareFusion(nn.Module):
         )
         self.delta_proj = nn.Conv2d(feature_channels, feature_channels, kernel_size=1)
         self.gate = nn.Conv2d(feature_channels * 3, feature_channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(()))
+        self.boundary_aux_head = nn.Conv2d(feature_channels, 1, kernel_size=1)
+        self.raw_gamma = nn.Parameter(torch.tensor(-3.0))
+        nn.init.zeros_(self.delta_proj.weight)
+        nn.init.zeros_(self.delta_proj.bias)
+        nn.init.constant_(self.gate.bias, -2.0)
 
     def forward(self, feature: torch.Tensor, high_res_skip: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         boundary = self.boundary(high_res_skip)
         if boundary.shape[-2:] != feature.shape[-2:]:
             boundary = F.interpolate(boundary, size=feature.shape[-2:], mode="bilinear", align_corners=False)
-        delta = self.delta_proj(boundary - feature)
+        delta = torch.tanh(self.delta_proj(boundary - feature))
         gate = torch.sigmoid(self.gate(torch.cat([feature, boundary, delta], dim=1)))
-        out = feature + self.gamma * gate * delta
+        gamma = F.softplus(self.raw_gamma)
+        out = feature + gamma * gate * delta
         aux = {
-            "boundary_gamma": self.gamma.detach().reshape(1),
+            "boundary_logits": self.boundary_aux_head(boundary),
+            "boundary_gamma": gamma.detach().reshape(1),
             "boundary_gate_mean": gate.detach().mean(dim=(1, 2, 3)),
             "boundary_delta_abs_mean": delta.detach().abs().mean(dim=(1, 2, 3)),
         }

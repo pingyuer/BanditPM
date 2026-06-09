@@ -16,18 +16,23 @@ model:
   unext_gar:
     in_channels: 1
     num_classes: 2
-    base_dim: 32
-    value_dim: 128
+    base_dim: 120
+    value_dim: 256
     num_heads: 4
     hidden_dim: null
-    max_offset: 0.12
+    stage3_max_offset_px: 2.0
+    stage2_max_offset_px: 3.0
     padding_mode: "border"
     align_corners: false
     detach_state: true
-    update_gate_bias: 1.0
+    write_gate_bias: -0.5
     require_pretrained_unext: false
     pretrained_unext_path: null
     pretrained_unext_strict_backbone: false
-    lambda_gar_base: 0.4
+    lambda_gar_base: 0.1
     lambda_gar_proposal_oracle: 0.2
+    lambda_gar_selector: 0.1
+    lambda_gar_flow_smooth: 0.005
+    lambda_gar_boundary_aux: 0.02
+    selector_temperature: 0.1
     proposal_loss: "best"

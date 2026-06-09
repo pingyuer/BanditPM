@@ -143,8 +143,12 @@ class LossComputer(nn.Module):
             "grid_anchor_router",
             "gar",
         }
-        self.lambda_gar_base = float(gar_cfg.get("lambda_gar_base", 0.4))
+        self.lambda_gar_base = float(gar_cfg.get("lambda_gar_base", 0.1))
         self.lambda_gar_proposal_oracle = float(gar_cfg.get("lambda_gar_proposal_oracle", 0.2))
+        self.lambda_gar_selector = float(gar_cfg.get("lambda_gar_selector", 0.1))
+        self.lambda_gar_flow_smooth = float(gar_cfg.get("lambda_gar_flow_smooth", 0.005))
+        self.lambda_gar_boundary_aux = float(gar_cfg.get("lambda_gar_boundary_aux", 0.02))
+        self.gar_selector_temperature = float(gar_cfg.get("selector_temperature", 0.1))
         self.gar_proposal_loss = str(gar_cfg.get("proposal_loss", "best")).lower()
 
     def _default_supervision_mask(
@@ -483,6 +487,9 @@ class LossComputer(nn.Module):
         zero = torch.zeros((), device=device, dtype=torch.float32)
         base_terms = []
         proposal_terms = []
+        selector_terms = []
+        smooth_terms = []
+        boundary_terms = []
 
         for bi in range(batch_size):
             curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
@@ -502,20 +509,46 @@ class LossComputer(nn.Module):
                     base_terms.append(ce + dice)
 
                 proposals = aux.get("proposal_logits")
-                if torch.is_tensor(proposals) and self.lambda_gar_proposal_oracle > 0:
+                head_losses = []
+                if torch.is_tensor(proposals) and (self.lambda_gar_proposal_oracle > 0 or self.lambda_gar_selector > 0):
                     proposals = proposals[bi : bi + 1, :curr_num_obj]
-                    head_losses = []
                     for ki in range(proposals.shape[2]):
                         prop_obj = proposals[:, :, ki]
                         prop_logits = aggregate(torch.sigmoid(prop_obj), dim=1)
                         ce, dice = self.mask_loss(prop_logits, soft_gt)
                         head_losses.append(ce + dice)
-                    if head_losses:
+                    if head_losses and self.lambda_gar_proposal_oracle > 0:
                         stacked = torch.stack(head_losses)
                         if self.gar_proposal_loss == "softmin":
                             proposal_terms.append(-torch.logsumexp(-stacked, dim=0))
                         else:
                             proposal_terms.append(stacked.min())
+                    if head_losses and self.lambda_gar_selector > 0:
+                        selector_logits = aux.get("selector_logits")
+                        if torch.is_tensor(selector_logits):
+                            logits = selector_logits[bi : bi + 1, 0]
+                            stacked = torch.stack(head_losses).detach()
+                            target = torch.softmax(-stacked / max(self.gar_selector_temperature, 1.0e-4), dim=0).unsqueeze(0)
+                            selector_terms.append(F.kl_div(F.log_softmax(logits, dim=-1), target, reduction="batchmean"))
+
+                for src in ("stage2_flow_smooth", "stage3_flow_smooth"):
+                    value = aux.get(src)
+                    if torch.is_tensor(value) and self.lambda_gar_flow_smooth > 0:
+                        item = value[bi : bi + 1] if value.dim() > 0 and value.shape[0] > bi else value
+                        smooth_terms.append(item.float().mean())
+
+                boundary_logits = aux.get("boundary_logits")
+                if torch.is_tensor(boundary_logits) and self.lambda_gar_boundary_aux > 0:
+                    gt_fg = (data["cls_gt"][bi, ti : ti + 1].float() > 0).float()
+                    if gt_fg.dim() == 3:
+                        gt_fg = gt_fg.unsqueeze(1)
+                    if gt_fg.shape[-2:] != boundary_logits.shape[-2:]:
+                        gt_fg = F.interpolate(gt_fg, size=boundary_logits.shape[-2:], mode="nearest")
+                    dil = F.max_pool2d(gt_fg, kernel_size=3, stride=1, padding=1)
+                    ero = 1.0 - F.max_pool2d(1.0 - gt_fg, kernel_size=3, stride=1, padding=1)
+                    boundary = (dil - ero).clamp(0.0, 1.0)
+                    pred = boundary_logits[bi : bi + 1]
+                    boundary_terms.append(F.binary_cross_entropy_with_logits(pred.float(), boundary.to(device=pred.device, dtype=pred.dtype).float()))
 
         out: Dict[str, torch.Tensor] = {}
         if base_terms:
@@ -526,6 +559,18 @@ class LossComputer(nn.Module):
             raw = torch.stack(proposal_terms).mean()
             out["raw_gar_proposal_oracle"] = raw.detach()
             out["aux_gar_proposal_oracle"] = raw * self.lambda_gar_proposal_oracle
+        if selector_terms:
+            raw = torch.stack(selector_terms).mean()
+            out["raw_gar_selector"] = raw.detach()
+            out["aux_gar_selector"] = raw * self.lambda_gar_selector
+        if smooth_terms:
+            raw = torch.stack(smooth_terms).mean()
+            out["raw_gar_flow_smooth"] = raw.detach()
+            out["aux_gar_flow_smooth"] = raw * self.lambda_gar_flow_smooth
+        if boundary_terms:
+            raw = torch.stack(boundary_terms).mean()
+            out["raw_gar_boundary_aux"] = raw.detach()
+            out["aux_gar_boundary_aux"] = raw * self.lambda_gar_boundary_aux
         if not out:
             out["aux_gar_zero"] = zero
         return out

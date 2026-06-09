@@ -30,7 +30,8 @@ class UNeXtGAR(nn.Module):
         self.base_dim = int(_cfg_get(method_cfg, "base_dim", 32))
         self.value_dim = int(_cfg_get(method_cfg, "value_dim", 128))
         self.num_heads = int(_cfg_get(method_cfg, "num_heads", 4))
-        self.max_offset = float(_cfg_get(method_cfg, "max_offset", 0.12))
+        self.stage3_max_offset_px = float(_cfg_get(method_cfg, "stage3_max_offset_px", _cfg_get(method_cfg, "max_offset_px", 2.0)))
+        self.stage2_max_offset_px = float(_cfg_get(method_cfg, "stage2_max_offset_px", _cfg_get(method_cfg, "max_offset_px", 3.0)))
         self.padding_mode = str(_cfg_get(method_cfg, "padding_mode", "border"))
         self.align_corners = bool(_cfg_get(method_cfg, "align_corners", False))
         self.detach_state = bool(_cfg_get(method_cfg, "detach_state", True))
@@ -39,7 +40,7 @@ class UNeXtGAR(nn.Module):
         self.pretrained_unext_strict_backbone = bool(_cfg_get(method_cfg, "pretrained_unext_strict_backbone", False))
         hidden_dim = _cfg_get(method_cfg, "hidden_dim", None)
         hidden_dim = None if hidden_dim in (None, "null") else int(hidden_dim)
-        update_gate_bias = float(_cfg_get(method_cfg, "update_gate_bias", 1.0))
+        write_gate_bias = float(_cfg_get(method_cfg, "write_gate_bias", -0.5))
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -53,19 +54,19 @@ class UNeXtGAR(nn.Module):
             self.base_dim * 4,
             num_heads=self.num_heads,
             hidden_dim=hidden_dim,
-            max_offset=self.max_offset,
+            max_offset_px=self.stage3_max_offset_px,
             padding_mode=self.padding_mode,
             align_corners=self.align_corners,
-            update_gate_bias=update_gate_bias,
+            write_gate_bias=write_gate_bias,
         )
         self.gar_stage2 = GridAnchorRouter(
             self.base_dim * 2,
             num_heads=self.num_heads,
             hidden_dim=hidden_dim,
-            max_offset=self.max_offset,
+            max_offset_px=self.stage2_max_offset_px,
             padding_mode=self.padding_mode,
             align_corners=self.align_corners,
-            update_gate_bias=update_gate_bias,
+            write_gate_bias=write_gate_bias,
         )
         self.proposal_head = nn.Conv2d(self.base_dim * 2, 1, kernel_size=1)
         self.boundary_fusion = BoundaryAwareFusion(self.base_dim, self.base_dim)
@@ -170,23 +171,33 @@ class UNeXtGAR(nn.Module):
                 "proposal_logits": proposal_logits,
                 "proposal_top1_logits": top1.expand(-1, max_num_objects, -1, -1),
                 "head_weights": head_weights,
-                "stage3_offset_abs_mean": aux_high["offset_abs_mean"],
-                "stage3_offset_abs_p95": aux_high["offset_abs_p95"],
-                "stage3_trust_mean": aux_high["trust_mean"],
-                "stage3_update_gate_mean": aux_high["update_gate_mean"],
+                "selector_logits": aux_mid["selector_logits"][:, None].expand(-1, max_num_objects, -1),
+                "boundary_logits": aux_boundary["boundary_logits"],
+                "stage3_flow_smooth": aux_high["flow_smooth"],
+                "stage3_offset_px_mean": aux_high["offset_px_mean"],
+                "stage3_offset_px_p95": aux_high["offset_px_p95"],
+                "stage3_write_mean": aux_high["write_mean"],
+                "stage3_write_p05": aux_high["write_p05"],
+                "stage3_write_p95": aux_high["write_p95"],
                 "stage3_gamma": aux_high["gamma"],
                 "stage3_head_entropy": aux_high["head_entropy"],
                 "stage3_head_usage": aux_high["head_usage"],
-                "stage3_head_top1_usage": aux_high["head_top1_usage"],
+                "stage3_head_usage_entropy": aux_high["head_usage_entropy"],
+                "stage3_head_usage_max": aux_high["head_usage_max"],
+                "stage3_head_usage_min": aux_high["head_usage_min"],
                 "stage3_head_max_weight": aux_high["head_max_weight"],
-                "stage2_offset_abs_mean": aux_mid["offset_abs_mean"],
-                "stage2_offset_abs_p95": aux_mid["offset_abs_p95"],
-                "stage2_trust_mean": aux_mid["trust_mean"],
-                "stage2_update_gate_mean": aux_mid["update_gate_mean"],
+                "stage2_flow_smooth": aux_mid["flow_smooth"],
+                "stage2_offset_px_mean": aux_mid["offset_px_mean"],
+                "stage2_offset_px_p95": aux_mid["offset_px_p95"],
+                "stage2_write_mean": aux_mid["write_mean"],
+                "stage2_write_p05": aux_mid["write_p05"],
+                "stage2_write_p95": aux_mid["write_p95"],
                 "stage2_gamma": aux_mid["gamma"],
                 "stage2_head_entropy": aux_mid["head_entropy"],
                 "stage2_head_usage": aux_mid["head_usage"],
-                "stage2_head_top1_usage": aux_mid["head_top1_usage"],
+                "stage2_head_usage_entropy": aux_mid["head_usage_entropy"],
+                "stage2_head_usage_max": aux_mid["head_usage_max"],
+                "stage2_head_usage_min": aux_mid["head_usage_min"],
                 "stage2_head_max_weight": aux_mid["head_max_weight"],
                 "boundary_gamma": aux_boundary["boundary_gamma"],
                 "boundary_gate_mean": aux_boundary["boundary_gate_mean"],

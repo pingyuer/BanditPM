@@ -752,6 +752,9 @@ class Trainer:
                 ("lambda_faf_velocity", "velocity"),
                 ("lambda_gar_base", "base"),
                 ("lambda_gar_proposal_oracle", "proposal_oracle"),
+                ("lambda_gar_selector", "selector"),
+                ("lambda_gar_flow_smooth", "flow_smooth"),
+                ("lambda_gar_boundary_aux", "boundary_aux"),
             ):
                 if hasattr(self.loss_computer, attr):
                     if attr.startswith("lambda_faf_"):
@@ -1287,21 +1290,29 @@ class Trainer:
             return
         try:
             buckets = {
-                "stage3_offset_abs_mean": [],
-                "stage3_offset_abs_p95": [],
-                "stage3_trust_mean": [],
-                "stage3_update_gate_mean": [],
+                "stage3_offset_px_mean": [],
+                "stage3_offset_px_p95": [],
+                "stage3_flow_smooth": [],
+                "stage3_write_mean": [],
+                "stage3_write_p05": [],
+                "stage3_write_p95": [],
                 "stage3_gamma": [],
                 "stage3_head_entropy": [],
-                "stage3_head_top1_usage": [],
+                "stage3_head_usage_entropy": [],
+                "stage3_head_usage_max": [],
+                "stage3_head_usage_min": [],
                 "stage3_head_max_weight": [],
-                "stage2_offset_abs_mean": [],
-                "stage2_offset_abs_p95": [],
-                "stage2_trust_mean": [],
-                "stage2_update_gate_mean": [],
+                "stage2_offset_px_mean": [],
+                "stage2_offset_px_p95": [],
+                "stage2_flow_smooth": [],
+                "stage2_write_mean": [],
+                "stage2_write_p05": [],
+                "stage2_write_p95": [],
                 "stage2_gamma": [],
                 "stage2_head_entropy": [],
-                "stage2_head_top1_usage": [],
+                "stage2_head_usage_entropy": [],
+                "stage2_head_usage_max": [],
+                "stage2_head_usage_min": [],
                 "stage2_head_max_weight": [],
                 "boundary_gamma": [],
                 "boundary_gate_mean": [],
@@ -1318,6 +1329,12 @@ class Trainer:
                     value = gar.get(name)
                     if torch.is_tensor(value):
                         buckets[name].append(value.float().detach().flatten())
+                for stage in ("stage2", "stage3"):
+                    usage = gar.get(f"{stage}_head_usage")
+                    if torch.is_tensor(usage):
+                        usage_mean = usage.float().detach().mean(dim=0)
+                        for idx, value in enumerate(usage_mean.flatten()):
+                            buckets.setdefault(f"{stage}_head_usage_{idx}", []).append(value.reshape(1))
             metrics = {}
             for name, tensors in buckets.items():
                 if not tensors:
@@ -2161,21 +2178,29 @@ class Trainer:
                                         metric_totals["gar_proposal_mean_dice_sum"] = metric_totals.get("gar_proposal_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
                                         metric_totals["gar_proposal_dice_count"] = metric_totals.get("gar_proposal_dice_count", 0.0) + 1.0
                                 for src, dst in (
-                                    ("stage3_offset_abs_mean", "gar_stage3_offset_abs_mean_sum"),
-                                    ("stage3_offset_abs_p95", "gar_stage3_offset_abs_p95_sum"),
-                                    ("stage3_trust_mean", "gar_stage3_trust_mean_sum"),
-                                    ("stage3_update_gate_mean", "gar_stage3_update_gate_mean_sum"),
+                                    ("stage3_offset_px_mean", "gar_stage3_offset_px_mean_sum"),
+                                    ("stage3_offset_px_p95", "gar_stage3_offset_px_p95_sum"),
+                                    ("stage3_flow_smooth", "gar_stage3_flow_smooth_sum"),
+                                    ("stage3_write_mean", "gar_stage3_write_mean_sum"),
+                                    ("stage3_write_p05", "gar_stage3_write_p05_sum"),
+                                    ("stage3_write_p95", "gar_stage3_write_p95_sum"),
                                     ("stage3_gamma", "gar_stage3_gamma_sum"),
                                     ("stage3_head_entropy", "gar_stage3_head_entropy_sum"),
-                                    ("stage3_head_top1_usage", "gar_stage3_head_top1_usage_sum"),
+                                    ("stage3_head_usage_entropy", "gar_stage3_head_usage_entropy_sum"),
+                                    ("stage3_head_usage_max", "gar_stage3_head_usage_max_sum"),
+                                    ("stage3_head_usage_min", "gar_stage3_head_usage_min_sum"),
                                     ("stage3_head_max_weight", "gar_stage3_head_max_weight_sum"),
-                                    ("stage2_offset_abs_mean", "gar_stage2_offset_abs_mean_sum"),
-                                    ("stage2_offset_abs_p95", "gar_stage2_offset_abs_p95_sum"),
-                                    ("stage2_trust_mean", "gar_stage2_trust_mean_sum"),
-                                    ("stage2_update_gate_mean", "gar_stage2_update_gate_mean_sum"),
+                                    ("stage2_offset_px_mean", "gar_stage2_offset_px_mean_sum"),
+                                    ("stage2_offset_px_p95", "gar_stage2_offset_px_p95_sum"),
+                                    ("stage2_flow_smooth", "gar_stage2_flow_smooth_sum"),
+                                    ("stage2_write_mean", "gar_stage2_write_mean_sum"),
+                                    ("stage2_write_p05", "gar_stage2_write_p05_sum"),
+                                    ("stage2_write_p95", "gar_stage2_write_p95_sum"),
                                     ("stage2_gamma", "gar_stage2_gamma_sum"),
                                     ("stage2_head_entropy", "gar_stage2_head_entropy_sum"),
-                                    ("stage2_head_top1_usage", "gar_stage2_head_top1_usage_sum"),
+                                    ("stage2_head_usage_entropy", "gar_stage2_head_usage_entropy_sum"),
+                                    ("stage2_head_usage_max", "gar_stage2_head_usage_max_sum"),
+                                    ("stage2_head_usage_min", "gar_stage2_head_usage_min_sum"),
                                     ("stage2_head_max_weight", "gar_stage2_head_max_weight_sum"),
                                     ("boundary_gamma", "gar_boundary_gamma_sum"),
                                     ("boundary_gate_mean", "gar_boundary_gate_mean_sum"),
@@ -2184,6 +2209,13 @@ class Trainer:
                                     value = gar_aux.get(src)
                                     if torch.is_tensor(value):
                                         metric_totals[dst] = metric_totals.get(dst, 0.0) + float(value.float().mean().item())
+                                for stage in ("stage2", "stage3"):
+                                    usage = gar_aux.get(f"{stage}_head_usage")
+                                    if torch.is_tensor(usage):
+                                        usage_item = usage[bi].float() if usage.shape[0] > bi else usage.float().mean(dim=0)
+                                        for idx, value in enumerate(usage_item.flatten()):
+                                            key = f"gar_{stage}_head_usage_{idx}_sum"
+                                            metric_totals[key] = metric_totals.get(key, 0.0) + float(value.item())
                                 metric_totals["gar_aux_count"] = metric_totals.get("gar_aux_count", 0.0) + 1.0
 
                             faf_aux = memory_aux.get("faf_aux") if isinstance(memory_aux, dict) else None
@@ -2954,21 +2986,29 @@ class Trainer:
                     "gar/proposal_mean_dice": gar_mean("gar_proposal_mean_dice_sum", "gar_proposal_dice_count"),
                     "gar/final_dice": metrics["dice_frame_mean"],
                     "gar/boundary_dice": metrics["boundary_dice"],
-                    "gar/stage3_offset_abs_mean": gar_mean("gar_stage3_offset_abs_mean_sum"),
-                    "gar/stage3_offset_abs_p95": gar_mean("gar_stage3_offset_abs_p95_sum"),
-                    "gar/stage3_trust_mean": gar_mean("gar_stage3_trust_mean_sum"),
-                    "gar/stage3_update_gate_mean": gar_mean("gar_stage3_update_gate_mean_sum"),
+                    "gar/stage3_offset_px_mean": gar_mean("gar_stage3_offset_px_mean_sum"),
+                    "gar/stage3_offset_px_p95": gar_mean("gar_stage3_offset_px_p95_sum"),
+                    "gar/stage3_flow_smooth": gar_mean("gar_stage3_flow_smooth_sum"),
+                    "gar/stage3_write_mean": gar_mean("gar_stage3_write_mean_sum"),
+                    "gar/stage3_write_p05": gar_mean("gar_stage3_write_p05_sum"),
+                    "gar/stage3_write_p95": gar_mean("gar_stage3_write_p95_sum"),
                     "gar/stage3_gamma": gar_mean("gar_stage3_gamma_sum"),
                     "gar/stage3_head_entropy": gar_mean("gar_stage3_head_entropy_sum"),
-                    "gar/stage3_head_top1_usage": gar_mean("gar_stage3_head_top1_usage_sum"),
+                    "gar/stage3_head_usage_entropy": gar_mean("gar_stage3_head_usage_entropy_sum"),
+                    "gar/stage3_head_usage_max": gar_mean("gar_stage3_head_usage_max_sum"),
+                    "gar/stage3_head_usage_min": gar_mean("gar_stage3_head_usage_min_sum"),
                     "gar/stage3_head_max_weight": gar_mean("gar_stage3_head_max_weight_sum"),
-                    "gar/stage2_offset_abs_mean": gar_mean("gar_stage2_offset_abs_mean_sum"),
-                    "gar/stage2_offset_abs_p95": gar_mean("gar_stage2_offset_abs_p95_sum"),
-                    "gar/stage2_trust_mean": gar_mean("gar_stage2_trust_mean_sum"),
-                    "gar/stage2_update_gate_mean": gar_mean("gar_stage2_update_gate_mean_sum"),
+                    "gar/stage2_offset_px_mean": gar_mean("gar_stage2_offset_px_mean_sum"),
+                    "gar/stage2_offset_px_p95": gar_mean("gar_stage2_offset_px_p95_sum"),
+                    "gar/stage2_flow_smooth": gar_mean("gar_stage2_flow_smooth_sum"),
+                    "gar/stage2_write_mean": gar_mean("gar_stage2_write_mean_sum"),
+                    "gar/stage2_write_p05": gar_mean("gar_stage2_write_p05_sum"),
+                    "gar/stage2_write_p95": gar_mean("gar_stage2_write_p95_sum"),
                     "gar/stage2_gamma": gar_mean("gar_stage2_gamma_sum"),
                     "gar/stage2_head_entropy": gar_mean("gar_stage2_head_entropy_sum"),
-                    "gar/stage2_head_top1_usage": gar_mean("gar_stage2_head_top1_usage_sum"),
+                    "gar/stage2_head_usage_entropy": gar_mean("gar_stage2_head_usage_entropy_sum"),
+                    "gar/stage2_head_usage_max": gar_mean("gar_stage2_head_usage_max_sum"),
+                    "gar/stage2_head_usage_min": gar_mean("gar_stage2_head_usage_min_sum"),
                     "gar/stage2_head_max_weight": gar_mean("gar_stage2_head_max_weight_sum"),
                     "gar/boundary_gamma": gar_mean("gar_boundary_gamma_sum"),
                     "gar/boundary_gate_mean": gar_mean("gar_boundary_gate_mean_sum"),
@@ -2985,6 +3025,11 @@ class Trainer:
                 metrics["gar/final_minus_base_dice"] = metrics["dice_frame_mean"] - metrics["gar/base_dice"]
             if reduced.get("gar_proposal_dice_count", 0.0) > 0 and reduced.get("gar_base_dice_count", 0.0) > 0:
                 metrics["gar/oracle_gap_to_base"] = metrics["gar/proposal_oracle_dice"] - metrics["gar/base_dice"]
+            for stage in ("stage2", "stage3"):
+                for idx in range(int(self.cfg.get("model", {}).get("unext_gar", {}).get("num_heads", 4))):
+                    key = f"gar_{stage}_head_usage_{idx}_sum"
+                    if key in reduced:
+                        metrics[f"gar/{stage}_head_usage_{idx}"] = gar_mean(key)
         if reduced.get("faf_aux_count", 0.0) > 0:
             def faf_mean(sum_key: str, count_key: str = "faf_aux_count"):
                 count = reduced.get(count_key, 0.0)

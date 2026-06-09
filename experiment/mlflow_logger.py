@@ -358,19 +358,29 @@ class MLflowLogger:
             "final_minus_base_dice": ("final_minus_base_dice", "final_minus_base", "gar/final_minus_base_dice"),
             "final_minus_base_by_ED": ("final_minus_base_by_ED", "gar/final_minus_base_by_ED"),
             "final_minus_base_by_ES": ("final_minus_base_by_ES", "gar/final_minus_base_by_ES"),
-            "stage3_offset_abs_mean": ("stage3_offset_abs_mean", "gar/stage3_offset_abs_mean"),
-            "stage3_offset_abs_p95": ("stage3_offset_abs_p95", "gar/stage3_offset_abs_p95"),
-            "stage3_trust_mean": ("stage3_trust_mean", "gar/stage3_trust_mean"),
+            "stage3_offset_px_mean": ("stage3_offset_px_mean", "gar/stage3_offset_px_mean"),
+            "stage3_offset_px_p95": ("stage3_offset_px_p95", "gar/stage3_offset_px_p95"),
+            "stage3_flow_smooth": ("stage3_flow_smooth", "gar/stage3_flow_smooth"),
+            "stage3_write_mean": ("stage3_write_mean", "gar/stage3_write_mean"),
+            "stage3_write_p05": ("stage3_write_p05", "gar/stage3_write_p05"),
+            "stage3_write_p95": ("stage3_write_p95", "gar/stage3_write_p95"),
             "stage3_gamma": ("stage3_gamma", "gar/stage3_gamma"),
             "stage3_head_entropy": ("stage3_head_entropy", "gar/stage3_head_entropy"),
-            "stage3_head_top1_usage": ("stage3_head_top1_usage", "gar/stage3_head_top1_usage"),
+            "stage3_head_usage_entropy": ("stage3_head_usage_entropy", "gar/stage3_head_usage_entropy"),
+            "stage3_head_usage_max": ("stage3_head_usage_max", "gar/stage3_head_usage_max"),
+            "stage3_head_usage_min": ("stage3_head_usage_min", "gar/stage3_head_usage_min"),
             "stage3_head_max_weight": ("stage3_head_max_weight", "gar/stage3_head_max_weight"),
-            "stage2_offset_abs_mean": ("stage2_offset_abs_mean", "gar/stage2_offset_abs_mean"),
-            "stage2_offset_abs_p95": ("stage2_offset_abs_p95", "gar/stage2_offset_abs_p95"),
-            "stage2_trust_mean": ("stage2_trust_mean", "gar/stage2_trust_mean"),
+            "stage2_offset_px_mean": ("stage2_offset_px_mean", "gar/stage2_offset_px_mean"),
+            "stage2_offset_px_p95": ("stage2_offset_px_p95", "gar/stage2_offset_px_p95"),
+            "stage2_flow_smooth": ("stage2_flow_smooth", "gar/stage2_flow_smooth"),
+            "stage2_write_mean": ("stage2_write_mean", "gar/stage2_write_mean"),
+            "stage2_write_p05": ("stage2_write_p05", "gar/stage2_write_p05"),
+            "stage2_write_p95": ("stage2_write_p95", "gar/stage2_write_p95"),
             "stage2_gamma": ("stage2_gamma", "gar/stage2_gamma"),
             "stage2_head_entropy": ("stage2_head_entropy", "gar/stage2_head_entropy"),
-            "stage2_head_top1_usage": ("stage2_head_top1_usage", "gar/stage2_head_top1_usage"),
+            "stage2_head_usage_entropy": ("stage2_head_usage_entropy", "gar/stage2_head_usage_entropy"),
+            "stage2_head_usage_max": ("stage2_head_usage_max", "gar/stage2_head_usage_max"),
+            "stage2_head_usage_min": ("stage2_head_usage_min", "gar/stage2_head_usage_min"),
             "stage2_head_max_weight": ("stage2_head_max_weight", "gar/stage2_head_max_weight"),
             "boundary_gamma": ("boundary_gamma", "gar/boundary_gamma"),
             "boundary_gate_mean": ("boundary_gate_mean", "gar/boundary_gate_mean"),
@@ -382,13 +392,19 @@ class MLflowLogger:
                 if key in metrics:
                     out[dst] = metrics[key]
                     break
+        for stage in ("stage2", "stage3"):
+            for idx in range(16):
+                for key in (f"{stage}_head_usage_{idx}", f"gar/{stage}_head_usage_{idx}"):
+                    if key in metrics:
+                        out[f"{stage}_head_usage_{idx}"] = metrics[key]
+                        break
         if "final_minus_base_dice" not in out and "final_dice" in out and "base_dice" in out:
             final = cls._to_float(out["final_dice"])
             base = cls._to_float(out["base_dice"])
             if final is not None and base is not None:
                 out["final_minus_base_dice"] = final - base
         if not any(str(key).startswith("gar/") for key in metrics) and not any(
-            key in metrics for key in ("stage2_offset_abs_mean", "proposal_oracle_dice")
+            key in metrics for key in ("stage2_offset_px_mean", "proposal_oracle_dice")
         ):
             return {}
         return out

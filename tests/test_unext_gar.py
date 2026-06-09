@@ -20,7 +20,8 @@ def _cfg():
                 "base_dim": 8,
                 "value_dim": 16,
                 "num_heads": 3,
-                "max_offset": 0.1,
+                "stage3_max_offset_px": 2.0,
+                "stage2_max_offset_px": 3.0,
                 "padding_mode": "border",
                 "align_corners": False,
                 "detach_state": True,
@@ -29,15 +30,18 @@ def _cfg():
     )
 
 
-def test_grid_anchor_router_zero_init_offsets_identity_and_gamma_zero():
-    router = GridAnchorRouter(4, num_heads=3, max_offset=0.1)
+def test_grid_anchor_router_zero_init_offsets_identity_and_positive_gamma():
+    router = GridAnchorRouter(4, num_heads=3, max_offset_px=2.0)
     current = torch.randn(2, 4, 8, 8)
     out, next_anchor, aux = router(current, current.detach())
     assert out.shape == current.shape
     assert next_anchor.shape == current.shape
     assert torch.allclose(aux["offsets"], torch.zeros_like(aux["offsets"]), atol=1.0e-6)
     assert torch.allclose(out, current, atol=1.0e-6)
-    assert float(aux["gamma"].item()) == 0.0
+    assert float(aux["gamma"].item()) > 0.0
+    assert aux["offset_px_mean"].shape == (2,)
+    assert 0.25 < float(aux["write_mean"].mean().item()) < 0.5
+    assert "head_usage_entropy" in aux
 
 
 def test_unext_gar_forward_contract_and_aux_shapes():
@@ -52,7 +56,9 @@ def test_unext_gar_forward_contract_and_aux_shapes():
     aux = out["memory_aux_1"]["gar_aux"]
     assert aux["proposal_logits"].shape == (2, 1, 3, 64, 64)
     assert aux["head_weights"].shape == (2, 1, 3)
-    assert aux["stage2_offset_abs_mean"].shape == (2,)
+    assert aux["stage2_offset_px_mean"].shape == (2,)
+    assert aux["stage2_write_mean"].shape == (2,)
+    assert aux["boundary_logits"].shape == (2, 1, 64, 64)
     assert aux["state_detached"].item() == 1.0
 
 
