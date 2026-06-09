@@ -21,6 +21,7 @@ main_training:
   embed_weight_decay: 0.0
   backbone_lr_ratio: 0.1
   cardia_offset_lr_mult: 1.5
+  cardia_ode_control_lr_mult: 2.0
   cardia_selector_lr_mult: 2.0
   cardia_boundary_lr_mult: 2.0
   cardia_proposal_lr_mult: 2.0

@@ -3,6 +3,7 @@ import logging
 import csv
 import copy
 import json
+import math
 import subprocess
 from pathlib import Path
 import numpy as np
@@ -274,6 +275,20 @@ class Trainer:
                 stage_cfg["lr_schedule_steps"],
                 stage_cfg["lr_schedule_gamma"],
             )
+        elif stage_cfg["lr_schedule"] == "warmup_cosine":
+            total_num_iter = max(int(stage_cfg["num_iterations"]), 1)
+            warmup_iters = max(int(stage_cfg.get("lr_warmup_iters", 0)), 0)
+            min_ratio = float(stage_cfg.get("lr_min_ratio", 0.0))
+
+            def warmup_cosine(step):
+                if warmup_iters > 0 and step < warmup_iters:
+                    return max(float(step + 1) / float(warmup_iters), 1.0e-6)
+                denom = max(total_num_iter - warmup_iters, 1)
+                progress = min(max(float(step - warmup_iters) / float(denom), 0.0), 1.0)
+                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+                return min_ratio + (1.0 - min_ratio) * cosine
+
+            self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=warmup_cosine)
         else:
             raise NotImplementedError(
                 f"Scheduler {stage_cfg['lr_schedule']} not implemented"
@@ -1423,12 +1438,17 @@ class Trainer:
                 "stage3_dynamic_anchor_minus_anchor_abs_mean": [],
                 "stage3_fused_minus_anchor_abs_mean": [],
                 "stage3_injected_minus_base_abs_mean": [],
+                "stage3_injection_scale": [],
                 "stage3_runtime_update_mean": [],
                 "stage3_runtime_reset_mean": [],
                 "stage3_runtime_state_norm": [],
                 "stage3_runtime_state_abs_mean": [],
                 "stage3_runtime_state_rms": [],
+                "stage3_runtime_token_abs_mean": [],
+                "stage3_runtime_token_rms": [],
+                "stage3_runtime_token_update_mean": [],
                 "stage3_global_selector_entropy": [],
+                "stage3_global_spatial_agreement": [],
                 "stage2_flow_smooth": [],
                 "stage2_offset_px_mean": [],
                 "stage2_offset_px_p95": [],
@@ -1441,11 +1461,15 @@ class Trainer:
                 "stage2_global_selector_entropy": [],
                 "stage2_head_entropy": [],
                 "stage2_head_usage_entropy": [],
+                "stage2_global_spatial_agreement": [],
                 "stage2_runtime_update_mean": [],
                 "stage2_runtime_reset_mean": [],
                 "stage2_runtime_state_norm": [],
                 "stage2_runtime_state_abs_mean": [],
                 "stage2_runtime_state_rms": [],
+                "stage2_runtime_token_abs_mean": [],
+                "stage2_runtime_token_rms": [],
+                "stage2_runtime_token_update_mean": [],
                 "boundary_gamma": [],
                 "boundary_edge_gate_mean": [],
                 "boundary_edge_effective_mean": [],
@@ -1466,11 +1490,12 @@ class Trainer:
                     if torch.is_tensor(value):
                         buckets[name].append(value.float().detach().flatten())
                 for stage in ("stage2", "stage3"):
-                    usage = cardia.get(f"{stage}_head_usage")
-                    if torch.is_tensor(usage):
-                        usage_mean = usage.float().detach().mean(dim=0)
-                        for idx, value in enumerate(usage_mean.flatten()):
-                            buckets.setdefault(f"{stage}_head_usage_{idx}", []).append(value.reshape(1))
+                    for usage_name in ("head_usage", "global_head_usage", "spatial_head_usage"):
+                        usage = cardia.get(f"{stage}_{usage_name}")
+                        if torch.is_tensor(usage):
+                            usage_mean = usage.float().detach().mean(dim=0)
+                            for idx, value in enumerate(usage_mean.flatten()):
+                                buckets.setdefault(f"{stage}_{usage_name}_{idx}", []).append(value.reshape(1))
             metrics = {}
             for name, tensors in buckets.items():
                 if not tensors:

@@ -269,6 +269,8 @@ class MLflowLogger:
                 out[f"loss/weighted/cardia/{key_str.removeprefix('aux_cardia_')}"] = value
             elif key_str.startswith("raw_cardia_"):
                 out[f"loss/raw/cardia/{key_str.removeprefix('raw_cardia_')}"] = value
+            elif key_str.startswith("weighted_cardia_"):
+                out[f"loss/weighted/cardia/{key_str.removeprefix('weighted_cardia_')}"] = value
             elif key_str.startswith("lambda_cardia_"):
                 out[f"lambda/cardia/{key_str.removeprefix('lambda_cardia_')}"] = value
         self.log_metrics(out, step=step, prefix="train")
@@ -378,10 +380,15 @@ class MLflowLogger:
             "stage3/dynamic_anchor_minus_anchor_abs_mean": ("stage3_dynamic_anchor_minus_anchor_abs_mean", "cardia/stage3/dynamic_anchor_minus_anchor_abs_mean"),
             "stage3/fused_minus_anchor_abs_mean": ("stage3_fused_minus_anchor_abs_mean", "cardia/stage3/fused_minus_anchor_abs_mean"),
             "stage3/injected_minus_base_abs_mean": ("stage3_injected_minus_base_abs_mean", "cardia/stage3/injected_minus_base_abs_mean"),
+            "stage3/injection_scale": ("stage3_injection_scale", "cardia/stage3/injection_scale"),
             "stage3/runtime_update_mean": ("stage3_runtime_update_mean", "cardia/stage3/runtime_update_mean"),
             "stage3/runtime_state_norm": ("stage3_runtime_state_norm", "cardia/stage3/runtime_state_norm"),
             "stage3/runtime_state_abs_mean": ("stage3_runtime_state_abs_mean", "cardia/stage3/runtime_state_abs_mean"),
             "stage3/runtime_state_rms": ("stage3_runtime_state_rms", "cardia/stage3/runtime_state_rms"),
+            "stage3/runtime_token_abs_mean": ("stage3_runtime_token_abs_mean", "cardia/stage3/runtime_token_abs_mean"),
+            "stage3/runtime_token_rms": ("stage3_runtime_token_rms", "cardia/stage3/runtime_token_rms"),
+            "stage3/runtime_token_update_mean": ("stage3_runtime_token_update_mean", "cardia/stage3/runtime_token_update_mean"),
+            "stage3/global_spatial_agreement": ("stage3_global_spatial_agreement", "cardia/stage3/global_spatial_agreement"),
             "stage2/flow_smooth": ("stage2_flow_smooth", "cardia/stage2/flow_smooth"),
             "stage2/write_mean": ("stage2_write_mean", "cardia/stage2/write_mean"),
             "stage2/decay_mean": ("stage2_decay_mean", "cardia/stage2/decay_mean"),
@@ -390,10 +397,14 @@ class MLflowLogger:
             "stage2/fused_minus_anchor_abs_mean": ("stage2_fused_minus_anchor_abs_mean", "cardia/stage2/fused_minus_anchor_abs_mean"),
             "stage2/global_selector_entropy": ("stage2_global_selector_entropy", "cardia/stage2/global_selector_entropy"),
             "stage2/head_usage_entropy": ("stage2_head_usage_entropy", "cardia/stage2/head_usage_entropy"),
+            "stage2/global_spatial_agreement": ("stage2_global_spatial_agreement", "cardia/stage2/global_spatial_agreement"),
             "stage2/selector_logit_scale": ("stage2_selector_logit_scale", "cardia/stage2/selector_logit_scale"),
             "stage2/runtime_update_mean": ("stage2_runtime_update_mean", "cardia/stage2/runtime_update_mean"),
             "stage2/runtime_state_abs_mean": ("stage2_runtime_state_abs_mean", "cardia/stage2/runtime_state_abs_mean"),
             "stage2/runtime_state_rms": ("stage2_runtime_state_rms", "cardia/stage2/runtime_state_rms"),
+            "stage2/runtime_token_abs_mean": ("stage2_runtime_token_abs_mean", "cardia/stage2/runtime_token_abs_mean"),
+            "stage2/runtime_token_rms": ("stage2_runtime_token_rms", "cardia/stage2/runtime_token_rms"),
+            "stage2/runtime_token_update_mean": ("stage2_runtime_token_update_mean", "cardia/stage2/runtime_token_update_mean"),
             "solver/offset_px_mean": ("solver_offset_px_mean", "cardia/solver/offset_px_mean"),
             "solver/offset_px_p95": ("solver_offset_px_p95", "cardia/solver/offset_px_p95"),
             "boundary/edge_gate": ("boundary_edge_gate_mean", "cardia/boundary/edge_gate"),
@@ -413,10 +424,11 @@ class MLflowLogger:
                     break
         for stage in ("stage2", "stage3"):
             for idx in range(16):
-                for key in (f"{stage}_head_usage_{idx}", f"cardia/{stage}/head_usage_{idx}"):
-                    if key in metrics:
-                        out[f"{stage}/head_usage_{idx}"] = metrics[key]
-                        break
+                for usage_name in ("head_usage", "global_head_usage", "spatial_head_usage"):
+                    for key in (f"{stage}_{usage_name}_{idx}", f"cardia/{stage}/{usage_name}_{idx}"):
+                        if key in metrics:
+                            out[f"{stage}/{usage_name}_{idx}"] = metrics[key]
+                            break
         if "final_minus_base" not in out and "final_dice" in out and "base_dice" in out:
             final = cls._to_float(out["final_dice"])
             base = cls._to_float(out["base_dice"])

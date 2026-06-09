@@ -51,8 +51,9 @@ class RelationEncoder(nn.Module):
 class RuntimeMemory(nn.Module):
     """Gated runtime cardiac state, intentionally separate from anchor features."""
 
-    def __init__(self, channels: int, hidden_dim: int | None = None, token_dim: int = 2) -> None:
+    def __init__(self, channels: int, hidden_dim: int | None = None, token_dim: int = 2, runtime_token_dim: int = 32) -> None:
         super().__init__()
+        self.runtime_token_dim = int(runtime_token_dim)
         self.anchor_norm = nn.GroupNorm(_group_count(channels), channels)
         self.state_norm = nn.GroupNorm(_group_count(channels), channels)
         self.relation = RelationEncoder(channels, hidden_dim)
@@ -71,6 +72,13 @@ class RuntimeMemory(nn.Module):
             nn.Conv2d(channels, channels, kernel_size=1),
             nn.GroupNorm(_group_count(channels), channels),
         )
+        token_in_dim = channels * 2 + token_dim + self.runtime_token_dim
+        self.runtime_token_update = nn.Sequential(
+            nn.Linear(token_in_dim, self.runtime_token_dim * 2),
+            nn.LayerNorm(self.runtime_token_dim * 2),
+            nn.GELU(),
+            nn.Linear(self.runtime_token_dim * 2, self.runtime_token_dim * 2),
+        )
         nn.init.constant_(self.update_gate.bias, -0.5)
 
     def forward(
@@ -78,9 +86,12 @@ class RuntimeMemory(nn.Module):
         anchor_feat_t: torch.Tensor,
         runtime_state_prev: torch.Tensor | None,
         area_token: torch.Tensor,
+        runtime_token_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if runtime_state_prev is None:
             runtime_state_prev = anchor_feat_t.detach()
+        if runtime_token_prev is None:
+            runtime_token_prev = anchor_feat_t.new_zeros(anchor_feat_t.shape[0], self.runtime_token_dim)
         if runtime_state_prev.shape[-2:] != anchor_feat_t.shape[-2:]:
             runtime_state_prev = F.interpolate(runtime_state_prev, size=anchor_feat_t.shape[-2:], mode="bilinear", align_corners=False)
         token = area_token.to(device=anchor_feat_t.device, dtype=anchor_feat_t.dtype).view(anchor_feat_t.shape[0], -1, 1, 1)
@@ -92,14 +103,29 @@ class RuntimeMemory(nn.Module):
         update = torch.sigmoid(self.update_gate(relation))
         candidate = self.candidate(torch.cat([relation, reset * runtime_state_prev], dim=1))
         runtime_state_t = (1.0 - update) * runtime_state_prev + update * candidate
+        pooled = torch.cat(
+            [
+                self.anchor_norm(anchor_feat_t).mean(dim=(2, 3)),
+                self.state_norm(runtime_state_t).mean(dim=(2, 3)),
+                area_token.to(device=anchor_feat_t.device, dtype=anchor_feat_t.dtype),
+                runtime_token_prev.to(device=anchor_feat_t.device, dtype=anchor_feat_t.dtype),
+            ],
+            dim=1,
+        )
+        token_gate_raw, token_delta = self.runtime_token_update(pooled).chunk(2, dim=1)
+        token_gate = torch.sigmoid(token_gate_raw)
+        runtime_token_t = (1.0 - token_gate) * runtime_token_prev + token_gate * token_delta
         aux = {
             "runtime_update_mean": update.detach().mean(dim=(1, 2, 3)),
             "runtime_reset_mean": reset.detach().mean(dim=(1, 2, 3)),
             "runtime_state_norm": runtime_state_t.detach().flatten(1).norm(dim=1),
             "runtime_state_abs_mean": runtime_state_t.detach().abs().mean(dim=(1, 2, 3)),
             "runtime_state_rms": runtime_state_t.detach().pow(2).mean(dim=(1, 2, 3)).sqrt(),
+            "runtime_token_abs_mean": runtime_token_t.detach().abs().mean(dim=1),
+            "runtime_token_rms": runtime_token_t.detach().pow(2).mean(dim=1).sqrt(),
+            "runtime_token_update_mean": token_gate.detach().mean(dim=1),
         }
-        return runtime_state_t, aux
+        return runtime_state_t, runtime_token_t, aux
 
 
 class MemoryODEGenerator(nn.Module):
@@ -117,6 +143,7 @@ class MemoryODEGenerator(nn.Module):
         decay_gate_bias: float = 1.5,
         stage2_bias_eps: float = 0.0,
         token_dim: int = 2,
+        runtime_token_dim: int = 32,
     ) -> None:
         super().__init__()
         self.num_heads = int(num_heads)
@@ -132,6 +159,12 @@ class MemoryODEGenerator(nn.Module):
             nn.Conv2d(token_dim, hidden, kernel_size=1),
             nn.GELU(),
             nn.Conv2d(hidden, hidden, kernel_size=1),
+        )
+        self.runtime_token_proj = nn.Sequential(
+            nn.Linear(int(runtime_token_dim), hidden),
+            nn.LayerNorm(hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
         )
         self.offset_head = nn.Conv2d(hidden, self.num_heads * 2, kernel_size=1)
         self.spatial_selector = nn.Conv2d(hidden, self.num_heads, kernel_size=1)
@@ -159,6 +192,7 @@ class MemoryODEGenerator(nn.Module):
         anchor_feat_t: torch.Tensor,
         runtime_state_t: torch.Tensor,
         area_token: torch.Tensor | None = None,
+        runtime_token_t: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         B, _, H, W = anchor_feat_t.shape
         relation = self.relation(self.anchor_norm(anchor_feat_t), self.state_norm(runtime_state_t))
@@ -166,6 +200,9 @@ class MemoryODEGenerator(nn.Module):
             token = area_token.to(device=anchor_feat_t.device, dtype=anchor_feat_t.dtype).view(B, -1, 1, 1)
             token = token.expand(-1, -1, H, W)
             relation = relation + self.token_proj(token)
+        if runtime_token_t is not None:
+            token_mod = self.runtime_token_proj(runtime_token_t.to(device=anchor_feat_t.device, dtype=anchor_feat_t.dtype))
+            relation = relation + token_mod[:, :, None, None]
         raw_offsets = self.offset_head(relation).view(B, self.num_heads, 2, H, W)
         offset_px = torch.tanh(raw_offsets) * self.max_offset_px
         if self.stage2_bias_eps > 0 and self.num_heads > 1:
@@ -201,6 +238,10 @@ class MemoryODEGenerator(nn.Module):
         entropy = entropy / max(math.log(float(self.num_heads)), 1.0)
         usage = F.one_hot(selector_weights.argmax(dim=1), num_classes=self.num_heads).permute(0, 3, 1, 2).float().mean(dim=(2, 3))
         usage_entropy = -(usage * usage.clamp_min(1.0e-6).log()).sum(dim=1) / max(math.log(float(self.num_heads)), 1.0)
+        global_top1 = torch.softmax(global_logits.flatten(1) * selector_scale, dim=1).argmax(dim=1)
+        global_usage = F.one_hot(global_top1, num_classes=self.num_heads).float()
+        spatial_top1 = selector_weights.argmax(dim=1)
+        agreement = (spatial_top1 == global_top1[:, None, None]).float().mean(dim=(1, 2))
         global_weights = torch.softmax(global_logits.flatten(1) * selector_scale, dim=1)
         global_entropy = -(global_weights * global_weights.clamp_min(1.0e-6).log()).sum(dim=1)
         global_entropy = global_entropy / max(math.log(float(self.num_heads)), 1.0)
@@ -224,6 +265,9 @@ class MemoryODEGenerator(nn.Module):
             "global_selector_entropy": global_entropy.detach(),
             "head_entropy": entropy.detach(),
             "head_usage": usage.detach(),
+            "global_head_usage": global_usage.detach(),
+            "spatial_head_usage": usage.detach(),
+            "global_spatial_agreement": agreement.detach(),
             "head_usage_entropy": usage_entropy.detach(),
         }
 
@@ -266,7 +310,7 @@ class DynamicAnchorFusion(nn.Module):
         self.delta_proj = nn.Conv2d(channels, channels, kernel_size=1)
         self.gate = nn.Conv2d(channels * 3, channels, kernel_size=1)
         self.raw_gamma = nn.Parameter(torch.tensor(_softplus_inverse(gamma_init)))
-        nn.init.normal_(self.delta_proj.weight, mean=0.0, std=1.0e-3)
+        nn.init.normal_(self.delta_proj.weight, mean=0.0, std=3.0e-3)
         nn.init.zeros_(self.delta_proj.bias)
 
     def forward(
@@ -383,6 +427,14 @@ class CARDIA(nn.Module):
         selector_logit_scale_init = float(_cfg_get(method_cfg, "selector_logit_scale_init", 2.0))
         selector_logit_scale_max = float(_cfg_get(method_cfg, "selector_logit_scale_max", 8.0))
         self.stage3_injection_scale = float(_cfg_get(method_cfg, "stage3_injection_scale", 0.5))
+        self.stage3_injection_learnable = bool(_cfg_get(method_cfg, "stage3_injection_learnable", True))
+        self.stage3_injection_max = float(_cfg_get(method_cfg, "stage3_injection_max", 1.0))
+        if self.stage3_injection_learnable:
+            init = min(max(self.stage3_injection_scale / max(self.stage3_injection_max, 1.0e-6), 1.0e-4), 1.0 - 1.0e-4)
+            self.raw_stage3_injection_scale = nn.Parameter(torch.tensor(math.log(init / (1.0 - init))))
+        else:
+            self.register_buffer("raw_stage3_injection_scale", torch.tensor(0.0), persistent=False)
+        runtime_token_dim = int(_cfg_get(method_cfg, "runtime_token_dim", 32))
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -391,8 +443,8 @@ class CARDIA(nn.Module):
             value_dim=self.value_dim,
         )
         self._load_pretrained_anchor_if_requested(method_cfg)
-        self.runtime_memory3 = RuntimeMemory(self.base_dim * 4, hidden_dim)
-        self.runtime_memory2 = RuntimeMemory(self.base_dim * 2, hidden_dim)
+        self.runtime_memory3 = RuntimeMemory(self.base_dim * 4, hidden_dim, runtime_token_dim=runtime_token_dim)
+        self.runtime_memory2 = RuntimeMemory(self.base_dim * 2, hidden_dim, runtime_token_dim=runtime_token_dim)
         self.ode_gen3 = MemoryODEGenerator(
             self.base_dim * 4,
             num_heads=self.stage3_num_heads,
@@ -403,6 +455,7 @@ class CARDIA(nn.Module):
             selector_logit_scale_max=selector_logit_scale_max,
             enable_decay_gate=bool(_cfg_get(method_cfg, "stage3_decay_gate", True)),
             decay_gate_bias=float(_cfg_get(method_cfg, "stage3_decay_gate_bias", 1.5)),
+            runtime_token_dim=runtime_token_dim,
         )
         self.ode_gen2 = MemoryODEGenerator(
             self.base_dim * 2,
@@ -413,6 +466,7 @@ class CARDIA(nn.Module):
             selector_logit_scale_init=selector_logit_scale_init,
             selector_logit_scale_max=selector_logit_scale_max,
             stage2_bias_eps=float(_cfg_get(method_cfg, "stage2_head_bias_eps", 1.0e-3)),
+            runtime_token_dim=runtime_token_dim,
         )
         self.grid_solver = GridODESolver(self.padding_mode, self.align_corners)
         self.fuse3 = DynamicAnchorFusion(self.base_dim * 4, gamma_init=float(_cfg_get(method_cfg, "stage3_gamma_init", 0.03)))
@@ -426,6 +480,11 @@ class CARDIA(nn.Module):
             edge_gate_floor=float(_cfg_get(method_cfg, "boundary_edge_gate_floor", 0.05)),
             edge_gate_bias=float(_cfg_get(method_cfg, "boundary_edge_gate_bias", -1.0)),
         )
+
+    def _stage3_injection_scale(self) -> torch.Tensor:
+        if self.stage3_injection_learnable:
+            return torch.sigmoid(self.raw_stage3_injection_scale) * self.stage3_injection_max
+        return self.raw_stage3_injection_scale.new_tensor(self.stage3_injection_scale)
 
     def _load_pretrained_anchor_if_requested(self, method_cfg) -> None:
         path_value = _cfg_get(method_cfg, "pretrained_unext_path", None)
@@ -479,6 +538,8 @@ class CARDIA(nn.Module):
         max_num_objects = max(max(num_objects), 1)
         runtime_state3 = None
         runtime_state2 = None
+        runtime_token3 = None
+        runtime_token2 = None
         prev_area = torch.zeros(B, 1, device=images.device, dtype=images.dtype)
         out: Dict = {"num_objects": num_objects}
 
@@ -497,15 +558,16 @@ class CARDIA(nn.Module):
             area_token = torch.cat([area, area - prev_area], dim=1)
             prev_area = area.detach()
 
-            runtime_state_t3, mem_aux3 = self.runtime_memory3(anchor_feat_t3, runtime_state3, area_token)
-            ode3 = self.ode_gen3(anchor_feat_t3, runtime_state_t3, area_token)
+            runtime_state_t3, runtime_token_t3, mem_aux3 = self.runtime_memory3(anchor_feat_t3, runtime_state3, area_token, runtime_token3)
+            ode3 = self.ode_gen3(anchor_feat_t3, runtime_state_t3, area_token, runtime_token_t3)
             dynamic_anchor_t3, solved3 = self.grid_solver(anchor_feat_t3, ode3["ode_flow_t"], ode3["selector_weights"])
             final_feature_t3, fuse_aux3 = self.fuse3(anchor_feat_t3, dynamic_anchor_t3, runtime_state_t3)
 
             stage3_anchor_feat_t2 = self.backbone.up1(final_feature_t3, encoded["mid"])
-            anchor_feat_t2 = base_anchor_feat_t2 + self.stage3_injection_scale * (stage3_anchor_feat_t2 - base_anchor_feat_t2)
-            runtime_state_t2, mem_aux2 = self.runtime_memory2(anchor_feat_t2, runtime_state2, area_token)
-            ode2 = self.ode_gen2(anchor_feat_t2, runtime_state_t2, area_token)
+            stage3_injection_scale = self._stage3_injection_scale().to(device=base_anchor_feat_t2.device, dtype=base_anchor_feat_t2.dtype)
+            anchor_feat_t2 = base_anchor_feat_t2 + stage3_injection_scale * (stage3_anchor_feat_t2 - base_anchor_feat_t2)
+            runtime_state_t2, runtime_token_t2, mem_aux2 = self.runtime_memory2(anchor_feat_t2, runtime_state2, area_token, runtime_token2)
+            ode2 = self.ode_gen2(anchor_feat_t2, runtime_state_t2, area_token, runtime_token_t2)
             dynamic_anchor_t2, solved2 = self.grid_solver(anchor_feat_t2, ode2["ode_flow_t"], ode2["selector_weights"])
             final_feature_t2, fuse_aux2 = self.fuse2(anchor_feat_t2, dynamic_anchor_t2, runtime_state_t2)
 
@@ -528,9 +590,13 @@ class CARDIA(nn.Module):
             if self.detach_runtime_state:
                 runtime_state3 = runtime_state_t3.detach()
                 runtime_state2 = runtime_state_t2.detach()
+                runtime_token3 = runtime_token_t3.detach()
+                runtime_token2 = runtime_token_t2.detach()
             else:
                 runtime_state3 = runtime_state_t3
                 runtime_state2 = runtime_state_t2
+                runtime_token3 = runtime_token_t3
+                runtime_token2 = runtime_token_t2
 
             cardia_aux = {
                 "base_object_logits": base_object_logits,
@@ -554,13 +620,20 @@ class CARDIA(nn.Module):
                 "stage3_dynamic_anchor_minus_anchor_abs_mean": fuse_aux3["dynamic_anchor_minus_anchor_abs_mean"],
                 "stage3_fused_minus_anchor_abs_mean": fuse_aux3["fused_minus_anchor_abs_mean"],
                 "stage3_injected_minus_base_abs_mean": (anchor_feat_t2 - base_anchor_feat_t2).detach().abs().mean(dim=(1, 2, 3)),
+                "stage3_injection_scale": stage3_injection_scale.detach().reshape(1),
                 "stage3_runtime_update_mean": mem_aux3["runtime_update_mean"],
                 "stage3_runtime_reset_mean": mem_aux3["runtime_reset_mean"],
                 "stage3_runtime_state_norm": mem_aux3["runtime_state_norm"],
                 "stage3_runtime_state_abs_mean": mem_aux3["runtime_state_abs_mean"],
                 "stage3_runtime_state_rms": mem_aux3["runtime_state_rms"],
+                "stage3_runtime_token_abs_mean": mem_aux3["runtime_token_abs_mean"],
+                "stage3_runtime_token_rms": mem_aux3["runtime_token_rms"],
+                "stage3_runtime_token_update_mean": mem_aux3["runtime_token_update_mean"],
                 "stage3_head_usage": ode3["head_usage"],
                 "stage3_global_selector_entropy": ode3["global_selector_entropy"],
+                "stage3_global_head_usage": ode3["global_head_usage"],
+                "stage3_spatial_head_usage": ode3["spatial_head_usage"],
+                "stage3_global_spatial_agreement": ode3["global_spatial_agreement"],
                 "stage2_flow_smooth": ode2["flow_smooth"],
                 "stage2_offset_px_mean": ode2["offset_px_mean"],
                 "stage2_offset_px_p95": ode2["offset_px_p95"],
@@ -573,12 +646,18 @@ class CARDIA(nn.Module):
                 "stage2_global_selector_entropy": ode2["global_selector_entropy"],
                 "stage2_head_entropy": ode2["head_entropy"],
                 "stage2_head_usage": ode2["head_usage"],
+                "stage2_global_head_usage": ode2["global_head_usage"],
+                "stage2_spatial_head_usage": ode2["spatial_head_usage"],
+                "stage2_global_spatial_agreement": ode2["global_spatial_agreement"],
                 "stage2_head_usage_entropy": ode2["head_usage_entropy"],
                 "stage2_runtime_update_mean": mem_aux2["runtime_update_mean"],
                 "stage2_runtime_reset_mean": mem_aux2["runtime_reset_mean"],
                 "stage2_runtime_state_norm": mem_aux2["runtime_state_norm"],
                 "stage2_runtime_state_abs_mean": mem_aux2["runtime_state_abs_mean"],
                 "stage2_runtime_state_rms": mem_aux2["runtime_state_rms"],
+                "stage2_runtime_token_abs_mean": mem_aux2["runtime_token_abs_mean"],
+                "stage2_runtime_token_rms": mem_aux2["runtime_token_rms"],
+                "stage2_runtime_token_update_mean": mem_aux2["runtime_token_update_mean"],
                 "boundary_gamma": boundary_aux["boundary_gamma"],
                 "boundary_edge_gate_mean": boundary_aux["boundary_edge_gate_mean"],
                 "boundary_edge_effective_mean": boundary_aux["boundary_edge_effective_mean"],

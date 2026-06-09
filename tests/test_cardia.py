@@ -3,6 +3,7 @@ from __future__ import annotations
 from omegaconf import OmegaConf
 import torch
 
+from losses import LossComputer
 from model.cardia import CARDIA, GridODESolver
 from models.registry import MODEL_REGISTRY
 
@@ -26,7 +27,24 @@ def _cfg():
                 "align_corners": False,
                 "detach_runtime_state": True,
                 "stage3_decay_gate": True,
+                "stage3_injection_learnable": True,
+                "runtime_token_dim": 8,
+                "proposal_loss": "soft_oracle",
+                "lambda_cardia_flow_smooth": 0.002,
+                "lambda_cardia_stage3_flow_smooth": 0.003,
+                "lambda_cardia_stage2_flow_smooth": 0.0015,
             },
+        }
+    )
+
+
+def _stage_cfg():
+    return OmegaConf.create(
+        {
+            "point_supervision": False,
+            "train_num_points": 32,
+            "oversample_ratio": 3.0,
+            "importance_sample_ratio": 0.75,
         }
     )
 
@@ -65,8 +83,13 @@ def test_cardia_forward_contract_and_diagnostics():
     assert aux["stage3_dynamic_anchor_minus_anchor_abs_mean"].shape == (2,)
     assert aux["stage3_runtime_state_abs_mean"].shape == (2,)
     assert aux["stage3_runtime_state_rms"].shape == (2,)
+    assert aux["stage3_runtime_token_abs_mean"].shape == (2,)
+    assert aux["stage3_injection_scale"].shape == (1,)
     assert aux["stage2_dynamic_anchor_minus_anchor_abs_mean"].shape == (2,)
     assert aux["stage2_head_usage"].shape == (2, 3)
+    assert aux["stage2_global_head_usage"].shape == (2, 3)
+    assert aux["stage2_spatial_head_usage"].shape == (2, 3)
+    assert aux["stage2_global_spatial_agreement"].shape == (2,)
     assert aux["boundary_edge_gate"].shape == (2, 1, 64, 64)
     assert torch.allclose(torch.sigmoid(aux["boundary_logits"]), aux["boundary_edge_gate"], atol=1.0e-6)
     assert aux["boundary_edge_effective_mean"].shape == (2,)
@@ -95,8 +118,42 @@ def test_cardia_stage3_dynamic_path_has_gradient_to_final_logits():
     assert float(grad.abs().sum().item()) > 0.0
 
 
+def test_cardia_final_logits_gradients_reach_stage2_ode_and_boundary():
+    model = CARDIA(_cfg())
+    data = {
+        "rgb": torch.rand(1, 2, 1, 64, 64),
+        "info": {"num_objects": torch.ones(1, dtype=torch.long)},
+    }
+    out = model(data)
+    loss = out["logits_1"][:, 1].mean()
+    loss.backward()
+    for param in (
+        model.ode_gen2.offset_head.weight,
+        model.boundary_fusion.edge_gate_head.weight,
+        model.boundary_fusion.delta_proj.weight,
+    ):
+        assert param.grad is not None
+        assert float(param.grad.abs().sum().item()) > 0.0
+
+
 def test_cardia_dynamic_and_boundary_delta_proj_are_small_nonzero_init():
     model = CARDIA(_cfg())
     assert float(model.fuse3.delta_proj.weight.abs().sum().item()) > 0.0
     assert float(model.fuse2.delta_proj.weight.abs().sum().item()) > 0.0
     assert float(model.boundary_fusion.delta_proj.weight.abs().sum().item()) > 0.0
+
+
+def test_cardia_flow_smooth_raw_and_weighted_loss_fields_exist():
+    model = CARDIA(_cfg())
+    data = {
+        "rgb": torch.rand(1, 2, 1, 64, 64),
+        "cls_gt": (torch.rand(1, 2, 1, 64, 64) > 0.6).long(),
+        "info": {"num_objects": torch.ones(1, dtype=torch.long)},
+    }
+    data.update(model({"rgb": data["rgb"], "info": data["info"]}))
+    losses = LossComputer(OmegaConf.create({"model": _cfg()}), _stage_cfg()).compute(data, [1])
+    assert "raw_cardia_stage2_flow_smooth" in losses
+    assert "raw_cardia_stage3_flow_smooth" in losses
+    assert "weighted_cardia_stage2_flow_smooth" in losses
+    assert "weighted_cardia_stage3_flow_smooth" in losses
+    assert "aux_cardia_flow_smooth" in losses

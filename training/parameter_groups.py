@@ -21,6 +21,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
     gar_selector_lr_mult = float(stage_cfg.get("cardia_selector_lr_mult", stage_cfg.get("gar_selector_lr_mult", 2.0)))
     gar_boundary_lr_mult = float(stage_cfg.get("cardia_boundary_lr_mult", stage_cfg.get("gar_boundary_lr_mult", 2.0)))
     gar_proposal_lr_mult = float(stage_cfg.get("cardia_proposal_lr_mult", stage_cfg.get("gar_proposal_lr_mult", 2.0)))
+    cardia_ode_control_lr_mult = float(stage_cfg.get("cardia_ode_control_lr_mult", 2.0))
 
     if anchor_ode_lr_ratio is not None or functional_anchor_lr_ratio is not None or cardia_lr_ratio is not None:
         if cardia_lr_ratio is not None:
@@ -41,6 +42,8 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
         gar_selector_params = []
         gar_boundary_params = []
         gar_proposal_params = []
+        cardia_ode_control_params = []
+        cardia_ode_control_no_decay_params = []
         embed_params = []
         other_params = []
         embedding_names = ['summary_pos', 'query_init', 'query_emb', 'obj_pe']
@@ -53,6 +56,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 or 'norm.' in param_name.lower()
                 or 'raw_gamma' in param_name
                 or 'raw_selector_logit_scale' in param_name
+                or 'raw_stage3_injection_scale' in param_name
             )
 
         memo = set()
@@ -71,6 +75,19 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 gar_offset_params.append(param)
                 if print_log:
                     log.info(f'{name} counted as a GAR/CARDIA offset parameter.')
+            elif name.startswith((
+                'ode_gen2.write_head.',
+                'ode_gen3.write_head.',
+                'ode_gen2.decay_head.',
+                'ode_gen3.decay_head.',
+                'ode_gen2.token_proj.',
+                'ode_gen3.token_proj.',
+                'ode_gen2.runtime_token_proj.',
+                'ode_gen3.runtime_token_proj.',
+            )):
+                (cardia_ode_control_no_decay_params if no_decay_name(name) else cardia_ode_control_params).append(param)
+                if print_log:
+                    log.info(f'{name} counted as a CARDIA ODE-control parameter.')
             elif name.startswith((
                 'gar_stage2.spatial_selector.',
                 'gar_stage2.global_selector.',
@@ -108,6 +125,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 if print_log:
                     log.info(f'{name} counted as a functional_anchor residual head parameter.')
             elif name.startswith((
+                'raw_stage3_injection_scale',
                 'state_encoder.',
                 'ode_bank.',
                 'affine_regressor.',
@@ -193,6 +211,18 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'lr': base_lr * method_lr_ratio * gar_proposal_lr_mult,
                 'weight_decay': weight_decay,
                 'name': 'cardia_gar_proposal_head',
+            },
+            {
+                'params': cardia_ode_control_params,
+                'lr': base_lr * method_lr_ratio * cardia_ode_control_lr_mult,
+                'weight_decay': weight_decay,
+                'name': 'cardia_ode_control',
+            },
+            {
+                'params': cardia_ode_control_no_decay_params,
+                'lr': base_lr * method_lr_ratio * cardia_ode_control_lr_mult,
+                'weight_decay': 0.0,
+                'name': 'cardia_ode_control_no_decay',
             },
             {
                 'params': residual_params,

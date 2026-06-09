@@ -19,6 +19,7 @@ model:
     base_dim: 120
     value_dim: 256
     hidden_dim: 128
+    runtime_token_dim: 32
     stage3_num_heads: 1
     stage2_num_heads: 3
     stage3_max_offset_px: 1.5
@@ -32,6 +33,8 @@ model:
     selector_logit_scale_init: 2.0
     selector_logit_scale_max: 8.0
     stage3_injection_scale: 0.5
+    stage3_injection_learnable: true
+    stage3_injection_max: 1.0
     stage3_gamma_init: 0.03
     stage2_gamma_init: 0.05
     boundary_gamma_init: 0.03
@@ -40,6 +43,7 @@ model:
     stage2_head_bias_eps: 0.001
     boundary_edge_gate_floor: 0.05
     boundary_edge_gate_bias: -1.0
+    boundary_dilation_kernel: 5
     require_pretrained_unext: false
     pretrained_unext_path: null
     pretrained_unext_strict_backbone: false
@@ -53,7 +57,8 @@ model:
     lambda_cardia_flow_smooth: 0.002
     lambda_cardia_stage3_flow_smooth: 0.003
     lambda_cardia_stage2_flow_smooth: 0.0015
+    flow_smooth_warmup_iters: 500
     lambda_cardia_boundary_aux: 0.02
     selector_temperature: 0.1
     proposal_softmin_temperature: 0.3
-    proposal_loss: "softmin"
+    proposal_loss: "soft_oracle"

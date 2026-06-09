@@ -167,7 +167,11 @@ class LossComputer(nn.Module):
         self.lambda_cardia_stage2_flow_smooth = float(
             cardia_cfg.get("lambda_cardia_stage2_flow_smooth", self.lambda_cardia_flow_smooth)
         )
+        self.cardia_flow_smooth_warmup_iters = int(cardia_cfg.get("flow_smooth_warmup_iters", 500))
         self.lambda_cardia_boundary_aux = float(cardia_cfg.get("lambda_cardia_boundary_aux", 0.02))
+        self.cardia_boundary_dilation_kernel = int(cardia_cfg.get("boundary_dilation_kernel", 5))
+        if self.cardia_boundary_dilation_kernel < 3 or self.cardia_boundary_dilation_kernel % 2 == 0:
+            self.cardia_boundary_dilation_kernel = 5
         self.cardia_selector_temperature = float(cardia_cfg.get("selector_temperature", 0.1))
         self.cardia_proposal_softmin_temperature = float(cardia_cfg.get("proposal_softmin_temperature", 0.3))
         self.cardia_proposal_loss = str(cardia_cfg.get("proposal_loss", "softmin")).lower()
@@ -630,6 +634,9 @@ class LossComputer(nn.Module):
             if current_iter < self.cardia_oracle_decay_start
             else self.cardia_oracle_after_weight
         )
+        flow_smooth_scale = 1.0
+        if self.cardia_flow_smooth_warmup_iters > 0:
+            flow_smooth_scale = min(max(float(current_iter) / float(self.cardia_flow_smooth_warmup_iters), 0.0), 1.0)
         base_terms = []
         proposal_terms = []
         selector_terms = []
@@ -664,7 +671,7 @@ class LossComputer(nn.Module):
                         head_losses.append(ce + dice)
                     if head_losses and lambda_oracle > 0:
                         stacked = torch.stack(head_losses)
-                        if self.cardia_proposal_loss == "softmin":
+                        if self.cardia_proposal_loss in {"softmin", "soft_oracle"}:
                             tau = max(self.cardia_proposal_softmin_temperature, 1.0e-4)
                             weights = torch.softmax(-stacked.detach() / tau, dim=0)
                             proposal_terms.append((weights * stacked).sum())
@@ -679,13 +686,13 @@ class LossComputer(nn.Module):
                             selector_terms.append(F.kl_div(F.log_softmax(logits, dim=-1), target, reduction="batchmean"))
 
                 for src, weight in (
-                    ("stage2_flow_smooth", self.lambda_cardia_stage2_flow_smooth),
-                    ("stage3_flow_smooth", self.lambda_cardia_stage3_flow_smooth),
+                    ("stage2_flow_smooth", self.lambda_cardia_stage2_flow_smooth * flow_smooth_scale),
+                    ("stage3_flow_smooth", self.lambda_cardia_stage3_flow_smooth * flow_smooth_scale),
                 ):
                     value = aux.get(src)
-                    if torch.is_tensor(value) and weight > 0:
+                    if torch.is_tensor(value):
                         item = value[bi : bi + 1] if value.dim() > 0 and value.shape[0] > bi else value
-                        smooth_terms.append(item.float().mean() * weight)
+                        smooth_terms.append((src, item.float().mean(), weight))
 
                 boundary_logits = aux.get("boundary_logits")
                 if torch.is_tensor(boundary_logits) and self.lambda_cardia_boundary_aux > 0:
@@ -694,8 +701,10 @@ class LossComputer(nn.Module):
                         gt_fg = gt_fg.unsqueeze(1)
                     if gt_fg.shape[-2:] != boundary_logits.shape[-2:]:
                         gt_fg = F.interpolate(gt_fg, size=boundary_logits.shape[-2:], mode="nearest")
-                    dil = F.max_pool2d(gt_fg, kernel_size=3, stride=1, padding=1)
-                    ero = 1.0 - F.max_pool2d(1.0 - gt_fg, kernel_size=3, stride=1, padding=1)
+                    k = self.cardia_boundary_dilation_kernel
+                    p = k // 2
+                    dil = F.max_pool2d(gt_fg, kernel_size=k, stride=1, padding=p)
+                    ero = 1.0 - F.max_pool2d(1.0 - gt_fg, kernel_size=k, stride=1, padding=p)
                     boundary = (dil - ero).clamp(0.0, 1.0)
                     pred = boundary_logits[bi : bi + 1]
                     boundary_terms.append(F.binary_cross_entropy_with_logits(pred.float(), boundary.to(device=pred.device, dtype=pred.dtype).float()))
@@ -714,9 +723,24 @@ class LossComputer(nn.Module):
             out["raw_cardia_selector"] = raw.detach()
             out["aux_cardia_selector"] = raw * self.lambda_cardia_selector
         if smooth_terms:
-            raw = torch.stack(smooth_terms).mean()
-            out["raw_cardia_flow_smooth"] = raw.detach()
-            out["aux_cardia_flow_smooth"] = raw
+            by_stage = {}
+            for src, raw_value, weight in smooth_terms:
+                by_stage.setdefault(src, []).append((raw_value, weight))
+            weighted_values = []
+            raw_values = []
+            for src, terms in by_stage.items():
+                raw_stage = torch.stack([term[0] for term in terms]).mean()
+                weight = float(terms[0][1])
+                weighted_stage = raw_stage * weight
+                stage_name = "stage2" if src.startswith("stage2") else "stage3"
+                out[f"raw_cardia_{stage_name}_flow_smooth"] = raw_stage.detach()
+                out[f"weighted_cardia_{stage_name}_flow_smooth"] = weighted_stage.detach()
+                raw_values.append(raw_stage)
+                weighted_values.append(weighted_stage)
+            raw_total = torch.stack(raw_values).mean()
+            weighted_total = torch.stack(weighted_values).mean()
+            out["raw_cardia_flow_smooth"] = raw_total.detach()
+            out["aux_cardia_flow_smooth"] = weighted_total
         if boundary_terms:
             raw = torch.stack(boundary_terms).mean()
             out["raw_cardia_boundary_aux"] = raw.detach()
