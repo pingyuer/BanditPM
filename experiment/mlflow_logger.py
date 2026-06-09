@@ -265,6 +265,12 @@ class MLflowLogger:
                 out[f"loss/raw/gar/{key_str.removeprefix('raw_gar_')}"] = value
             elif key_str.startswith("lambda_gar_"):
                 out[f"lambda/gar/{key_str.removeprefix('lambda_gar_')}"] = value
+            elif key_str.startswith("aux_cardia_"):
+                out[f"loss/weighted/cardia/{key_str.removeprefix('aux_cardia_')}"] = value
+            elif key_str.startswith("raw_cardia_"):
+                out[f"loss/raw/cardia/{key_str.removeprefix('raw_cardia_')}"] = value
+            elif key_str.startswith("lambda_cardia_"):
+                out[f"lambda/cardia/{key_str.removeprefix('lambda_cardia_')}"] = value
         self.log_metrics(out, step=step, prefix="train")
 
     def log_eval_summary(self, metrics: Mapping[str, Any], *, mode: str, step: int | None = None) -> None:
@@ -282,6 +288,9 @@ class MLflowLogger:
         gar = self._gar_metrics(metrics)
         if gar:
             self.log_metrics(gar, step=step, prefix=f"{mode}/gar")
+        cardia = self._cardia_metrics(metrics)
+        if cardia:
+            self.log_metrics(cardia, step=step, prefix=f"{mode}/cardia")
 
     def log_best(self, metrics: Mapping[str, Any], *, epoch: int, iteration: int) -> None:
         best = {
@@ -347,12 +356,77 @@ class MLflowLogger:
     def log_gar_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
         self.log_metrics(self._gar_metrics(metrics), step=step, prefix="gar")
 
+    def log_cardia_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
+        self.log_metrics(self._cardia_metrics(metrics), step=step, prefix="cardia")
+
+    @classmethod
+    def _cardia_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:
+        aliases = {
+            "base_dice": ("base_dice", "cardia/base_dice"),
+            "proposal_oracle": ("proposal_oracle_dice", "cardia/proposal_oracle"),
+            "proposal_top1": ("proposal_top1_dice", "cardia/proposal_top1"),
+            "proposal_oracle_minus_top1": ("proposal_oracle_minus_top1", "cardia/proposal_oracle_minus_top1"),
+            "proposal_top1_minus_base": ("proposal_top1_minus_base", "cardia/proposal_top1_minus_base"),
+            "selector_oracle_alignment": ("selector_oracle_alignment", "cardia/selector_oracle_alignment"),
+            "final_dice": ("final_dice", "dice_frame_mean", "dice", "cardia/final_dice"),
+            "boundary_dice": ("boundary_dice", "boundary_dice_frame_mean", "cardia/boundary_dice"),
+            "final_minus_base": ("final_minus_base_dice", "final_minus_base", "cardia/final_minus_base"),
+            "stage3/flow_smooth": ("stage3_flow_smooth", "cardia/stage3/flow_smooth"),
+            "stage3/write_mean": ("stage3_write_mean", "cardia/stage3/write_mean"),
+            "stage3/decay_mean": ("stage3_decay_mean", "cardia/stage3/decay_mean"),
+            "stage3/gamma": ("stage3_gamma", "cardia/stage3/gamma"),
+            "stage3/runtime_update_mean": ("stage3_runtime_update_mean", "cardia/stage3/runtime_update_mean"),
+            "stage3/runtime_state_norm": ("stage3_runtime_state_norm", "cardia/stage3/runtime_state_norm"),
+            "stage2/flow_smooth": ("stage2_flow_smooth", "cardia/stage2/flow_smooth"),
+            "stage2/write_mean": ("stage2_write_mean", "cardia/stage2/write_mean"),
+            "stage2/decay_mean": ("stage2_decay_mean", "cardia/stage2/decay_mean"),
+            "stage2/gamma": ("stage2_gamma", "cardia/stage2/gamma"),
+            "stage2/global_selector_entropy": ("stage2_global_selector_entropy", "cardia/stage2/global_selector_entropy"),
+            "stage2/head_usage_entropy": ("stage2_head_usage_entropy", "cardia/stage2/head_usage_entropy"),
+            "stage2/selector_logit_scale": ("stage2_selector_logit_scale", "cardia/stage2/selector_logit_scale"),
+            "stage2/runtime_update_mean": ("stage2_runtime_update_mean", "cardia/stage2/runtime_update_mean"),
+            "solver/offset_px_mean": ("solver_offset_px_mean", "cardia/solver/offset_px_mean"),
+            "solver/offset_px_p95": ("solver_offset_px_p95", "cardia/solver/offset_px_p95"),
+            "boundary/edge_gate": ("boundary_edge_gate_mean", "cardia/boundary/edge_gate"),
+            "boundary/edge_gate_p05": ("boundary_edge_gate_p05", "cardia/boundary/edge_gate_p05"),
+            "boundary/edge_gate_p95": ("boundary_edge_gate_p95", "cardia/boundary/edge_gate_p95"),
+            "boundary/channel_gate_mean": ("boundary_channel_gate_mean", "cardia/boundary/channel_gate_mean"),
+            "boundary/delta_abs_mean": ("boundary_delta_abs_mean", "cardia/boundary/delta_abs_mean"),
+            "boundary/inside_response": ("boundary_inside_response", "cardia/boundary/inside_response"),
+            "boundary/outside_response": ("boundary_outside_response", "cardia/boundary/outside_response"),
+        }
+        out = {}
+        for dst, keys in aliases.items():
+            for key in keys:
+                if key in metrics:
+                    out[dst] = metrics[key]
+                    break
+        for stage in ("stage2", "stage3"):
+            for idx in range(16):
+                for key in (f"{stage}_head_usage_{idx}", f"cardia/{stage}/head_usage_{idx}"):
+                    if key in metrics:
+                        out[f"{stage}/head_usage_{idx}"] = metrics[key]
+                        break
+        if "final_minus_base" not in out and "final_dice" in out and "base_dice" in out:
+            final = cls._to_float(out["final_dice"])
+            base = cls._to_float(out["base_dice"])
+            if final is not None and base is not None:
+                out["final_minus_base"] = final - base
+        if not any(str(key).startswith("cardia/") for key in metrics) and not any(
+            key in metrics for key in ("stage2_flow_smooth", "proposal_oracle_dice")
+        ):
+            return {}
+        return out
+
     @classmethod
     def _gar_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:
         aliases = {
             "base_dice": ("base_dice", "gar/base_dice"),
             "proposal_oracle_dice": ("proposal_oracle_dice", "gar/proposal_oracle_dice"),
             "proposal_top1_dice": ("proposal_top1_dice", "gar/proposal_top1_dice"),
+            "proposal_oracle_minus_top1": ("proposal_oracle_minus_top1", "gar/proposal_oracle_minus_top1"),
+            "proposal_top1_minus_base": ("proposal_top1_minus_base", "gar/proposal_top1_minus_base"),
+            "selector_oracle_alignment": ("selector_oracle_alignment", "gar/selector_oracle_alignment"),
             "final_dice": ("final_dice", "dice_frame_mean", "dice", "gar/final_dice"),
             "boundary_dice": ("boundary_dice", "boundary_dice_frame_mean", "gar/boundary_dice"),
             "final_minus_base_dice": ("final_minus_base_dice", "final_minus_base", "gar/final_minus_base_dice"),
@@ -364,8 +438,11 @@ class MLflowLogger:
             "stage3_write_mean": ("stage3_write_mean", "gar/stage3_write_mean"),
             "stage3_write_p05": ("stage3_write_p05", "gar/stage3_write_p05"),
             "stage3_write_p95": ("stage3_write_p95", "gar/stage3_write_p95"),
+            "stage3_decay_mean": ("stage3_decay_mean", "gar/stage3_decay_mean"),
             "stage3_gamma": ("stage3_gamma", "gar/stage3_gamma"),
+            "stage3_selector_logit_scale": ("stage3_selector_logit_scale", "gar/stage3_selector_logit_scale"),
             "stage3_head_entropy": ("stage3_head_entropy", "gar/stage3_head_entropy"),
+            "stage3_global_selector_entropy": ("stage3_global_selector_entropy", "gar/stage3_global_selector_entropy"),
             "stage3_head_usage_entropy": ("stage3_head_usage_entropy", "gar/stage3_head_usage_entropy"),
             "stage3_head_usage_max": ("stage3_head_usage_max", "gar/stage3_head_usage_max"),
             "stage3_head_usage_min": ("stage3_head_usage_min", "gar/stage3_head_usage_min"),
@@ -376,15 +453,25 @@ class MLflowLogger:
             "stage2_write_mean": ("stage2_write_mean", "gar/stage2_write_mean"),
             "stage2_write_p05": ("stage2_write_p05", "gar/stage2_write_p05"),
             "stage2_write_p95": ("stage2_write_p95", "gar/stage2_write_p95"),
+            "stage2_decay_mean": ("stage2_decay_mean", "gar/stage2_decay_mean"),
             "stage2_gamma": ("stage2_gamma", "gar/stage2_gamma"),
+            "stage2_selector_logit_scale": ("stage2_selector_logit_scale", "gar/stage2_selector_logit_scale"),
             "stage2_head_entropy": ("stage2_head_entropy", "gar/stage2_head_entropy"),
+            "stage2_global_selector_entropy": ("stage2_global_selector_entropy", "gar/stage2_global_selector_entropy"),
             "stage2_head_usage_entropy": ("stage2_head_usage_entropy", "gar/stage2_head_usage_entropy"),
             "stage2_head_usage_max": ("stage2_head_usage_max", "gar/stage2_head_usage_max"),
             "stage2_head_usage_min": ("stage2_head_usage_min", "gar/stage2_head_usage_min"),
             "stage2_head_max_weight": ("stage2_head_max_weight", "gar/stage2_head_max_weight"),
             "boundary_gamma": ("boundary_gamma", "gar/boundary_gamma"),
             "boundary_gate_mean": ("boundary_gate_mean", "gar/boundary_gate_mean"),
+            "boundary_edge_gate_mean": ("boundary_edge_gate_mean", "gar/boundary_edge_gate_mean"),
+            "boundary_edge_gate_p05": ("boundary_edge_gate_p05", "gar/boundary_edge_gate_p05"),
+            "boundary_edge_gate_p95": ("boundary_edge_gate_p95", "gar/boundary_edge_gate_p95"),
+            "boundary_channel_gate_mean": ("boundary_channel_gate_mean", "gar/boundary_channel_gate_mean"),
+            "boundary_inside_response": ("boundary_inside_response", "gar/boundary_inside_response"),
+            "boundary_outside_response": ("boundary_outside_response", "gar/boundary_outside_response"),
             "boundary_delta_abs_mean": ("boundary_delta_abs_mean", "gar/boundary_delta_abs_mean"),
+            "boundary_raw_delta_abs_mean": ("boundary_raw_delta_abs_mean", "gar/boundary_raw_delta_abs_mean"),
         }
         out = {}
         for dst, keys in aliases.items():

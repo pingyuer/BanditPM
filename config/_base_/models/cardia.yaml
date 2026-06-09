@@ -1,8 +1,8 @@
-# UNeXt GridAnchorRouter
-model_name: "UNeXtGAR"
+# CARDIA: Cardiac Anchor-guided Runtime Deformation Integration Architecture
+model_name: "CARDIA"
 
 model:
-  name: "unext_gar"
+  name: "cardia"
   allow_oracle_init_when_requested: false
   aux_loss:
     sensory:
@@ -13,22 +13,20 @@ model:
     type: none
     bpm:
       ENABLE: false
-  unext_gar:
+  cardia:
     in_channels: 1
     num_classes: 2
     base_dim: 120
     value_dim: 256
-    num_heads: 4
+    hidden_dim: 128
     stage3_num_heads: 1
-    stage2_num_heads: 4
-    hidden_dim: null
-    stage3_max_offset_px: 2.0
+    stage2_num_heads: 3
+    stage3_max_offset_px: 1.5
     stage2_max_offset_px: 3.0
     padding_mode: "border"
     align_corners: false
-    detach_state: true
+    detach_runtime_state: true
     write_gate_bias: -0.5
-    relation_norm: "group"
     selector_logit_scale_init: 2.0
     selector_logit_scale_max: 8.0
     stage3_gamma_init: 0.03
@@ -36,18 +34,19 @@ model:
     boundary_gamma_init: 0.03
     stage3_decay_gate: true
     stage3_decay_gate_bias: 1.5
+    stage2_head_bias_eps: 0.001
     require_pretrained_unext: false
     pretrained_unext_path: null
     pretrained_unext_strict_backbone: false
-    lambda_gar_base: 0.1
-    lambda_gar_base_after: 0.05
+    lambda_cardia_base: 0.1
+    lambda_cardia_base_after: 0.05
     base_aux_after_iter: 800
-    lambda_gar_proposal_oracle: 0.2
-    lambda_gar_proposal_oracle_after: 0.1
+    lambda_cardia_proposal_oracle: 0.2
+    lambda_cardia_proposal_oracle_after: 0.1
     oracle_decay_start_iter: 2500
-    lambda_gar_selector: 0.1
-    lambda_gar_flow_smooth: 0.005
-    lambda_gar_boundary_aux: 0.02
+    lambda_cardia_selector: 0.1
+    lambda_cardia_flow_smooth: 0.005
+    lambda_cardia_boundary_aux: 0.02
     selector_temperature: 0.1
     proposal_softmin_temperature: 0.3
     proposal_loss: "softmin"

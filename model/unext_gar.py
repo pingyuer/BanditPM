@@ -30,6 +30,8 @@ class UNeXtGAR(nn.Module):
         self.base_dim = int(_cfg_get(method_cfg, "base_dim", 32))
         self.value_dim = int(_cfg_get(method_cfg, "value_dim", 128))
         self.num_heads = int(_cfg_get(method_cfg, "num_heads", 4))
+        self.stage3_num_heads = int(_cfg_get(method_cfg, "stage3_num_heads", _cfg_get(method_cfg, "stage3_heads", 1)))
+        self.stage2_num_heads = int(_cfg_get(method_cfg, "stage2_num_heads", _cfg_get(method_cfg, "stage2_heads", self.num_heads)))
         self.stage3_max_offset_px = float(_cfg_get(method_cfg, "stage3_max_offset_px", _cfg_get(method_cfg, "max_offset_px", 2.0)))
         self.stage2_max_offset_px = float(_cfg_get(method_cfg, "stage2_max_offset_px", _cfg_get(method_cfg, "max_offset_px", 3.0)))
         self.padding_mode = str(_cfg_get(method_cfg, "padding_mode", "border"))
@@ -41,6 +43,14 @@ class UNeXtGAR(nn.Module):
         hidden_dim = _cfg_get(method_cfg, "hidden_dim", None)
         hidden_dim = None if hidden_dim in (None, "null") else int(hidden_dim)
         write_gate_bias = float(_cfg_get(method_cfg, "write_gate_bias", -0.5))
+        relation_norm = str(_cfg_get(method_cfg, "relation_norm", "group"))
+        selector_logit_scale_init = float(_cfg_get(method_cfg, "selector_logit_scale_init", 2.0))
+        selector_logit_scale_max = float(_cfg_get(method_cfg, "selector_logit_scale_max", 8.0))
+        stage3_gamma_init = float(_cfg_get(method_cfg, "stage3_gamma_init", 0.03))
+        stage2_gamma_init = float(_cfg_get(method_cfg, "stage2_gamma_init", 0.05))
+        boundary_gamma_init = float(_cfg_get(method_cfg, "boundary_gamma_init", 0.03))
+        stage3_decay_gate = bool(_cfg_get(method_cfg, "stage3_decay_gate", True))
+        stage3_decay_gate_bias = float(_cfg_get(method_cfg, "stage3_decay_gate_bias", 1.5))
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -52,24 +62,37 @@ class UNeXtGAR(nn.Module):
 
         self.gar_stage3 = GridAnchorRouter(
             self.base_dim * 4,
-            num_heads=self.num_heads,
+            num_heads=self.stage3_num_heads,
             hidden_dim=hidden_dim,
             max_offset_px=self.stage3_max_offset_px,
             padding_mode=self.padding_mode,
             align_corners=self.align_corners,
             write_gate_bias=write_gate_bias,
+            gamma_init=stage3_gamma_init,
+            relation_norm=relation_norm,
+            selector_logit_scale_init=selector_logit_scale_init,
+            selector_logit_scale_max=selector_logit_scale_max,
+            use_global_selector=False,
+            enable_decay_gate=stage3_decay_gate,
+            decay_gate_bias=stage3_decay_gate_bias,
         )
         self.gar_stage2 = GridAnchorRouter(
             self.base_dim * 2,
-            num_heads=self.num_heads,
+            num_heads=self.stage2_num_heads,
             hidden_dim=hidden_dim,
             max_offset_px=self.stage2_max_offset_px,
             padding_mode=self.padding_mode,
             align_corners=self.align_corners,
             write_gate_bias=write_gate_bias,
+            gamma_init=stage2_gamma_init,
+            relation_norm=relation_norm,
+            selector_logit_scale_init=selector_logit_scale_init,
+            selector_logit_scale_max=selector_logit_scale_max,
+            use_global_selector=True,
+            enable_decay_gate=False,
         )
         self.proposal_head = nn.Conv2d(self.base_dim * 2, 1, kernel_size=1)
-        self.boundary_fusion = BoundaryAwareFusion(self.base_dim, self.base_dim)
+        self.boundary_fusion = BoundaryAwareFusion(self.base_dim, self.base_dim, gamma_init=boundary_gamma_init)
 
     def _load_pretrained_unext_if_requested(self) -> None:
         path_value = self.pretrained_unext_path
@@ -151,7 +174,7 @@ class UNeXtGAR(nn.Module):
 
             proposal_logits = self._proposal_logits(aux_mid["warped_features"], image.shape[-2:])
             proposal_logits = proposal_logits[:, None].expand(-1, max_num_objects, -1, -1, -1)
-            head_weights = aux_mid["head_weights"].mean(dim=(2, 3))[:, None].expand(-1, max_num_objects, -1)
+            head_weights = torch.softmax(aux_mid["selector_logits"], dim=-1)[:, None].expand(-1, max_num_objects, -1)
             top_idx = head_weights[:, :1].argmax(dim=-1)
             top1 = proposal_logits[:, :1].gather(
                 2,
@@ -173,14 +196,18 @@ class UNeXtGAR(nn.Module):
                 "head_weights": head_weights,
                 "selector_logits": aux_mid["selector_logits"][:, None].expand(-1, max_num_objects, -1),
                 "boundary_logits": aux_boundary["boundary_logits"],
+                "boundary_edge_gate": aux_boundary["boundary_edge_gate"],
                 "stage3_flow_smooth": aux_high["flow_smooth"],
                 "stage3_offset_px_mean": aux_high["offset_px_mean"],
                 "stage3_offset_px_p95": aux_high["offset_px_p95"],
                 "stage3_write_mean": aux_high["write_mean"],
                 "stage3_write_p05": aux_high["write_p05"],
                 "stage3_write_p95": aux_high["write_p95"],
+                "stage3_decay_mean": aux_high["decay_mean"],
                 "stage3_gamma": aux_high["gamma"],
+                "stage3_selector_logit_scale": aux_high["selector_logit_scale"],
                 "stage3_head_entropy": aux_high["head_entropy"],
+                "stage3_global_selector_entropy": aux_high["global_selector_entropy"],
                 "stage3_head_usage": aux_high["head_usage"],
                 "stage3_head_usage_entropy": aux_high["head_usage_entropy"],
                 "stage3_head_usage_max": aux_high["head_usage_max"],
@@ -192,8 +219,11 @@ class UNeXtGAR(nn.Module):
                 "stage2_write_mean": aux_mid["write_mean"],
                 "stage2_write_p05": aux_mid["write_p05"],
                 "stage2_write_p95": aux_mid["write_p95"],
+                "stage2_decay_mean": aux_mid["decay_mean"],
                 "stage2_gamma": aux_mid["gamma"],
+                "stage2_selector_logit_scale": aux_mid["selector_logit_scale"],
                 "stage2_head_entropy": aux_mid["head_entropy"],
+                "stage2_global_selector_entropy": aux_mid["global_selector_entropy"],
                 "stage2_head_usage": aux_mid["head_usage"],
                 "stage2_head_usage_entropy": aux_mid["head_usage_entropy"],
                 "stage2_head_usage_max": aux_mid["head_usage_max"],
@@ -201,7 +231,12 @@ class UNeXtGAR(nn.Module):
                 "stage2_head_max_weight": aux_mid["head_max_weight"],
                 "boundary_gamma": aux_boundary["boundary_gamma"],
                 "boundary_gate_mean": aux_boundary["boundary_gate_mean"],
+                "boundary_edge_gate_mean": aux_boundary["boundary_edge_gate_mean"],
+                "boundary_edge_gate_p05": aux_boundary["boundary_edge_gate_p05"],
+                "boundary_edge_gate_p95": aux_boundary["boundary_edge_gate_p95"],
+                "boundary_channel_gate_mean": aux_boundary["boundary_channel_gate_mean"],
                 "boundary_delta_abs_mean": aux_boundary["boundary_delta_abs_mean"],
+                "boundary_raw_delta_abs_mean": aux_boundary["boundary_raw_delta_abs_mean"],
                 "final_minus_base_logit_abs_mean": (final_object_logits - base_object_logits).detach().abs().mean(dim=(1, 2, 3)),
                 "state_detached": torch.tensor(float(self.detach_state), device=images.device, dtype=images.dtype),
             }

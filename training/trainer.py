@@ -711,6 +711,7 @@ class Trainer:
                 self._log_functional_anchor_stats(data, it)
                 self._log_faf_stats(data, it)
                 self._log_gar_stats(data, it)
+                self._log_cardia_stats(data, it)
                 self._log_functional_anchor_grad_stats(it)
 
         return loss.detach()
@@ -755,12 +756,19 @@ class Trainer:
                 ("lambda_gar_selector", "selector"),
                 ("lambda_gar_flow_smooth", "flow_smooth"),
                 ("lambda_gar_boundary_aux", "boundary_aux"),
+                ("lambda_cardia_base", "base"),
+                ("lambda_cardia_proposal_oracle", "proposal_oracle"),
+                ("lambda_cardia_selector", "selector"),
+                ("lambda_cardia_flow_smooth", "flow_smooth"),
+                ("lambda_cardia_boundary_aux", "boundary_aux"),
             ):
                 if hasattr(self.loss_computer, attr):
                     if attr.startswith("lambda_faf_"):
                         prefix = "lambda_faf"
                     elif attr.startswith("lambda_gar_"):
                         prefix = "lambda_gar"
+                    elif attr.startswith("lambda_cardia_"):
+                        prefix = "lambda_cardia"
                     else:
                         prefix = "lambda_functional_anchor"
                     log_dict[f"{prefix}_{name}"] = getattr(self.loss_computer, attr)
@@ -1296,8 +1304,11 @@ class Trainer:
                 "stage3_write_mean": [],
                 "stage3_write_p05": [],
                 "stage3_write_p95": [],
+                "stage3_decay_mean": [],
                 "stage3_gamma": [],
+                "stage3_selector_logit_scale": [],
                 "stage3_head_entropy": [],
+                "stage3_global_selector_entropy": [],
                 "stage3_head_usage_entropy": [],
                 "stage3_head_usage_max": [],
                 "stage3_head_usage_min": [],
@@ -1308,15 +1319,23 @@ class Trainer:
                 "stage2_write_mean": [],
                 "stage2_write_p05": [],
                 "stage2_write_p95": [],
+                "stage2_decay_mean": [],
                 "stage2_gamma": [],
+                "stage2_selector_logit_scale": [],
                 "stage2_head_entropy": [],
+                "stage2_global_selector_entropy": [],
                 "stage2_head_usage_entropy": [],
                 "stage2_head_usage_max": [],
                 "stage2_head_usage_min": [],
                 "stage2_head_max_weight": [],
                 "boundary_gamma": [],
                 "boundary_gate_mean": [],
+                "boundary_edge_gate_mean": [],
+                "boundary_edge_gate_p05": [],
+                "boundary_edge_gate_p95": [],
+                "boundary_channel_gate_mean": [],
                 "boundary_delta_abs_mean": [],
+                "boundary_raw_delta_abs_mean": [],
                 "final_minus_base_logit_abs_mean": [],
                 "state_detached": [],
             }
@@ -1349,6 +1368,87 @@ class Trainer:
                         logger.log_gar_diagnostics(metrics, step=it)
                     else:
                         logger.log_metrics(metrics, step=it, prefix="gar")
+        except Exception:
+            pass
+
+    def _log_cardia_stats(self, data, it: int) -> None:
+        memory_keys = sorted(k for k in data.keys() if k.startswith("memory_aux_"))
+        if not memory_keys:
+            return
+        try:
+            buckets = {
+                "stage3_flow_smooth": [],
+                "stage3_offset_px_mean": [],
+                "stage3_offset_px_p95": [],
+                "stage3_write_mean": [],
+                "stage3_decay_mean": [],
+                "stage3_gamma": [],
+                "stage3_runtime_update_mean": [],
+                "stage3_runtime_reset_mean": [],
+                "stage3_runtime_state_norm": [],
+                "stage3_global_selector_entropy": [],
+                "stage2_flow_smooth": [],
+                "stage2_offset_px_mean": [],
+                "stage2_offset_px_p95": [],
+                "stage2_write_mean": [],
+                "stage2_decay_mean": [],
+                "stage2_gamma": [],
+                "stage2_selector_logit_scale": [],
+                "stage2_global_selector_entropy": [],
+                "stage2_head_entropy": [],
+                "stage2_head_usage_entropy": [],
+                "stage2_runtime_update_mean": [],
+                "stage2_runtime_reset_mean": [],
+                "stage2_runtime_state_norm": [],
+                "boundary_gamma": [],
+                "boundary_edge_gate_mean": [],
+                "boundary_edge_gate_p05": [],
+                "boundary_edge_gate_p95": [],
+                "boundary_channel_gate_mean": [],
+                "boundary_delta_abs_mean": [],
+                "final_minus_base_logit_abs_mean": [],
+                "runtime_state_detached": [],
+            }
+            for key in memory_keys:
+                aux = data.get(key)
+                cardia = aux.get("cardia_aux") if isinstance(aux, dict) else None
+                if not isinstance(cardia, dict):
+                    continue
+                for name in buckets:
+                    value = cardia.get(name)
+                    if torch.is_tensor(value):
+                        buckets[name].append(value.float().detach().flatten())
+                for stage in ("stage2", "stage3"):
+                    usage = cardia.get(f"{stage}_head_usage")
+                    if torch.is_tensor(usage):
+                        usage_mean = usage.float().detach().mean(dim=0)
+                        for idx, value in enumerate(usage_mean.flatten()):
+                            buckets.setdefault(f"{stage}_head_usage_{idx}", []).append(value.reshape(1))
+            metrics = {}
+            for name, tensors in buckets.items():
+                if not tensors:
+                    continue
+                value = torch.cat(tensors).mean().item()
+                if name.startswith("stage"):
+                    stage, metric = name.split("_", 1)
+                    log_name = f"cardia/{stage}/{metric}"
+                elif name.startswith("boundary_"):
+                    log_name = f"cardia/boundary/{name.removeprefix('boundary_')}"
+                else:
+                    log_name = f"cardia/{name}"
+                if name in {"stage2_offset_px_mean", "stage3_offset_px_mean"}:
+                    metrics.setdefault("solver_offset_px_mean", value)
+                if name in {"stage2_offset_px_p95", "stage3_offset_px_p95"}:
+                    metrics.setdefault("solver_offset_px_p95", value)
+                self.log.log_scalar(log_name, value, it)
+                metrics[name] = value
+            if metrics:
+                logger = getattr(self, "mlflow_logger", None)
+                if logger is not None:
+                    if hasattr(logger, "log_cardia_diagnostics"):
+                        logger.log_cardia_diagnostics(metrics, step=it)
+                    else:
+                        logger.log_metrics(metrics, step=it, prefix="cardia")
         except Exception:
             pass
 
@@ -2012,6 +2112,7 @@ class Trainer:
                             gt_frame = gt[bi, ti, ...].unsqueeze(0).unsqueeze(0).float()
                             faf_base_dice_curr = None
                             gar_base_dice_curr = None
+                            gar_top1_dice_curr = None
                             faf_hard_curr = False
 
                             memory_aux = out.get(f"memory_aux_{ti}")
@@ -2163,6 +2264,8 @@ class Trainer:
                                         metric_totals[f"{prefix}_dice_count"] = metric_totals.get(f"{prefix}_dice_count", 0.0) + 1.0
                                         if prefix == "gar_base":
                                             gar_base_dice_curr = aux_dice
+                                        elif prefix == "gar_proposal_top1":
+                                            gar_top1_dice_curr = aux_dice
                                 proposal_logits = gar_aux.get("proposal_logits")
                                 if torch.is_tensor(proposal_logits) and proposal_logits.shape[0] > bi:
                                     proposals = proposal_logits[bi : bi + 1, :1]
@@ -2174,9 +2277,22 @@ class Trainer:
                                         proposal_dices.append(prop_dice)
                                     if proposal_dices:
                                         dice_tensor = torch.tensor(proposal_dices, device=pred.device, dtype=torch.float32)
+                                        best_idx = int(dice_tensor.argmax().item())
+                                        selector_logits = gar_aux.get("selector_logits")
+                                        if torch.is_tensor(selector_logits) and selector_logits.shape[0] > bi:
+                                            selector_item = selector_logits[bi, 0] if selector_logits.dim() == 3 else selector_logits[bi]
+                                            selector_idx = int(selector_item.float().argmax().item())
+                                            metric_totals["gar_selector_oracle_alignment_sum"] = metric_totals.get("gar_selector_oracle_alignment_sum", 0.0) + float(selector_idx == best_idx)
+                                            metric_totals["gar_selector_oracle_alignment_count"] = metric_totals.get("gar_selector_oracle_alignment_count", 0.0) + 1.0
                                         metric_totals["gar_proposal_oracle_dice_sum"] = metric_totals.get("gar_proposal_oracle_dice_sum", 0.0) + float(dice_tensor.max().item())
                                         metric_totals["gar_proposal_mean_dice_sum"] = metric_totals.get("gar_proposal_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
                                         metric_totals["gar_proposal_dice_count"] = metric_totals.get("gar_proposal_dice_count", 0.0) + 1.0
+                                        if gar_top1_dice_curr is not None:
+                                            metric_totals["gar_proposal_oracle_minus_top1_sum"] = metric_totals.get("gar_proposal_oracle_minus_top1_sum", 0.0) + float(dice_tensor.max().item() - gar_top1_dice_curr)
+                                            metric_totals["gar_proposal_oracle_minus_top1_count"] = metric_totals.get("gar_proposal_oracle_minus_top1_count", 0.0) + 1.0
+                                        if gar_base_dice_curr is not None and gar_top1_dice_curr is not None:
+                                            metric_totals["gar_proposal_top1_minus_base_sum"] = metric_totals.get("gar_proposal_top1_minus_base_sum", 0.0) + float(gar_top1_dice_curr - gar_base_dice_curr)
+                                            metric_totals["gar_proposal_top1_minus_base_count"] = metric_totals.get("gar_proposal_top1_minus_base_count", 0.0) + 1.0
                                 for src, dst in (
                                     ("stage3_offset_px_mean", "gar_stage3_offset_px_mean_sum"),
                                     ("stage3_offset_px_p95", "gar_stage3_offset_px_p95_sum"),
@@ -2184,8 +2300,11 @@ class Trainer:
                                     ("stage3_write_mean", "gar_stage3_write_mean_sum"),
                                     ("stage3_write_p05", "gar_stage3_write_p05_sum"),
                                     ("stage3_write_p95", "gar_stage3_write_p95_sum"),
+                                    ("stage3_decay_mean", "gar_stage3_decay_mean_sum"),
                                     ("stage3_gamma", "gar_stage3_gamma_sum"),
+                                    ("stage3_selector_logit_scale", "gar_stage3_selector_logit_scale_sum"),
                                     ("stage3_head_entropy", "gar_stage3_head_entropy_sum"),
+                                    ("stage3_global_selector_entropy", "gar_stage3_global_selector_entropy_sum"),
                                     ("stage3_head_usage_entropy", "gar_stage3_head_usage_entropy_sum"),
                                     ("stage3_head_usage_max", "gar_stage3_head_usage_max_sum"),
                                     ("stage3_head_usage_min", "gar_stage3_head_usage_min_sum"),
@@ -2196,19 +2315,42 @@ class Trainer:
                                     ("stage2_write_mean", "gar_stage2_write_mean_sum"),
                                     ("stage2_write_p05", "gar_stage2_write_p05_sum"),
                                     ("stage2_write_p95", "gar_stage2_write_p95_sum"),
+                                    ("stage2_decay_mean", "gar_stage2_decay_mean_sum"),
                                     ("stage2_gamma", "gar_stage2_gamma_sum"),
+                                    ("stage2_selector_logit_scale", "gar_stage2_selector_logit_scale_sum"),
                                     ("stage2_head_entropy", "gar_stage2_head_entropy_sum"),
+                                    ("stage2_global_selector_entropy", "gar_stage2_global_selector_entropy_sum"),
                                     ("stage2_head_usage_entropy", "gar_stage2_head_usage_entropy_sum"),
                                     ("stage2_head_usage_max", "gar_stage2_head_usage_max_sum"),
                                     ("stage2_head_usage_min", "gar_stage2_head_usage_min_sum"),
                                     ("stage2_head_max_weight", "gar_stage2_head_max_weight_sum"),
                                     ("boundary_gamma", "gar_boundary_gamma_sum"),
                                     ("boundary_gate_mean", "gar_boundary_gate_mean_sum"),
+                                    ("boundary_edge_gate_mean", "gar_boundary_edge_gate_mean_sum"),
+                                    ("boundary_edge_gate_p05", "gar_boundary_edge_gate_p05_sum"),
+                                    ("boundary_edge_gate_p95", "gar_boundary_edge_gate_p95_sum"),
+                                    ("boundary_channel_gate_mean", "gar_boundary_channel_gate_mean_sum"),
                                     ("boundary_delta_abs_mean", "gar_boundary_delta_abs_mean_sum"),
+                                    ("boundary_raw_delta_abs_mean", "gar_boundary_raw_delta_abs_mean_sum"),
                                 ):
                                     value = gar_aux.get(src)
                                     if torch.is_tensor(value):
                                         metric_totals[dst] = metric_totals.get(dst, 0.0) + float(value.float().mean().item())
+                                edge_gate = gar_aux.get("boundary_edge_gate")
+                                if torch.is_tensor(edge_gate) and edge_gate.shape[0] > bi:
+                                    gt_fg = gt_frame.to(device=edge_gate.device, dtype=edge_gate.dtype)
+                                    if gt_fg.shape[-2:] != edge_gate.shape[-2:]:
+                                        gt_fg = torch.nn.functional.interpolate(gt_fg, size=edge_gate.shape[-2:], mode="nearest")
+                                    dil = torch.nn.functional.max_pool2d(gt_fg, kernel_size=3, stride=1, padding=1)
+                                    ero = 1.0 - torch.nn.functional.max_pool2d(1.0 - gt_fg, kernel_size=3, stride=1, padding=1)
+                                    boundary_mask = (dil - ero).clamp(0.0, 1.0).bool()
+                                    edge_item = edge_gate[bi : bi + 1, :1].float()
+                                    inside = edge_item[boundary_mask]
+                                    outside = edge_item[~boundary_mask]
+                                    if inside.numel() > 0 and outside.numel() > 0:
+                                        metric_totals["gar_boundary_inside_response_sum"] = metric_totals.get("gar_boundary_inside_response_sum", 0.0) + float(inside.mean().item())
+                                        metric_totals["gar_boundary_outside_response_sum"] = metric_totals.get("gar_boundary_outside_response_sum", 0.0) + float(outside.mean().item())
+                                        metric_totals["gar_boundary_response_count"] = metric_totals.get("gar_boundary_response_count", 0.0) + 1.0
                                 for stage in ("stage2", "stage3"):
                                     usage = gar_aux.get(f"{stage}_head_usage")
                                     if torch.is_tensor(usage):
@@ -2217,6 +2359,107 @@ class Trainer:
                                             key = f"gar_{stage}_head_usage_{idx}_sum"
                                             metric_totals[key] = metric_totals.get(key, 0.0) + float(value.item())
                                 metric_totals["gar_aux_count"] = metric_totals.get("gar_aux_count", 0.0) + 1.0
+
+                            cardia_aux = memory_aux.get("cardia_aux") if isinstance(memory_aux, dict) else None
+                            if isinstance(cardia_aux, dict):
+                                cardia_base_dice_curr = None
+                                cardia_top1_dice_curr = None
+                                for src, prefix in (
+                                    ("base_object_logits", "cardia_base"),
+                                    ("proposal_top1_logits", "cardia_proposal_top1"),
+                                ):
+                                    aux_logits = cardia_aux.get(src)
+                                    if torch.is_tensor(aux_logits) and aux_logits.shape[0] > bi:
+                                        aux_prob = torch.sigmoid(aux_logits[bi : bi + 1, :1])
+                                        aux_bin = self._postprocess_binary_mask((aux_prob > active_threshold).float())
+                                        aux_dice, _ = self._binary_overlap_metrics(aux_bin, gt_frame)
+                                        metric_totals[f"{prefix}_dice_sum"] = metric_totals.get(f"{prefix}_dice_sum", 0.0) + aux_dice
+                                        metric_totals[f"{prefix}_dice_count"] = metric_totals.get(f"{prefix}_dice_count", 0.0) + 1.0
+                                        if prefix == "cardia_base":
+                                            cardia_base_dice_curr = aux_dice
+                                        elif prefix == "cardia_proposal_top1":
+                                            cardia_top1_dice_curr = aux_dice
+                                proposal_logits = cardia_aux.get("proposal_logits")
+                                if torch.is_tensor(proposal_logits) and proposal_logits.shape[0] > bi:
+                                    proposals = proposal_logits[bi : bi + 1, :1]
+                                    proposal_dices = []
+                                    for hi in range(proposals.shape[2]):
+                                        prop_prob = torch.sigmoid(proposals[:, :, hi])
+                                        prop_bin = self._postprocess_binary_mask((prop_prob > active_threshold).float())
+                                        prop_dice, _ = self._binary_overlap_metrics(prop_bin, gt_frame)
+                                        proposal_dices.append(prop_dice)
+                                    if proposal_dices:
+                                        dice_tensor = torch.tensor(proposal_dices, device=pred.device, dtype=torch.float32)
+                                        best_idx = int(dice_tensor.argmax().item())
+                                        selector_logits = cardia_aux.get("selector_logits")
+                                        if torch.is_tensor(selector_logits) and selector_logits.shape[0] > bi:
+                                            selector_item = selector_logits[bi, 0] if selector_logits.dim() == 3 else selector_logits[bi]
+                                            selector_idx = int(selector_item.float().argmax().item())
+                                            metric_totals["cardia_selector_oracle_alignment_sum"] = metric_totals.get("cardia_selector_oracle_alignment_sum", 0.0) + float(selector_idx == best_idx)
+                                            metric_totals["cardia_selector_oracle_alignment_count"] = metric_totals.get("cardia_selector_oracle_alignment_count", 0.0) + 1.0
+                                        metric_totals["cardia_proposal_oracle_dice_sum"] = metric_totals.get("cardia_proposal_oracle_dice_sum", 0.0) + float(dice_tensor.max().item())
+                                        metric_totals["cardia_proposal_mean_dice_sum"] = metric_totals.get("cardia_proposal_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
+                                        metric_totals["cardia_proposal_dice_count"] = metric_totals.get("cardia_proposal_dice_count", 0.0) + 1.0
+                                        if cardia_top1_dice_curr is not None:
+                                            metric_totals["cardia_proposal_oracle_minus_top1_sum"] = metric_totals.get("cardia_proposal_oracle_minus_top1_sum", 0.0) + float(dice_tensor.max().item() - cardia_top1_dice_curr)
+                                            metric_totals["cardia_proposal_oracle_minus_top1_count"] = metric_totals.get("cardia_proposal_oracle_minus_top1_count", 0.0) + 1.0
+                                        if cardia_base_dice_curr is not None and cardia_top1_dice_curr is not None:
+                                            metric_totals["cardia_proposal_top1_minus_base_sum"] = metric_totals.get("cardia_proposal_top1_minus_base_sum", 0.0) + float(cardia_top1_dice_curr - cardia_base_dice_curr)
+                                            metric_totals["cardia_proposal_top1_minus_base_count"] = metric_totals.get("cardia_proposal_top1_minus_base_count", 0.0) + 1.0
+                                for src, dst in (
+                                    ("stage3_flow_smooth", "cardia_stage3_flow_smooth_sum"),
+                                    ("stage3_offset_px_mean", "cardia_stage3_offset_px_mean_sum"),
+                                    ("stage3_offset_px_p95", "cardia_stage3_offset_px_p95_sum"),
+                                    ("stage3_write_mean", "cardia_stage3_write_mean_sum"),
+                                    ("stage3_decay_mean", "cardia_stage3_decay_mean_sum"),
+                                    ("stage3_gamma", "cardia_stage3_gamma_sum"),
+                                    ("stage3_runtime_update_mean", "cardia_stage3_runtime_update_mean_sum"),
+                                    ("stage3_runtime_state_norm", "cardia_stage3_runtime_state_norm_sum"),
+                                    ("stage3_global_selector_entropy", "cardia_stage3_global_selector_entropy_sum"),
+                                    ("stage2_flow_smooth", "cardia_stage2_flow_smooth_sum"),
+                                    ("stage2_offset_px_mean", "cardia_stage2_offset_px_mean_sum"),
+                                    ("stage2_offset_px_p95", "cardia_stage2_offset_px_p95_sum"),
+                                    ("stage2_write_mean", "cardia_stage2_write_mean_sum"),
+                                    ("stage2_decay_mean", "cardia_stage2_decay_mean_sum"),
+                                    ("stage2_gamma", "cardia_stage2_gamma_sum"),
+                                    ("stage2_selector_logit_scale", "cardia_stage2_selector_logit_scale_sum"),
+                                    ("stage2_global_selector_entropy", "cardia_stage2_global_selector_entropy_sum"),
+                                    ("stage2_head_usage_entropy", "cardia_stage2_head_usage_entropy_sum"),
+                                    ("stage2_runtime_update_mean", "cardia_stage2_runtime_update_mean_sum"),
+                                    ("stage2_runtime_state_norm", "cardia_stage2_runtime_state_norm_sum"),
+                                    ("boundary_gamma", "cardia_boundary_gamma_sum"),
+                                    ("boundary_edge_gate_mean", "cardia_boundary_edge_gate_mean_sum"),
+                                    ("boundary_edge_gate_p05", "cardia_boundary_edge_gate_p05_sum"),
+                                    ("boundary_edge_gate_p95", "cardia_boundary_edge_gate_p95_sum"),
+                                    ("boundary_channel_gate_mean", "cardia_boundary_channel_gate_mean_sum"),
+                                    ("boundary_delta_abs_mean", "cardia_boundary_delta_abs_mean_sum"),
+                                ):
+                                    value = cardia_aux.get(src)
+                                    if torch.is_tensor(value):
+                                        metric_totals[dst] = metric_totals.get(dst, 0.0) + float(value.float().mean().item())
+                                edge_gate = cardia_aux.get("boundary_edge_gate")
+                                if torch.is_tensor(edge_gate) and edge_gate.shape[0] > bi:
+                                    gt_fg = gt_frame.to(device=edge_gate.device, dtype=edge_gate.dtype)
+                                    if gt_fg.shape[-2:] != edge_gate.shape[-2:]:
+                                        gt_fg = torch.nn.functional.interpolate(gt_fg, size=edge_gate.shape[-2:], mode="nearest")
+                                    dil = torch.nn.functional.max_pool2d(gt_fg, kernel_size=3, stride=1, padding=1)
+                                    ero = 1.0 - torch.nn.functional.max_pool2d(1.0 - gt_fg, kernel_size=3, stride=1, padding=1)
+                                    boundary_mask = (dil - ero).clamp(0.0, 1.0).bool()
+                                    edge_item = edge_gate[bi : bi + 1, :1].float()
+                                    inside = edge_item[boundary_mask]
+                                    outside = edge_item[~boundary_mask]
+                                    if inside.numel() > 0 and outside.numel() > 0:
+                                        metric_totals["cardia_boundary_inside_response_sum"] = metric_totals.get("cardia_boundary_inside_response_sum", 0.0) + float(inside.mean().item())
+                                        metric_totals["cardia_boundary_outside_response_sum"] = metric_totals.get("cardia_boundary_outside_response_sum", 0.0) + float(outside.mean().item())
+                                        metric_totals["cardia_boundary_response_count"] = metric_totals.get("cardia_boundary_response_count", 0.0) + 1.0
+                                for stage in ("stage2", "stage3"):
+                                    usage = cardia_aux.get(f"{stage}_head_usage")
+                                    if torch.is_tensor(usage):
+                                        usage_item = usage[bi].float() if usage.shape[0] > bi else usage.float().mean(dim=0)
+                                        for idx, value in enumerate(usage_item.flatten()):
+                                            key = f"cardia_{stage}_head_usage_{idx}_sum"
+                                            metric_totals[key] = metric_totals.get(key, 0.0) + float(value.item())
+                                metric_totals["cardia_aux_count"] = metric_totals.get("cardia_aux_count", 0.0) + 1.0
 
                             faf_aux = memory_aux.get("faf_aux") if isinstance(memory_aux, dict) else None
                             if isinstance(faf_aux, dict):
@@ -2984,6 +3227,9 @@ class Trainer:
                     "gar/proposal_top1_dice": gar_mean("gar_proposal_top1_dice_sum", "gar_proposal_top1_dice_count"),
                     "gar/proposal_oracle_dice": gar_mean("gar_proposal_oracle_dice_sum", "gar_proposal_dice_count"),
                     "gar/proposal_mean_dice": gar_mean("gar_proposal_mean_dice_sum", "gar_proposal_dice_count"),
+                    "gar/proposal_oracle_minus_top1": gar_mean("gar_proposal_oracle_minus_top1_sum", "gar_proposal_oracle_minus_top1_count"),
+                    "gar/proposal_top1_minus_base": gar_mean("gar_proposal_top1_minus_base_sum", "gar_proposal_top1_minus_base_count"),
+                    "gar/selector_oracle_alignment": gar_mean("gar_selector_oracle_alignment_sum", "gar_selector_oracle_alignment_count"),
                     "gar/final_dice": metrics["dice_frame_mean"],
                     "gar/boundary_dice": metrics["boundary_dice"],
                     "gar/stage3_offset_px_mean": gar_mean("gar_stage3_offset_px_mean_sum"),
@@ -2992,8 +3238,11 @@ class Trainer:
                     "gar/stage3_write_mean": gar_mean("gar_stage3_write_mean_sum"),
                     "gar/stage3_write_p05": gar_mean("gar_stage3_write_p05_sum"),
                     "gar/stage3_write_p95": gar_mean("gar_stage3_write_p95_sum"),
+                    "gar/stage3_decay_mean": gar_mean("gar_stage3_decay_mean_sum"),
                     "gar/stage3_gamma": gar_mean("gar_stage3_gamma_sum"),
+                    "gar/stage3_selector_logit_scale": gar_mean("gar_stage3_selector_logit_scale_sum"),
                     "gar/stage3_head_entropy": gar_mean("gar_stage3_head_entropy_sum"),
+                    "gar/stage3_global_selector_entropy": gar_mean("gar_stage3_global_selector_entropy_sum"),
                     "gar/stage3_head_usage_entropy": gar_mean("gar_stage3_head_usage_entropy_sum"),
                     "gar/stage3_head_usage_max": gar_mean("gar_stage3_head_usage_max_sum"),
                     "gar/stage3_head_usage_min": gar_mean("gar_stage3_head_usage_min_sum"),
@@ -3004,15 +3253,25 @@ class Trainer:
                     "gar/stage2_write_mean": gar_mean("gar_stage2_write_mean_sum"),
                     "gar/stage2_write_p05": gar_mean("gar_stage2_write_p05_sum"),
                     "gar/stage2_write_p95": gar_mean("gar_stage2_write_p95_sum"),
+                    "gar/stage2_decay_mean": gar_mean("gar_stage2_decay_mean_sum"),
                     "gar/stage2_gamma": gar_mean("gar_stage2_gamma_sum"),
+                    "gar/stage2_selector_logit_scale": gar_mean("gar_stage2_selector_logit_scale_sum"),
                     "gar/stage2_head_entropy": gar_mean("gar_stage2_head_entropy_sum"),
+                    "gar/stage2_global_selector_entropy": gar_mean("gar_stage2_global_selector_entropy_sum"),
                     "gar/stage2_head_usage_entropy": gar_mean("gar_stage2_head_usage_entropy_sum"),
                     "gar/stage2_head_usage_max": gar_mean("gar_stage2_head_usage_max_sum"),
                     "gar/stage2_head_usage_min": gar_mean("gar_stage2_head_usage_min_sum"),
                     "gar/stage2_head_max_weight": gar_mean("gar_stage2_head_max_weight_sum"),
                     "gar/boundary_gamma": gar_mean("gar_boundary_gamma_sum"),
                     "gar/boundary_gate_mean": gar_mean("gar_boundary_gate_mean_sum"),
+                    "gar/boundary_edge_gate_mean": gar_mean("gar_boundary_edge_gate_mean_sum"),
+                    "gar/boundary_edge_gate_p05": gar_mean("gar_boundary_edge_gate_p05_sum"),
+                    "gar/boundary_edge_gate_p95": gar_mean("gar_boundary_edge_gate_p95_sum"),
+                    "gar/boundary_channel_gate_mean": gar_mean("gar_boundary_channel_gate_mean_sum"),
+                    "gar/boundary_inside_response": gar_mean("gar_boundary_inside_response_sum", "gar_boundary_response_count"),
+                    "gar/boundary_outside_response": gar_mean("gar_boundary_outside_response_sum", "gar_boundary_response_count"),
                     "gar/boundary_delta_abs_mean": gar_mean("gar_boundary_delta_abs_mean_sum"),
+                    "gar/boundary_raw_delta_abs_mean": gar_mean("gar_boundary_raw_delta_abs_mean_sum"),
                     "gar/final_minus_base_by_ED": gar_mean(
                         "gar_final_minus_base_by_ED_sum", "gar_final_minus_base_by_ED_count"
                     ),
@@ -3026,10 +3285,71 @@ class Trainer:
             if reduced.get("gar_proposal_dice_count", 0.0) > 0 and reduced.get("gar_base_dice_count", 0.0) > 0:
                 metrics["gar/oracle_gap_to_base"] = metrics["gar/proposal_oracle_dice"] - metrics["gar/base_dice"]
             for stage in ("stage2", "stage3"):
-                for idx in range(int(self.cfg.get("model", {}).get("unext_gar", {}).get("num_heads", 4))):
+                gar_cfg = self.cfg.get("model", {}).get("unext_gar", {})
+                default_heads = int(gar_cfg.get("num_heads", 4))
+                stage_heads = int(gar_cfg.get(f"{stage}_num_heads", default_heads))
+                for idx in range(stage_heads):
                     key = f"gar_{stage}_head_usage_{idx}_sum"
                     if key in reduced:
                         metrics[f"gar/{stage}_head_usage_{idx}"] = gar_mean(key)
+        if reduced.get("cardia_aux_count", 0.0) > 0:
+            def cardia_mean(sum_key: str, count_key: str = "cardia_aux_count"):
+                count = reduced.get(count_key, 0.0)
+                return reduced.get(sum_key, 0.0) / count if count > 0 else 0.0
+
+            metrics.update(
+                {
+                    "cardia/base_dice": cardia_mean("cardia_base_dice_sum", "cardia_base_dice_count"),
+                    "cardia/proposal_top1": cardia_mean("cardia_proposal_top1_dice_sum", "cardia_proposal_top1_dice_count"),
+                    "cardia/proposal_oracle": cardia_mean("cardia_proposal_oracle_dice_sum", "cardia_proposal_dice_count"),
+                    "cardia/proposal_oracle_minus_top1": cardia_mean("cardia_proposal_oracle_minus_top1_sum", "cardia_proposal_oracle_minus_top1_count"),
+                    "cardia/proposal_top1_minus_base": cardia_mean("cardia_proposal_top1_minus_base_sum", "cardia_proposal_top1_minus_base_count"),
+                    "cardia/selector_oracle_alignment": cardia_mean("cardia_selector_oracle_alignment_sum", "cardia_selector_oracle_alignment_count"),
+                    "cardia/final_dice": metrics["dice_frame_mean"],
+                    "cardia/boundary_dice": metrics["boundary_dice"],
+                    "cardia/stage3/flow_smooth": cardia_mean("cardia_stage3_flow_smooth_sum"),
+                    "cardia/stage3/write_mean": cardia_mean("cardia_stage3_write_mean_sum"),
+                    "cardia/stage3/decay_mean": cardia_mean("cardia_stage3_decay_mean_sum"),
+                    "cardia/stage3/gamma": cardia_mean("cardia_stage3_gamma_sum"),
+                    "cardia/stage3/runtime_update_mean": cardia_mean("cardia_stage3_runtime_update_mean_sum"),
+                    "cardia/stage3/runtime_state_norm": cardia_mean("cardia_stage3_runtime_state_norm_sum"),
+                    "cardia/stage3/global_selector_entropy": cardia_mean("cardia_stage3_global_selector_entropy_sum"),
+                    "cardia/stage2/flow_smooth": cardia_mean("cardia_stage2_flow_smooth_sum"),
+                    "cardia/stage2/write_mean": cardia_mean("cardia_stage2_write_mean_sum"),
+                    "cardia/stage2/decay_mean": cardia_mean("cardia_stage2_decay_mean_sum"),
+                    "cardia/stage2/gamma": cardia_mean("cardia_stage2_gamma_sum"),
+                    "cardia/stage2/selector_logit_scale": cardia_mean("cardia_stage2_selector_logit_scale_sum"),
+                    "cardia/stage2/global_selector_entropy": cardia_mean("cardia_stage2_global_selector_entropy_sum"),
+                    "cardia/stage2/head_usage_entropy": cardia_mean("cardia_stage2_head_usage_entropy_sum"),
+                    "cardia/stage2/runtime_update_mean": cardia_mean("cardia_stage2_runtime_update_mean_sum"),
+                    "cardia/stage2/runtime_state_norm": cardia_mean("cardia_stage2_runtime_state_norm_sum"),
+                    "cardia/solver/offset_px_mean": 0.5
+                    * (
+                        cardia_mean("cardia_stage2_offset_px_mean_sum")
+                        + cardia_mean("cardia_stage3_offset_px_mean_sum")
+                    ),
+                    "cardia/solver/offset_px_p95": max(
+                        cardia_mean("cardia_stage2_offset_px_p95_sum"),
+                        cardia_mean("cardia_stage3_offset_px_p95_sum"),
+                    ),
+                    "cardia/boundary/edge_gate": cardia_mean("cardia_boundary_edge_gate_mean_sum"),
+                    "cardia/boundary/edge_gate_p05": cardia_mean("cardia_boundary_edge_gate_p05_sum"),
+                    "cardia/boundary/edge_gate_p95": cardia_mean("cardia_boundary_edge_gate_p95_sum"),
+                    "cardia/boundary/channel_gate_mean": cardia_mean("cardia_boundary_channel_gate_mean_sum"),
+                    "cardia/boundary/delta_abs_mean": cardia_mean("cardia_boundary_delta_abs_mean_sum"),
+                    "cardia/boundary/inside_response": cardia_mean("cardia_boundary_inside_response_sum", "cardia_boundary_response_count"),
+                    "cardia/boundary/outside_response": cardia_mean("cardia_boundary_outside_response_sum", "cardia_boundary_response_count"),
+                }
+            )
+            if reduced.get("cardia_base_dice_count", 0.0) > 0:
+                metrics["cardia/final_minus_base"] = metrics["dice_frame_mean"] - metrics["cardia/base_dice"]
+            cardia_cfg = self.cfg.get("model", {}).get("cardia", {})
+            for stage in ("stage2", "stage3"):
+                stage_heads = int(cardia_cfg.get(f"{stage}_num_heads", 3 if stage == "stage2" else 1))
+                for idx in range(stage_heads):
+                    key = f"cardia_{stage}_head_usage_{idx}_sum"
+                    if key in reduced:
+                        metrics[f"cardia/{stage}/head_usage_{idx}"] = cardia_mean(key)
         if reduced.get("faf_aux_count", 0.0) > 0:
             def faf_mean(sum_key: str, count_key: str = "faf_aux_count"):
                 count = reduced.get(count_key, 0.0)

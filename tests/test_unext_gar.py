@@ -20,11 +20,14 @@ def _cfg():
                 "base_dim": 8,
                 "value_dim": 16,
                 "num_heads": 3,
+                "stage3_num_heads": 1,
+                "stage2_num_heads": 3,
                 "stage3_max_offset_px": 2.0,
                 "stage2_max_offset_px": 3.0,
                 "padding_mode": "border",
                 "align_corners": False,
                 "detach_state": True,
+                "stage3_decay_gate": True,
             },
         }
     )
@@ -42,6 +45,8 @@ def test_grid_anchor_router_zero_init_offsets_identity_and_positive_gamma():
     assert aux["offset_px_mean"].shape == (2,)
     assert 0.25 < float(aux["write_mean"].mean().item()) < 0.5
     assert "head_usage_entropy" in aux
+    assert aux["selector_logits"].shape == (2, 3)
+    assert aux["global_selector_entropy"].shape == (2,)
 
 
 def test_unext_gar_forward_contract_and_aux_shapes():
@@ -58,7 +63,13 @@ def test_unext_gar_forward_contract_and_aux_shapes():
     assert aux["head_weights"].shape == (2, 1, 3)
     assert aux["stage2_offset_px_mean"].shape == (2,)
     assert aux["stage2_write_mean"].shape == (2,)
+    assert aux["stage3_head_usage"].shape == (2, 1)
+    assert aux["stage2_head_usage"].shape == (2, 3)
+    assert aux["stage3_decay_mean"].shape == (2,)
+    assert aux["stage2_selector_logit_scale"].numel() == 1
     assert aux["boundary_logits"].shape == (2, 1, 64, 64)
+    assert aux["boundary_edge_gate"].shape == (2, 1, 64, 64)
+    assert aux["boundary_edge_gate_mean"].shape == (2,)
     assert aux["state_detached"].item() == 1.0
 
 

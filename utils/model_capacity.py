@@ -43,7 +43,7 @@ def infer_unext_capacity(model: nn.Module, cfg=None) -> dict[str, Any]:
     hidden_dim = getattr(module, "hidden_dim", None)
 
     model_cfg = _cfg_get(cfg, "model", cfg)
-    for section_name in ("unext_faf", "unext_dynakey", "functional_anchor", "anchor_ode", "delay_ode"):
+    for section_name in ("unext_faf", "unext_gar", "cardia", "unext_dynakey", "functional_anchor", "anchor_ode", "delay_ode"):
         section = _cfg_get(model_cfg, section_name, None)
         if section is None:
             continue

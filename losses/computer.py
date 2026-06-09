@@ -149,7 +149,26 @@ class LossComputer(nn.Module):
         self.lambda_gar_flow_smooth = float(gar_cfg.get("lambda_gar_flow_smooth", 0.005))
         self.lambda_gar_boundary_aux = float(gar_cfg.get("lambda_gar_boundary_aux", 0.02))
         self.gar_selector_temperature = float(gar_cfg.get("selector_temperature", 0.1))
+        self.gar_proposal_softmin_temperature = float(gar_cfg.get("proposal_softmin_temperature", 0.3))
         self.gar_proposal_loss = str(gar_cfg.get("proposal_loss", "best")).lower()
+        self.gar_base_after_iter = int(gar_cfg.get("base_aux_after_iter", 800))
+        self.gar_base_after_weight = float(gar_cfg.get("lambda_gar_base_after", self.lambda_gar_base))
+        self.gar_oracle_decay_start = int(gar_cfg.get("oracle_decay_start_iter", 2500))
+        self.gar_oracle_after_weight = float(gar_cfg.get("lambda_gar_proposal_oracle_after", self.lambda_gar_proposal_oracle))
+        cardia_cfg = cfg.model.get("cardia", {})
+        self.is_cardia = str(cfg.model.get("name", "")).lower() in {"cardia", "unext_cardia"}
+        self.lambda_cardia_base = float(cardia_cfg.get("lambda_cardia_base", 0.1))
+        self.lambda_cardia_proposal_oracle = float(cardia_cfg.get("lambda_cardia_proposal_oracle", 0.2))
+        self.lambda_cardia_selector = float(cardia_cfg.get("lambda_cardia_selector", 0.1))
+        self.lambda_cardia_flow_smooth = float(cardia_cfg.get("lambda_cardia_flow_smooth", 0.005))
+        self.lambda_cardia_boundary_aux = float(cardia_cfg.get("lambda_cardia_boundary_aux", 0.02))
+        self.cardia_selector_temperature = float(cardia_cfg.get("selector_temperature", 0.1))
+        self.cardia_proposal_softmin_temperature = float(cardia_cfg.get("proposal_softmin_temperature", 0.3))
+        self.cardia_proposal_loss = str(cardia_cfg.get("proposal_loss", "softmin")).lower()
+        self.cardia_base_after_iter = int(cardia_cfg.get("base_aux_after_iter", 800))
+        self.cardia_base_after_weight = float(cardia_cfg.get("lambda_cardia_base_after", self.lambda_cardia_base))
+        self.cardia_oracle_decay_start = int(cardia_cfg.get("oracle_decay_start_iter", 2500))
+        self.cardia_oracle_after_weight = float(cardia_cfg.get("lambda_cardia_proposal_oracle_after", self.lambda_cardia_proposal_oracle))
 
     def _default_supervision_mask(
         self,
@@ -314,6 +333,9 @@ class LossComputer(nn.Module):
             losses[k] += v
         gar_terms = self._compute_gar_losses(data, supervised_mask)
         for k, v in gar_terms.items():
+            losses[k] += v
+        cardia_terms = self._compute_cardia_losses(data, supervised_mask)
+        for k, v in cardia_terms.items():
             losses[k] += v
 
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
@@ -485,6 +507,13 @@ class LossComputer(nn.Module):
         batch_size = data["rgb"].shape[0]
         device = data["rgb"].device
         zero = torch.zeros((), device=device, dtype=torch.float32)
+        current_iter = int(data.get("current_iter", 0))
+        lambda_gar_base = self.lambda_gar_base
+        if current_iter >= self.gar_base_after_iter:
+            lambda_gar_base = self.gar_base_after_weight
+        lambda_gar_proposal_oracle = self.lambda_gar_proposal_oracle
+        if current_iter >= self.gar_oracle_decay_start:
+            lambda_gar_proposal_oracle = self.gar_oracle_after_weight
         base_terms = []
         proposal_terms = []
         selector_terms = []
@@ -502,7 +531,7 @@ class LossComputer(nn.Module):
                 soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
 
                 base_obj = aux.get("base_object_logits")
-                if torch.is_tensor(base_obj) and self.lambda_gar_base > 0:
+                if torch.is_tensor(base_obj) and lambda_gar_base > 0:
                     base_obj = base_obj[bi : bi + 1, :curr_num_obj]
                     base_logits = aggregate(torch.sigmoid(base_obj), dim=1)
                     ce, dice = self.mask_loss(base_logits, soft_gt)
@@ -510,17 +539,19 @@ class LossComputer(nn.Module):
 
                 proposals = aux.get("proposal_logits")
                 head_losses = []
-                if torch.is_tensor(proposals) and (self.lambda_gar_proposal_oracle > 0 or self.lambda_gar_selector > 0):
+                if torch.is_tensor(proposals) and (lambda_gar_proposal_oracle > 0 or self.lambda_gar_selector > 0):
                     proposals = proposals[bi : bi + 1, :curr_num_obj]
                     for ki in range(proposals.shape[2]):
                         prop_obj = proposals[:, :, ki]
                         prop_logits = aggregate(torch.sigmoid(prop_obj), dim=1)
                         ce, dice = self.mask_loss(prop_logits, soft_gt)
                         head_losses.append(ce + dice)
-                    if head_losses and self.lambda_gar_proposal_oracle > 0:
+                    if head_losses and lambda_gar_proposal_oracle > 0:
                         stacked = torch.stack(head_losses)
                         if self.gar_proposal_loss == "softmin":
-                            proposal_terms.append(-torch.logsumexp(-stacked, dim=0))
+                            tau = max(self.gar_proposal_softmin_temperature, 1.0e-4)
+                            weights = torch.softmax(-stacked.detach() / tau, dim=0)
+                            proposal_terms.append((weights * stacked).sum())
                         else:
                             proposal_terms.append(stacked.min())
                     if head_losses and self.lambda_gar_selector > 0:
@@ -554,11 +585,11 @@ class LossComputer(nn.Module):
         if base_terms:
             raw = torch.stack(base_terms).mean()
             out["raw_gar_base"] = raw.detach()
-            out["aux_gar_base"] = raw * self.lambda_gar_base
+            out["aux_gar_base"] = raw * lambda_gar_base
         if proposal_terms:
             raw = torch.stack(proposal_terms).mean()
             out["raw_gar_proposal_oracle"] = raw.detach()
-            out["aux_gar_proposal_oracle"] = raw * self.lambda_gar_proposal_oracle
+            out["aux_gar_proposal_oracle"] = raw * lambda_gar_proposal_oracle
         if selector_terms:
             raw = torch.stack(selector_terms).mean()
             out["raw_gar_selector"] = raw.detach()
@@ -573,6 +604,116 @@ class LossComputer(nn.Module):
             out["aux_gar_boundary_aux"] = raw * self.lambda_gar_boundary_aux
         if not out:
             out["aux_gar_zero"] = zero
+        return out
+
+    def _compute_cardia_losses(
+        self,
+        data: Dict[str, torch.Tensor],
+        supervised_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if not self.is_cardia or "cls_gt" not in data:
+            return {}
+
+        batch_size = data["rgb"].shape[0]
+        device = data["rgb"].device
+        zero = torch.zeros((), device=device, dtype=torch.float32)
+        current_iter = int(data.get("current_iter", 0))
+        lambda_base = self.lambda_cardia_base if current_iter < self.cardia_base_after_iter else self.cardia_base_after_weight
+        lambda_oracle = (
+            self.lambda_cardia_proposal_oracle
+            if current_iter < self.cardia_oracle_decay_start
+            else self.cardia_oracle_after_weight
+        )
+        base_terms = []
+        proposal_terms = []
+        selector_terms = []
+        smooth_terms = []
+        boundary_terms = []
+
+        for bi in range(batch_size):
+            curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
+            frame_ids = self._frame_ids_for_sample(supervised_mask, bi)
+            for ti in frame_ids:
+                memory_aux = data.get(f"memory_aux_{ti}")
+                aux = memory_aux.get("cardia_aux") if isinstance(memory_aux, dict) else None
+                if not isinstance(aux, dict):
+                    continue
+                soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+
+                base_obj = aux.get("base_object_logits")
+                if torch.is_tensor(base_obj) and lambda_base > 0:
+                    base_obj = base_obj[bi : bi + 1, :curr_num_obj]
+                    base_logits = aggregate(torch.sigmoid(base_obj), dim=1)
+                    ce, dice = self.mask_loss(base_logits, soft_gt)
+                    base_terms.append(ce + dice)
+
+                proposals = aux.get("proposal_logits")
+                head_losses = []
+                if torch.is_tensor(proposals) and (lambda_oracle > 0 or self.lambda_cardia_selector > 0):
+                    proposals = proposals[bi : bi + 1, :curr_num_obj]
+                    for ki in range(proposals.shape[2]):
+                        prop_obj = proposals[:, :, ki]
+                        prop_logits = aggregate(torch.sigmoid(prop_obj), dim=1)
+                        ce, dice = self.mask_loss(prop_logits, soft_gt)
+                        head_losses.append(ce + dice)
+                    if head_losses and lambda_oracle > 0:
+                        stacked = torch.stack(head_losses)
+                        if self.cardia_proposal_loss == "softmin":
+                            tau = max(self.cardia_proposal_softmin_temperature, 1.0e-4)
+                            weights = torch.softmax(-stacked.detach() / tau, dim=0)
+                            proposal_terms.append((weights * stacked).sum())
+                        else:
+                            proposal_terms.append(stacked.min())
+                    if head_losses and self.lambda_cardia_selector > 0:
+                        selector_logits = aux.get("selector_logits")
+                        if torch.is_tensor(selector_logits):
+                            logits = selector_logits[bi : bi + 1, 0]
+                            stacked = torch.stack(head_losses).detach()
+                            target = torch.softmax(-stacked / max(self.cardia_selector_temperature, 1.0e-4), dim=0).unsqueeze(0)
+                            selector_terms.append(F.kl_div(F.log_softmax(logits, dim=-1), target, reduction="batchmean"))
+
+                for src in ("stage2_flow_smooth", "stage3_flow_smooth"):
+                    value = aux.get(src)
+                    if torch.is_tensor(value) and self.lambda_cardia_flow_smooth > 0:
+                        item = value[bi : bi + 1] if value.dim() > 0 and value.shape[0] > bi else value
+                        smooth_terms.append(item.float().mean())
+
+                boundary_logits = aux.get("boundary_logits")
+                if torch.is_tensor(boundary_logits) and self.lambda_cardia_boundary_aux > 0:
+                    gt_fg = (data["cls_gt"][bi, ti : ti + 1].float() > 0).float()
+                    if gt_fg.dim() == 3:
+                        gt_fg = gt_fg.unsqueeze(1)
+                    if gt_fg.shape[-2:] != boundary_logits.shape[-2:]:
+                        gt_fg = F.interpolate(gt_fg, size=boundary_logits.shape[-2:], mode="nearest")
+                    dil = F.max_pool2d(gt_fg, kernel_size=3, stride=1, padding=1)
+                    ero = 1.0 - F.max_pool2d(1.0 - gt_fg, kernel_size=3, stride=1, padding=1)
+                    boundary = (dil - ero).clamp(0.0, 1.0)
+                    pred = boundary_logits[bi : bi + 1]
+                    boundary_terms.append(F.binary_cross_entropy_with_logits(pred.float(), boundary.to(device=pred.device, dtype=pred.dtype).float()))
+
+        out: Dict[str, torch.Tensor] = {}
+        if base_terms:
+            raw = torch.stack(base_terms).mean()
+            out["raw_cardia_base"] = raw.detach()
+            out["aux_cardia_base"] = raw * lambda_base
+        if proposal_terms:
+            raw = torch.stack(proposal_terms).mean()
+            out["raw_cardia_proposal_oracle"] = raw.detach()
+            out["aux_cardia_proposal_oracle"] = raw * lambda_oracle
+        if selector_terms:
+            raw = torch.stack(selector_terms).mean()
+            out["raw_cardia_selector"] = raw.detach()
+            out["aux_cardia_selector"] = raw * self.lambda_cardia_selector
+        if smooth_terms:
+            raw = torch.stack(smooth_terms).mean()
+            out["raw_cardia_flow_smooth"] = raw.detach()
+            out["aux_cardia_flow_smooth"] = raw * self.lambda_cardia_flow_smooth
+        if boundary_terms:
+            raw = torch.stack(boundary_terms).mean()
+            out["raw_cardia_boundary_aux"] = raw.detach()
+            out["aux_cardia_boundary_aux"] = raw * self.lambda_cardia_boundary_aux
+        if not out:
+            out["aux_cardia_zero"] = zero
         return out
 
     def _compute_delay_ode_regularizers(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
