@@ -14,6 +14,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
     base_lr = stage_cfg.learning_rate
     anchor_ode_lr_ratio = stage_cfg.get("anchor_ode_lr_ratio", None)
     functional_anchor_lr_ratio = stage_cfg.get("functional_anchor_lr_ratio", None)
+    cardia_lr_ratio = stage_cfg.get("cardia_lr_ratio", None)
     unext_lr_ratio = float(stage_cfg.get("unext_lr_ratio", backbone_lr_ratio))
     residual_head_lr_mult = float(stage_cfg.get("residual_head_lr_mult", 1.0))
     gar_offset_lr_mult = float(stage_cfg.get("cardia_offset_lr_mult", stage_cfg.get("gar_offset_lr_mult", 0.5)))
@@ -21,9 +22,16 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
     gar_boundary_lr_mult = float(stage_cfg.get("cardia_boundary_lr_mult", stage_cfg.get("gar_boundary_lr_mult", 2.0)))
     gar_proposal_lr_mult = float(stage_cfg.get("cardia_proposal_lr_mult", stage_cfg.get("gar_proposal_lr_mult", 2.0)))
 
-    if anchor_ode_lr_ratio is not None or functional_anchor_lr_ratio is not None:
-        method_lr_ratio = float(functional_anchor_lr_ratio if functional_anchor_lr_ratio is not None else anchor_ode_lr_ratio)
-        method_group_name = "functional_anchor" if functional_anchor_lr_ratio is not None else "anchor_ode"
+    if anchor_ode_lr_ratio is not None or functional_anchor_lr_ratio is not None or cardia_lr_ratio is not None:
+        if cardia_lr_ratio is not None:
+            method_lr_ratio = float(cardia_lr_ratio)
+            method_group_name = "cardia"
+        elif functional_anchor_lr_ratio is not None:
+            method_lr_ratio = float(functional_anchor_lr_ratio)
+            method_group_name = "functional_anchor"
+        else:
+            method_lr_ratio = float(anchor_ode_lr_ratio)
+            method_group_name = "anchor_ode"
         unext_params = []
         unext_no_decay_params = []
         temporal_params = []
@@ -82,16 +90,17 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                     log.info(f'{name} counted as a GAR/CARDIA selector parameter.')
             elif name.startswith((
                 'boundary_fusion.edge_gate.',
+                'boundary_fusion.edge_gate_head.',
                 'boundary_fusion.channel_gate.',
                 'boundary_fusion.boundary_aux_head.',
             )):
                 gar_boundary_params.append(param)
                 if print_log:
-                    log.info(f'{name} counted as a GAR/CARDIA boundary gate parameter.')
+                    log.info(f'{name} counted as a CARDIA/GAR boundary gate parameter.')
             elif name.startswith('proposal_head.'):
                 gar_proposal_params.append(param)
                 if print_log:
-                    log.info(f'{name} counted as a GAR proposal head parameter.')
+                    log.info(f'{name} counted as a CARDIA/GAR proposal head parameter.')
             elif method_group_name == "functional_anchor" and name.startswith(
                 ('residual_heads.', 'faf.residual_head.', 'faf.residual_refiner.', 'faf.trust_gate_net.', 'faf.fusion.')
             ):
@@ -128,7 +137,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
             )):
                 (temporal_no_decay_params if no_decay_name(name) else temporal_params).append(param)
                 if print_log:
-                    log.info(f'{name} counted as a {method_group_name} parameter.')
+                    log.info(f'{name} counted as a {method_group_name} method parameter.')
             elif any(name.endswith(e) for e in embedding_names):
                 embed_params.append(param)
                 if print_log:
@@ -165,25 +174,25 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'params': gar_offset_params,
                 'lr': base_lr * method_lr_ratio * gar_offset_lr_mult,
                 'weight_decay': weight_decay,
-                'name': 'gar_offset',
+                'name': 'cardia_gar_offset',
             },
             {
                 'params': gar_selector_params,
                 'lr': base_lr * method_lr_ratio * gar_selector_lr_mult,
                 'weight_decay': 0.0,
-                'name': 'gar_selector',
+                'name': 'cardia_gar_selector',
             },
             {
                 'params': gar_boundary_params,
                 'lr': base_lr * method_lr_ratio * gar_boundary_lr_mult,
                 'weight_decay': 0.0,
-                'name': 'gar_boundary_gate',
+                'name': 'cardia_gar_boundary_gate',
             },
             {
                 'params': gar_proposal_params,
                 'lr': base_lr * method_lr_ratio * gar_proposal_lr_mult,
                 'weight_decay': weight_decay,
-                'name': 'gar_proposal_head',
+                'name': 'cardia_gar_proposal_head',
             },
             {
                 'params': residual_params,

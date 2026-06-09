@@ -20,14 +20,10 @@ main_training:
   weight_decay: 0.001
   embed_weight_decay: 0.0
   backbone_lr_ratio: 0.1
-  cardia_offset_lr_mult: 0.5
+  cardia_offset_lr_mult: 1.5
   cardia_selector_lr_mult: 2.0
   cardia_boundary_lr_mult: 2.0
   cardia_proposal_lr_mult: 2.0
-  gar_offset_lr_mult: 0.5
-  gar_selector_lr_mult: 2.0
-  gar_boundary_lr_mult: 2.0
-  gar_proposal_lr_mult: 2.0
   num_ref_frames: 10
   seq_length: 10
   num_objects: 1

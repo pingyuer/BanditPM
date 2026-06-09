@@ -53,6 +53,8 @@ class RuntimeMemory(nn.Module):
 
     def __init__(self, channels: int, hidden_dim: int | None = None, token_dim: int = 2) -> None:
         super().__init__()
+        self.anchor_norm = nn.GroupNorm(_group_count(channels), channels)
+        self.state_norm = nn.GroupNorm(_group_count(channels), channels)
         self.relation = RelationEncoder(channels, hidden_dim)
         hidden = self.relation.out_dim
         self.token_proj = nn.Sequential(
@@ -67,6 +69,7 @@ class RuntimeMemory(nn.Module):
             nn.GroupNorm(_group_count(channels), channels),
             nn.GELU(),
             nn.Conv2d(channels, channels, kernel_size=1),
+            nn.GroupNorm(_group_count(channels), channels),
         )
         nn.init.constant_(self.update_gate.bias, -0.5)
 
@@ -82,15 +85,19 @@ class RuntimeMemory(nn.Module):
             runtime_state_prev = F.interpolate(runtime_state_prev, size=anchor_feat_t.shape[-2:], mode="bilinear", align_corners=False)
         token = area_token.to(device=anchor_feat_t.device, dtype=anchor_feat_t.dtype).view(anchor_feat_t.shape[0], -1, 1, 1)
         token = token.expand(-1, -1, anchor_feat_t.shape[-2], anchor_feat_t.shape[-1])
-        relation = self.relation(anchor_feat_t, runtime_state_prev) + self.token_proj(token)
+        anchor_norm = self.anchor_norm(anchor_feat_t)
+        state_norm = self.state_norm(runtime_state_prev)
+        relation = self.relation(anchor_norm, state_norm) + self.token_proj(token)
         reset = torch.sigmoid(self.reset_gate(relation))
         update = torch.sigmoid(self.update_gate(relation))
-        candidate = torch.tanh(self.candidate(torch.cat([relation, reset * runtime_state_prev], dim=1)))
+        candidate = self.candidate(torch.cat([relation, reset * runtime_state_prev], dim=1))
         runtime_state_t = (1.0 - update) * runtime_state_prev + update * candidate
         aux = {
             "runtime_update_mean": update.detach().mean(dim=(1, 2, 3)),
             "runtime_reset_mean": reset.detach().mean(dim=(1, 2, 3)),
             "runtime_state_norm": runtime_state_t.detach().flatten(1).norm(dim=1),
+            "runtime_state_abs_mean": runtime_state_t.detach().abs().mean(dim=(1, 2, 3)),
+            "runtime_state_rms": runtime_state_t.detach().pow(2).mean(dim=(1, 2, 3)).sqrt(),
         }
         return runtime_state_t, aux
 
@@ -109,6 +116,7 @@ class MemoryODEGenerator(nn.Module):
         enable_decay_gate: bool = False,
         decay_gate_bias: float = 1.5,
         stage2_bias_eps: float = 0.0,
+        token_dim: int = 2,
     ) -> None:
         super().__init__()
         self.num_heads = int(num_heads)
@@ -116,8 +124,15 @@ class MemoryODEGenerator(nn.Module):
         self.selector_logit_scale_max = float(selector_logit_scale_max)
         self.stage2_bias_eps = float(stage2_bias_eps)
         self.enable_decay_gate = bool(enable_decay_gate)
+        self.anchor_norm = nn.GroupNorm(_group_count(channels), channels)
+        self.state_norm = nn.GroupNorm(_group_count(channels), channels)
         self.relation = RelationEncoder(channels, hidden_dim)
         hidden = self.relation.out_dim
+        self.token_proj = nn.Sequential(
+            nn.Conv2d(token_dim, hidden, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden, hidden, kernel_size=1),
+        )
         self.offset_head = nn.Conv2d(hidden, self.num_heads * 2, kernel_size=1)
         self.spatial_selector = nn.Conv2d(hidden, self.num_heads, kernel_size=1)
         self.global_selector = nn.Sequential(
@@ -139,14 +154,29 @@ class MemoryODEGenerator(nn.Module):
     def _selector_scale(self) -> torch.Tensor:
         return self.raw_selector_logit_scale.exp().clamp(0.05, self.selector_logit_scale_max)
 
-    def forward(self, anchor_feat_t: torch.Tensor, runtime_state_t: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        anchor_feat_t: torch.Tensor,
+        runtime_state_t: torch.Tensor,
+        area_token: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         B, _, H, W = anchor_feat_t.shape
-        relation = self.relation(anchor_feat_t, runtime_state_t)
+        relation = self.relation(self.anchor_norm(anchor_feat_t), self.state_norm(runtime_state_t))
+        if area_token is not None:
+            token = area_token.to(device=anchor_feat_t.device, dtype=anchor_feat_t.dtype).view(B, -1, 1, 1)
+            token = token.expand(-1, -1, H, W)
+            relation = relation + self.token_proj(token)
         raw_offsets = self.offset_head(relation).view(B, self.num_heads, 2, H, W)
         offset_px = torch.tanh(raw_offsets) * self.max_offset_px
         if self.stage2_bias_eps > 0 and self.num_heads > 1:
-            bias = torch.linspace(-self.stage2_bias_eps, self.stage2_bias_eps, self.num_heads, device=offset_px.device, dtype=offset_px.dtype)
-            offset_px = offset_px + bias.view(1, self.num_heads, 1, 1, 1)
+            pattern = torch.tensor(
+                [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)],
+                device=offset_px.device,
+                dtype=offset_px.dtype,
+            )
+            repeats = math.ceil(self.num_heads / pattern.shape[0])
+            bias = pattern.repeat(repeats, 1)[: self.num_heads] * self.stage2_bias_eps
+            offset_px = offset_px + bias.view(1, self.num_heads, 2, 1, 1)
         flow_x = offset_px[:, :, 0] * (2.0 / float(W))
         flow_y = offset_px[:, :, 1] * (2.0 / float(H))
         ode_flow_t = torch.stack([flow_x, flow_y], dim=2)
@@ -158,7 +188,8 @@ class MemoryODEGenerator(nn.Module):
         selector_scale = self._selector_scale()
         selector_map_logits = (spatial_logits + global_logits) * selector_scale
         selector_weights = torch.softmax(selector_map_logits, dim=1)
-        selector_logits = selector_map_logits.mean(dim=(2, 3))
+        global_selector_logits = (global_logits.flatten(1) * selector_scale)
+        selector_scores = global_selector_logits
         write = torch.sigmoid(self.write_head(relation))
         decay = torch.sigmoid(self.decay_head(relation)) if self.decay_head is not None else torch.zeros_like(write)
 
@@ -179,7 +210,9 @@ class MemoryODEGenerator(nn.Module):
             "ode_flow_t": ode_flow_t,
             "offset_px": offset_px,
             "selector_weights": selector_weights,
-            "selector_logits": selector_logits,
+            "global_selector_logits": global_selector_logits,
+            "selector_scores": selector_scores,
+            "selector_logits": global_selector_logits,
             "selector_logit_scale": selector_scale.detach().reshape(1),
             "write": write,
             "decay": decay,
@@ -233,7 +266,7 @@ class DynamicAnchorFusion(nn.Module):
         self.delta_proj = nn.Conv2d(channels, channels, kernel_size=1)
         self.gate = nn.Conv2d(channels * 3, channels, kernel_size=1)
         self.raw_gamma = nn.Parameter(torch.tensor(_softplus_inverse(gamma_init)))
-        nn.init.zeros_(self.delta_proj.weight)
+        nn.init.normal_(self.delta_proj.weight, mean=0.0, std=1.0e-3)
         nn.init.zeros_(self.delta_proj.bias)
 
     def forward(
@@ -250,12 +283,23 @@ class DynamicAnchorFusion(nn.Module):
             "gamma": gamma.detach().reshape(1),
             "fusion_gate_mean": gate.detach().mean(dim=(1, 2, 3)),
             "delta_abs_mean": delta.detach().abs().mean(dim=(1, 2, 3)),
+            "dynamic_anchor_minus_anchor_abs_mean": (dynamic_anchor_t - anchor_feat_t).detach().abs().mean(dim=(1, 2, 3)),
+            "fused_minus_anchor_abs_mean": (final_feature_t - anchor_feat_t).detach().abs().mean(dim=(1, 2, 3)),
         }
 
 
 class ShapeBoundaryFusion(nn.Module):
-    def __init__(self, feature_channels: int, skip_channels: int, context_channels: int, gamma_init: float = 0.03) -> None:
+    def __init__(
+        self,
+        feature_channels: int,
+        skip_channels: int,
+        context_channels: int,
+        gamma_init: float = 0.03,
+        edge_gate_floor: float = 0.05,
+        edge_gate_bias: float = -1.0,
+    ) -> None:
         super().__init__()
+        self.edge_gate_floor = float(edge_gate_floor)
         self.boundary = nn.Sequential(
             nn.Conv2d(skip_channels, skip_channels, kernel_size=3, padding=1, groups=skip_channels),
             nn.GroupNorm(_group_count(skip_channels), skip_channels),
@@ -266,17 +310,16 @@ class ShapeBoundaryFusion(nn.Module):
         )
         self.context_proj = nn.Conv2d(context_channels, feature_channels, kernel_size=1)
         self.delta_proj = nn.Conv2d(feature_channels, feature_channels, kernel_size=1)
-        self.edge_gate = nn.Conv2d(feature_channels * 4, 1, kernel_size=1)
+        self.edge_gate_head = nn.Conv2d(feature_channels * 4, 1, kernel_size=1)
         self.channel_gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(feature_channels * 4, feature_channels, kernel_size=1),
             nn.Sigmoid(),
         )
-        self.boundary_aux_head = nn.Conv2d(feature_channels * 4, 1, kernel_size=1)
         self.raw_gamma = nn.Parameter(torch.tensor(_softplus_inverse(gamma_init)))
-        nn.init.zeros_(self.delta_proj.weight)
+        nn.init.normal_(self.delta_proj.weight, mean=0.0, std=1.0e-3)
         nn.init.zeros_(self.delta_proj.bias)
-        nn.init.constant_(self.edge_gate.bias, -2.0)
+        nn.init.constant_(self.edge_gate_head.bias, float(edge_gate_bias))
 
     def forward(
         self,
@@ -291,18 +334,22 @@ class ShapeBoundaryFusion(nn.Module):
         if context.shape[-2:] != decoder_feature_t.shape[-2:]:
             context = F.interpolate(context, size=decoder_feature_t.shape[-2:], mode="bilinear", align_corners=False)
         raw_delta = self.delta_proj(boundary + context - decoder_feature_t)
-        delta = torch.tanh(raw_delta)
+        delta = 0.5 * torch.tanh(raw_delta)
         gate_input = torch.cat([decoder_feature_t, boundary, context, delta], dim=1)
-        edge_gate = torch.sigmoid(self.edge_gate(gate_input))
+        edge_logit = self.edge_gate_head(gate_input)
+        edge_gate = torch.sigmoid(edge_logit)
+        edge_effective = self.edge_gate_floor + (1.0 - self.edge_gate_floor) * edge_gate
         channel_gate = self.channel_gate(gate_input)
         gamma = F.softplus(self.raw_gamma)
-        out = decoder_feature_t + gamma * edge_gate * channel_gate * delta
+        out = decoder_feature_t + gamma * edge_effective * channel_gate * delta
         edge_flat = edge_gate.detach().flatten(1).float()
         return out, {
-            "boundary_logits": self.boundary_aux_head(gate_input),
+            "boundary_logits": edge_logit,
             "boundary_edge_gate": edge_gate,
+            "boundary_edge_effective": edge_effective,
             "boundary_gamma": gamma.detach().reshape(1),
             "boundary_edge_gate_mean": edge_gate.detach().mean(dim=(1, 2, 3)),
+            "boundary_edge_effective_mean": edge_effective.detach().mean(dim=(1, 2, 3)),
             "boundary_edge_gate_p05": torch.quantile(edge_flat, 0.05, dim=1).to(edge_gate.dtype),
             "boundary_edge_gate_p95": torch.quantile(edge_flat, 0.95, dim=1).to(edge_gate.dtype),
             "boundary_channel_gate_mean": channel_gate.detach().mean(dim=(1, 2, 3)),
@@ -331,8 +378,11 @@ class CARDIA(nn.Module):
         hidden_dim = _cfg_get(method_cfg, "hidden_dim", None)
         hidden_dim = None if hidden_dim in (None, "null") else int(hidden_dim)
         write_gate_bias = float(_cfg_get(method_cfg, "write_gate_bias", -0.5))
+        stage3_write_gate_bias = float(_cfg_get(method_cfg, "stage3_write_gate_bias", write_gate_bias))
+        stage2_write_gate_bias = float(_cfg_get(method_cfg, "stage2_write_gate_bias", write_gate_bias))
         selector_logit_scale_init = float(_cfg_get(method_cfg, "selector_logit_scale_init", 2.0))
         selector_logit_scale_max = float(_cfg_get(method_cfg, "selector_logit_scale_max", 8.0))
+        self.stage3_injection_scale = float(_cfg_get(method_cfg, "stage3_injection_scale", 0.5))
 
         self.backbone = UNeXtBackbone(
             in_channels=self.in_channels,
@@ -348,7 +398,7 @@ class CARDIA(nn.Module):
             num_heads=self.stage3_num_heads,
             max_offset_px=self.stage3_max_offset_px,
             hidden_dim=hidden_dim,
-            write_gate_bias=write_gate_bias,
+            write_gate_bias=stage3_write_gate_bias,
             selector_logit_scale_init=selector_logit_scale_init,
             selector_logit_scale_max=selector_logit_scale_max,
             enable_decay_gate=bool(_cfg_get(method_cfg, "stage3_decay_gate", True)),
@@ -359,7 +409,7 @@ class CARDIA(nn.Module):
             num_heads=self.stage2_num_heads,
             max_offset_px=self.stage2_max_offset_px,
             hidden_dim=hidden_dim,
-            write_gate_bias=write_gate_bias,
+            write_gate_bias=stage2_write_gate_bias,
             selector_logit_scale_init=selector_logit_scale_init,
             selector_logit_scale_max=selector_logit_scale_max,
             stage2_bias_eps=float(_cfg_get(method_cfg, "stage2_head_bias_eps", 1.0e-3)),
@@ -373,6 +423,8 @@ class CARDIA(nn.Module):
             self.base_dim,
             self.base_dim * 2,
             gamma_init=float(_cfg_get(method_cfg, "boundary_gamma_init", 0.03)),
+            edge_gate_floor=float(_cfg_get(method_cfg, "boundary_edge_gate_floor", 0.05)),
+            edge_gate_bias=float(_cfg_get(method_cfg, "boundary_edge_gate_bias", -1.0)),
         )
 
     def _load_pretrained_anchor_if_requested(self, method_cfg) -> None:
@@ -434,10 +486,10 @@ class CARDIA(nn.Module):
             image = self._normalize(images[:, ti])
             encoded = self.backbone.encode(image)
             anchor_feat_t3 = encoded["high"]
-            anchor_feat_t2 = self.backbone.up1(anchor_feat_t3, encoded["mid"])
+            base_anchor_feat_t2 = self.backbone.up1(anchor_feat_t3, encoded["mid"])
             anchor_feat_t1 = encoded["low"]
 
-            base_dec_low = self.backbone.up2(anchor_feat_t2, anchor_feat_t1)
+            base_dec_low = self.backbone.up2(base_anchor_feat_t2, anchor_feat_t1)
             base_dec = F.interpolate(base_dec_low, size=image.shape[-2:], mode="bilinear", align_corners=False)
             base_dec = self.backbone.full_res(base_dec)
             base_object_logits = self.backbone.logits_from_decoder_feature(base_dec)[:, 1:2].expand(-1, max_num_objects, -1, -1)
@@ -446,12 +498,14 @@ class CARDIA(nn.Module):
             prev_area = area.detach()
 
             runtime_state_t3, mem_aux3 = self.runtime_memory3(anchor_feat_t3, runtime_state3, area_token)
-            ode3 = self.ode_gen3(anchor_feat_t3, runtime_state_t3)
+            ode3 = self.ode_gen3(anchor_feat_t3, runtime_state_t3, area_token)
             dynamic_anchor_t3, solved3 = self.grid_solver(anchor_feat_t3, ode3["ode_flow_t"], ode3["selector_weights"])
             final_feature_t3, fuse_aux3 = self.fuse3(anchor_feat_t3, dynamic_anchor_t3, runtime_state_t3)
 
+            stage3_anchor_feat_t2 = self.backbone.up1(final_feature_t3, encoded["mid"])
+            anchor_feat_t2 = base_anchor_feat_t2 + self.stage3_injection_scale * (stage3_anchor_feat_t2 - base_anchor_feat_t2)
             runtime_state_t2, mem_aux2 = self.runtime_memory2(anchor_feat_t2, runtime_state2, area_token)
-            ode2 = self.ode_gen2(anchor_feat_t2, runtime_state_t2)
+            ode2 = self.ode_gen2(anchor_feat_t2, runtime_state_t2, area_token)
             dynamic_anchor_t2, solved2 = self.grid_solver(anchor_feat_t2, ode2["ode_flow_t"], ode2["selector_weights"])
             final_feature_t2, fuse_aux2 = self.fuse2(anchor_feat_t2, dynamic_anchor_t2, runtime_state_t2)
 
@@ -464,7 +518,7 @@ class CARDIA(nn.Module):
 
             proposal_logits = self._proposal_logits(solved2, image.shape[-2:])
             proposal_logits = proposal_logits[:, None].expand(-1, max_num_objects, -1, -1, -1)
-            head_weights = torch.softmax(ode2["selector_logits"], dim=-1)[:, None].expand(-1, max_num_objects, -1)
+            head_weights = torch.softmax(ode2["global_selector_logits"], dim=-1)[:, None].expand(-1, max_num_objects, -1)
             top_idx = head_weights[:, :1].argmax(dim=-1)
             top1 = proposal_logits[:, :1].gather(
                 2,
@@ -484,7 +538,9 @@ class CARDIA(nn.Module):
                 "proposal_logits": proposal_logits,
                 "proposal_top1_logits": top1.expand(-1, max_num_objects, -1, -1),
                 "head_weights": head_weights,
-                "selector_logits": ode2["selector_logits"][:, None].expand(-1, max_num_objects, -1),
+                "selector_logits": ode2["global_selector_logits"][:, None].expand(-1, max_num_objects, -1),
+                "global_selector_logits": ode2["global_selector_logits"][:, None].expand(-1, max_num_objects, -1),
+                "selector_scores": ode2["selector_scores"][:, None].expand(-1, max_num_objects, -1),
                 "boundary_logits": boundary_aux["boundary_logits"],
                 "boundary_edge_gate": boundary_aux["boundary_edge_gate"],
                 "runtime_state_detached": torch.tensor(float(self.detach_runtime_state), device=images.device, dtype=images.dtype),
@@ -495,9 +551,14 @@ class CARDIA(nn.Module):
                 "stage3_decay_mean": ode3["decay_mean"],
                 "stage3_gamma": fuse_aux3["gamma"],
                 "stage3_fusion_gate_mean": fuse_aux3["fusion_gate_mean"],
+                "stage3_dynamic_anchor_minus_anchor_abs_mean": fuse_aux3["dynamic_anchor_minus_anchor_abs_mean"],
+                "stage3_fused_minus_anchor_abs_mean": fuse_aux3["fused_minus_anchor_abs_mean"],
+                "stage3_injected_minus_base_abs_mean": (anchor_feat_t2 - base_anchor_feat_t2).detach().abs().mean(dim=(1, 2, 3)),
                 "stage3_runtime_update_mean": mem_aux3["runtime_update_mean"],
                 "stage3_runtime_reset_mean": mem_aux3["runtime_reset_mean"],
                 "stage3_runtime_state_norm": mem_aux3["runtime_state_norm"],
+                "stage3_runtime_state_abs_mean": mem_aux3["runtime_state_abs_mean"],
+                "stage3_runtime_state_rms": mem_aux3["runtime_state_rms"],
                 "stage3_head_usage": ode3["head_usage"],
                 "stage3_global_selector_entropy": ode3["global_selector_entropy"],
                 "stage2_flow_smooth": ode2["flow_smooth"],
@@ -506,6 +567,8 @@ class CARDIA(nn.Module):
                 "stage2_write_mean": ode2["write_mean"],
                 "stage2_decay_mean": ode2["decay_mean"],
                 "stage2_gamma": fuse_aux2["gamma"],
+                "stage2_dynamic_anchor_minus_anchor_abs_mean": fuse_aux2["dynamic_anchor_minus_anchor_abs_mean"],
+                "stage2_fused_minus_anchor_abs_mean": fuse_aux2["fused_minus_anchor_abs_mean"],
                 "stage2_selector_logit_scale": ode2["selector_logit_scale"],
                 "stage2_global_selector_entropy": ode2["global_selector_entropy"],
                 "stage2_head_entropy": ode2["head_entropy"],
@@ -514,8 +577,11 @@ class CARDIA(nn.Module):
                 "stage2_runtime_update_mean": mem_aux2["runtime_update_mean"],
                 "stage2_runtime_reset_mean": mem_aux2["runtime_reset_mean"],
                 "stage2_runtime_state_norm": mem_aux2["runtime_state_norm"],
+                "stage2_runtime_state_abs_mean": mem_aux2["runtime_state_abs_mean"],
+                "stage2_runtime_state_rms": mem_aux2["runtime_state_rms"],
                 "boundary_gamma": boundary_aux["boundary_gamma"],
                 "boundary_edge_gate_mean": boundary_aux["boundary_edge_gate_mean"],
+                "boundary_edge_effective_mean": boundary_aux["boundary_edge_effective_mean"],
                 "boundary_edge_gate_p05": boundary_aux["boundary_edge_gate_p05"],
                 "boundary_edge_gate_p95": boundary_aux["boundary_edge_gate_p95"],
                 "boundary_channel_gate_mean": boundary_aux["boundary_channel_gate_mean"],

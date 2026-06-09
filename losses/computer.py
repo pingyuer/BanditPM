@@ -161,6 +161,12 @@ class LossComputer(nn.Module):
         self.lambda_cardia_proposal_oracle = float(cardia_cfg.get("lambda_cardia_proposal_oracle", 0.2))
         self.lambda_cardia_selector = float(cardia_cfg.get("lambda_cardia_selector", 0.1))
         self.lambda_cardia_flow_smooth = float(cardia_cfg.get("lambda_cardia_flow_smooth", 0.005))
+        self.lambda_cardia_stage3_flow_smooth = float(
+            cardia_cfg.get("lambda_cardia_stage3_flow_smooth", self.lambda_cardia_flow_smooth)
+        )
+        self.lambda_cardia_stage2_flow_smooth = float(
+            cardia_cfg.get("lambda_cardia_stage2_flow_smooth", self.lambda_cardia_flow_smooth)
+        )
         self.lambda_cardia_boundary_aux = float(cardia_cfg.get("lambda_cardia_boundary_aux", 0.02))
         self.cardia_selector_temperature = float(cardia_cfg.get("selector_temperature", 0.1))
         self.cardia_proposal_softmin_temperature = float(cardia_cfg.get("proposal_softmin_temperature", 0.3))
@@ -672,11 +678,14 @@ class LossComputer(nn.Module):
                             target = torch.softmax(-stacked / max(self.cardia_selector_temperature, 1.0e-4), dim=0).unsqueeze(0)
                             selector_terms.append(F.kl_div(F.log_softmax(logits, dim=-1), target, reduction="batchmean"))
 
-                for src in ("stage2_flow_smooth", "stage3_flow_smooth"):
+                for src, weight in (
+                    ("stage2_flow_smooth", self.lambda_cardia_stage2_flow_smooth),
+                    ("stage3_flow_smooth", self.lambda_cardia_stage3_flow_smooth),
+                ):
                     value = aux.get(src)
-                    if torch.is_tensor(value) and self.lambda_cardia_flow_smooth > 0:
+                    if torch.is_tensor(value) and weight > 0:
                         item = value[bi : bi + 1] if value.dim() > 0 and value.shape[0] > bi else value
-                        smooth_terms.append(item.float().mean())
+                        smooth_terms.append(item.float().mean() * weight)
 
                 boundary_logits = aux.get("boundary_logits")
                 if torch.is_tensor(boundary_logits) and self.lambda_cardia_boundary_aux > 0:
@@ -707,7 +716,7 @@ class LossComputer(nn.Module):
         if smooth_terms:
             raw = torch.stack(smooth_terms).mean()
             out["raw_cardia_flow_smooth"] = raw.detach()
-            out["aux_cardia_flow_smooth"] = raw * self.lambda_cardia_flow_smooth
+            out["aux_cardia_flow_smooth"] = raw
         if boundary_terms:
             raw = torch.stack(boundary_terms).mean()
             out["raw_cardia_boundary_aux"] = raw.detach()

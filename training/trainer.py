@@ -713,6 +713,7 @@ class Trainer:
                 self._log_gar_stats(data, it)
                 self._log_cardia_stats(data, it)
                 self._log_functional_anchor_grad_stats(it)
+                self._log_cardia_grad_stats(it)
 
         return loss.detach()
 
@@ -722,6 +723,22 @@ class Trainer:
                 "total_loss": total_loss,
                 "lr": self.scheduler.get_last_lr()[0],
             }
+            model_name = str(self.cfg.get("model", {}).get("name", "")).lower()
+            if model_name == "cardia":
+                active_lambda_prefixes = ("lambda_cardia_",)
+            elif model_name in ("unext_gar", "unext_gar_grid_v2", "unext_gar_gridv2"):
+                active_lambda_prefixes = ("lambda_gar_",)
+            elif model_name in ("faf", "unext_ode_affine", "unext_ode_affine_echo"):
+                active_lambda_prefixes = ("lambda_faf_",)
+            elif model_name == "functional_anchor":
+                active_lambda_prefixes = ("lambda_functional_anchor_",)
+            else:
+                active_lambda_prefixes = (
+                    "lambda_cardia_",
+                    "lambda_gar_",
+                    "lambda_faf_",
+                    "lambda_functional_anchor_",
+                )
             for k, v in losses.items():
                 if isinstance(v, torch.Tensor):
                     log_dict[k] = v.item()
@@ -760,8 +777,12 @@ class Trainer:
                 ("lambda_cardia_proposal_oracle", "proposal_oracle"),
                 ("lambda_cardia_selector", "selector"),
                 ("lambda_cardia_flow_smooth", "flow_smooth"),
+                ("lambda_cardia_stage3_flow_smooth", "stage3_flow_smooth"),
+                ("lambda_cardia_stage2_flow_smooth", "stage2_flow_smooth"),
                 ("lambda_cardia_boundary_aux", "boundary_aux"),
             ):
+                if not attr.startswith(active_lambda_prefixes):
+                    continue
                 if hasattr(self.loss_computer, attr):
                     if attr.startswith("lambda_faf_"):
                         prefix = "lambda_faf"
@@ -823,6 +844,22 @@ class Trainer:
         temp = getattr(self.model_without_ddp, "anchor_temperature_raw", None)
         if isinstance(temp, torch.nn.Parameter) and temp.grad is not None:
             metrics["grad/anchor_temperature"] = float(temp.grad.detach().abs().item())
+        if metrics:
+            self._log_metrics(metrics, step=it)
+
+    def _log_cardia_grad_stats(self, it: int) -> None:
+        if str(self.cfg.get("model", {}).get("name", "")).lower() not in {"cardia", "unext_cardia"}:
+            return
+        metrics = {}
+        for key, prefixes in {
+            "cardia/grad/offset_head_norm": ("ode_gen2.offset_head.", "ode_gen3.offset_head."),
+            "cardia/grad/odegen_norm": ("ode_gen2.", "ode_gen3."),
+            "cardia/grad/delta_proj_norm": ("fuse2.delta_proj.", "fuse3.delta_proj.", "boundary_fusion.delta_proj."),
+            "cardia/grad/runtime_memory_norm": ("runtime_memory2.", "runtime_memory3."),
+        }.items():
+            value = self._grad_norm_for_prefixes(prefixes)
+            if value is not None:
+                metrics[key] = value
         if metrics:
             self._log_metrics(metrics, step=it)
 
@@ -1383,9 +1420,14 @@ class Trainer:
                 "stage3_write_mean": [],
                 "stage3_decay_mean": [],
                 "stage3_gamma": [],
+                "stage3_dynamic_anchor_minus_anchor_abs_mean": [],
+                "stage3_fused_minus_anchor_abs_mean": [],
+                "stage3_injected_minus_base_abs_mean": [],
                 "stage3_runtime_update_mean": [],
                 "stage3_runtime_reset_mean": [],
                 "stage3_runtime_state_norm": [],
+                "stage3_runtime_state_abs_mean": [],
+                "stage3_runtime_state_rms": [],
                 "stage3_global_selector_entropy": [],
                 "stage2_flow_smooth": [],
                 "stage2_offset_px_mean": [],
@@ -1393,6 +1435,8 @@ class Trainer:
                 "stage2_write_mean": [],
                 "stage2_decay_mean": [],
                 "stage2_gamma": [],
+                "stage2_dynamic_anchor_minus_anchor_abs_mean": [],
+                "stage2_fused_minus_anchor_abs_mean": [],
                 "stage2_selector_logit_scale": [],
                 "stage2_global_selector_entropy": [],
                 "stage2_head_entropy": [],
@@ -1400,8 +1444,11 @@ class Trainer:
                 "stage2_runtime_update_mean": [],
                 "stage2_runtime_reset_mean": [],
                 "stage2_runtime_state_norm": [],
+                "stage2_runtime_state_abs_mean": [],
+                "stage2_runtime_state_rms": [],
                 "boundary_gamma": [],
                 "boundary_edge_gate_mean": [],
+                "boundary_edge_effective_mean": [],
                 "boundary_edge_gate_p05": [],
                 "boundary_edge_gate_p95": [],
                 "boundary_channel_gate_mean": [],

@@ -55,13 +55,21 @@ def test_cardia_forward_contract_and_diagnostics():
     assert aux["proposal_logits"].shape == (2, 1, 3, 64, 64)
     assert aux["head_weights"].shape == (2, 1, 3)
     assert aux["selector_logits"].shape == (2, 1, 3)
+    assert torch.allclose(aux["selector_logits"], aux["global_selector_logits"])
+    assert torch.allclose(aux["head_weights"], torch.softmax(aux["global_selector_logits"], dim=-1))
     assert aux["stage3_gamma"].item() >= 0.0
     assert aux["stage2_gamma"].item() >= 0.0
     assert aux["boundary_gamma"].item() >= 0.0
     assert aux["runtime_state_detached"].item() == 1.0
     assert aux["stage3_decay_mean"].shape == (2,)
+    assert aux["stage3_dynamic_anchor_minus_anchor_abs_mean"].shape == (2,)
+    assert aux["stage3_runtime_state_abs_mean"].shape == (2,)
+    assert aux["stage3_runtime_state_rms"].shape == (2,)
+    assert aux["stage2_dynamic_anchor_minus_anchor_abs_mean"].shape == (2,)
     assert aux["stage2_head_usage"].shape == (2, 3)
     assert aux["boundary_edge_gate"].shape == (2, 1, 64, 64)
+    assert torch.allclose(torch.sigmoid(aux["boundary_logits"]), aux["boundary_edge_gate"], atol=1.0e-6)
+    assert aux["boundary_edge_effective_mean"].shape == (2,)
     assert aux["boundary_edge_gate_mean"].shape == (2,)
 
 
@@ -71,3 +79,24 @@ def test_registry_builds_cardia_aliases():
         cfg.model.name = alias
         model = MODEL_REGISTRY.build(cfg, device=torch.device("cpu"))
         assert isinstance(model, CARDIA)
+
+
+def test_cardia_stage3_dynamic_path_has_gradient_to_final_logits():
+    model = CARDIA(_cfg())
+    data = {
+        "rgb": torch.rand(1, 2, 1, 64, 64),
+        "info": {"num_objects": torch.ones(1, dtype=torch.long)},
+    }
+    out = model(data)
+    loss = out["logits_1"][:, 1].mean()
+    loss.backward()
+    grad = model.ode_gen3.offset_head.weight.grad
+    assert grad is not None
+    assert float(grad.abs().sum().item()) > 0.0
+
+
+def test_cardia_dynamic_and_boundary_delta_proj_are_small_nonzero_init():
+    model = CARDIA(_cfg())
+    assert float(model.fuse3.delta_proj.weight.abs().sum().item()) > 0.0
+    assert float(model.fuse2.delta_proj.weight.abs().sum().item()) > 0.0
+    assert float(model.boundary_fusion.delta_proj.weight.abs().sum().item()) > 0.0
