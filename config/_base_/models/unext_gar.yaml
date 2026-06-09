@@ -1,0 +1,33 @@
+# UNeXt GridAnchorRouter
+model_name: "UNeXtGAR"
+
+model:
+  name: "unext_gar"
+  allow_oracle_init_when_requested: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0
+  temporal_memory:
+    type: none
+    bpm:
+      ENABLE: false
+  unext_gar:
+    in_channels: 1
+    num_classes: 2
+    base_dim: 32
+    value_dim: 128
+    num_heads: 4
+    hidden_dim: null
+    max_offset: 0.12
+    padding_mode: "border"
+    align_corners: false
+    detach_state: true
+    update_gate_bias: 1.0
+    require_pretrained_unext: false
+    pretrained_unext_path: null
+    pretrained_unext_strict_backbone: false
+    lambda_gar_base: 0.4
+    lambda_gar_proposal_oracle: 0.2
+    proposal_loss: "best"

@@ -1,8 +1,13 @@
 import unittest
 
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 
+from model.functional_anchor.affine_mixture import AffineMixtureGenerator
+from model.functional_anchor.confidence_fusion import ConfidenceFusion
+from model.functional_anchor.dense_momentum import _identity_grid
+from model.functional_anchor.temporal_affine_update import TemporalAffineUpdater
 from model.unext_faf import UNeXtFAF
 from models.registry import build_model
 from training.parameter_groups import get_parameter_groups
@@ -84,6 +89,86 @@ def _batch(batch_size=2, frames=3, height=32, width=32):
 
 
 class UNeXtFAFTests(unittest.TestCase):
+    def test_affine_grid_identity_and_translation_direction(self):
+        height = width = 9
+        base = torch.zeros(1, 1, height, width)
+        base[0, 0, 4, 4] = 10.0
+        affine = AffineMixtureGenerator(query_dim=1, hidden_dim=4, num_slots=1)
+        identity = affine._affine_matrix(torch.zeros(1, 1, 1, 6)).flatten(0, 2)
+        grid = F.affine_grid(identity, size=(1, 1, height, width), align_corners=False)
+        out = F.grid_sample(base, grid, mode="bilinear", padding_mode="border", align_corners=False)
+        self.assertTrue(torch.allclose(out, base, atol=1.0e-6))
+
+        right = affine._affine_matrix(torch.tensor([[[[0.2, 0.0, 0.0, 0.0, 0.0, 0.0]]]])).flatten(0, 2)
+        grid = F.affine_grid(right, size=(1, 1, height, width), align_corners=False)
+        out = F.grid_sample(base, grid, mode="bilinear", padding_mode="border", align_corners=False)[0, 0]
+        y, x = torch.nonzero(out == out.max())[0].tolist()
+        self.assertEqual((y, x), (4, 5))
+
+    def test_dense_identity_grid_and_backward_direction(self):
+        height = width = 9
+        image = torch.randn(2, 1, height, width)
+        grid = _identity_grid(2, height, width, image.device, image.dtype)
+        out = F.grid_sample(image, grid, mode="bilinear", padding_mode="border", align_corners=False)
+        self.assertTrue(torch.allclose(out, image, atol=1.0e-5))
+
+        point = torch.zeros(1, 1, height, width)
+        point[0, 0, 4, 4] = 10.0
+        shifted_grid = _identity_grid(1, height, width, point.device, point.dtype)
+        shifted_grid[..., 0] += 2.0 / width
+        shifted = F.grid_sample(point, shifted_grid, mode="bilinear", padding_mode="border", align_corners=False)[0, 0]
+        y, x = torch.nonzero(shifted == shifted.max())[0].tolist()
+        self.assertEqual((y, x), (4, 3))
+
+    def test_confidence_fusion_residual_scale_controls_amplitude(self):
+        torch.manual_seed(300)
+        fusion = ConfidenceFusion(dec_dim=2, hidden_dim=4, confidence_init=0.1, residual_clip=0.15)
+        with torch.no_grad():
+            fusion.head[-1].weight.zero_()
+            fusion.head[-1].bias[1] = 10.0
+        decoder = torch.zeros(1, 2, 8, 8)
+        base = torch.zeros(1, 1, 8, 8)
+        mixture = torch.zeros_like(base)
+        uncertainty = torch.zeros(1, 1, 8, 8)
+        boundary = torch.ones(1, 1, 8, 8)
+        _, aux = fusion(
+            decoder,
+            base,
+            mixture,
+            uncertainty,
+            boundary,
+            confidence_max=torch.tensor(0.35),
+            residual_scale=torch.tensor(0.05),
+        )
+        self.assertGreater(float(aux["residual_abs_max"]), 0.045)
+        self.assertLessEqual(float(aux["residual_abs_max"]), 0.0501)
+
+    def test_temporal_affine_truncated_bptt_semantics(self):
+        state = TemporalAffineUpdater(
+            enable=True,
+            velocity_momentum=0.8,
+            decay_min=0.85,
+            truncated_bptt_steps=0,
+        ).initial_state(1, 1, 1, torch.device("cpu"), torch.float32)
+        delta = torch.ones(1, 1, 1, 6, requires_grad=True)
+        common = {
+            "slot_weights": torch.ones(1, 1, 1),
+            "slot_confidence": torch.ones(1, 1, 1),
+            "affine_delta": delta,
+            "frame_quality": torch.ones(1, 1),
+            "area_motion": torch.zeros(1, 1),
+            "dt": torch.tensor(1.0),
+        }
+        updater = TemporalAffineUpdater(enable=True, velocity_momentum=0.8, decay_min=0.85, truncated_bptt_steps=0)
+        next_state, aux = updater.update(state, **common)
+        self.assertEqual(float(aux["online_state_detached"]), 0.0)
+        self.assertTrue(next_state["affine_state"].requires_grad)
+
+        updater_detached = TemporalAffineUpdater(enable=True, velocity_momentum=0.8, decay_min=0.85, truncated_bptt_steps=-1)
+        next_state_detached, aux_detached = updater_detached.update(state, **common)
+        self.assertEqual(float(aux_detached["online_state_detached"]), 1.0)
+        self.assertFalse(next_state_detached["affine_state"].requires_grad)
+
     def test_registry_builds_and_forward_contract(self):
         torch.manual_seed(301)
         model = build_model(_cfg(), device="cpu")

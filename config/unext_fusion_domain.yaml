@@ -7,3 +7,6 @@ defaults:
   - _self_
 
 exp_id: "unext_fusion_domain"
+
+evaluation:
+  protocol_version: "v3_canonical_no_leak"

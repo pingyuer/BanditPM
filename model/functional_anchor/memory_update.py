@@ -6,8 +6,7 @@ import torch.nn as nn
 
 def _safe_rms_norm(x: torch.Tensor, dim=None, eps: float = 1.0e-8) -> torch.Tensor:
     raw = x.float().pow(2).mean(dim=dim)
-    value = torch.where(raw > 0.0, (raw + eps).sqrt(), torch.zeros_like(raw))
-    return value.to(dtype=x.dtype)
+    return (raw + eps).sqrt().to(dtype=x.dtype)
 
 
 class MemoryUpdater:

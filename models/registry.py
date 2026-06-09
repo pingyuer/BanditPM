@@ -8,6 +8,7 @@ from model.delay_ode import DelayODEKeyMapSegmenter
 from model.anchor_ode import UNeXtAnchorODEAffineSegmenter, UNeXtAnchorODESegmenter
 from model.functional_anchor import FunctionalAnchorSegmenter
 from model.unext_faf import UNeXtFAF
+from model.unext_gar import UNeXtGAR
 from model.unext_dynakey import UNeXtDynaKeySegmenter
 
 
@@ -92,6 +93,13 @@ def build_functional_anchor(cfg, *, device: torch.device | str):
 @MODEL_REGISTRY.register("ode_affine")
 def build_unext_faf(cfg, *, device: torch.device | str):
     return UNeXtFAF(_model_cfg(cfg)).to(device)
+
+
+@MODEL_REGISTRY.register("unext_gar")
+@MODEL_REGISTRY.register("grid_anchor_router")
+@MODEL_REGISTRY.register("gar")
+def build_unext_gar(cfg, *, device: torch.device | str):
+    return UNeXtGAR(_model_cfg(cfg)).to(device)
 
 
 def build_model(cfg, *, device: torch.device | str):

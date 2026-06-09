@@ -1,5 +1,5 @@
 defaults:
-  - config_gdkvm_01
+  - gdkvm_echo
   - _self_
 
 exp_id: "delay_ode"

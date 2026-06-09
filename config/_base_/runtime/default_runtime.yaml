@@ -1,5 +1,13 @@
 # @package _global_
 output_root: "outputs/BanditPM"
+data_root: ${oc.env:DATASETS_ROOT,${oc.env:HOME}/datasets}
+processed_root: ${data_root}/processed
+seed: 42
+debug: false
+cudnn_benchmark: true
+save: 0
+save_weights_interval: 200
+save_checkpoint_interval: 200
 
 mlflow:
   enabled: true

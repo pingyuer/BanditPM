@@ -31,9 +31,11 @@ def _integrate_stationary_velocity(velocity: torch.Tensor, steps: int) -> torch.
 class DenseMomentumWarp(nn.Module):
     """Low-resolution stationary velocity warp for anchor/proposal logits.
 
-    The field is predicted in normalized grid coordinates and integrated with a
-    small scaling-and-squaring loop before resampling logits. The final
-    convolution is zero-initialized so the module starts as an identity warp.
+    The field is predicted as a backward sampling displacement in normalized
+    grid coordinates and integrated with a small scaling-and-squaring loop
+    before resampling logits. Positive x samples from the right, so the visible
+    content moves left. The final convolution is zero-initialized so the module
+    starts as an identity warp.
     """
 
     def __init__(
@@ -87,6 +89,7 @@ class DenseMomentumWarp(nn.Module):
         disp_full = F.interpolate(disp, size=(h, w), mode="bilinear", align_corners=False)
         grid = _identity_grid(b * n, h, w, proposal_logits.device, proposal_logits.dtype)
         grid = grid + disp_full.permute(0, 2, 3, 1)
+        valid_grid = (grid[..., 0].abs() <= 1.0) & (grid[..., 1].abs() <= 1.0)
         warped = F.grid_sample(
             proposal_logits.flatten(0, 1).unsqueeze(1),
             grid,
@@ -97,9 +100,15 @@ class DenseMomentumWarp(nn.Module):
         aux = {
             "dense_velocity": velocity.view(b, n, 2, *target),
             "dense_displacement": disp.view(b, n, 2, *target),
+            "dense_backward_displacement": disp.view(b, n, 2, *target),
             "dense_displacement_full": disp_full.view(b, n, 2, h, w),
+            "dense_backward_displacement_full": disp_full.view(b, n, 2, h, w),
+            "dense_content_motion_full": (-disp_full).view(b, n, 2, h, w),
             "dense_flow_abs_mean": disp_full.detach().abs().mean(),
             "dense_flow_abs_max": disp_full.detach().abs().amax(),
+            "dense_flow_pixel_mean": (disp_full.detach().abs().mean() * ((h + w) / 4.0)).to(dtype=proposal_logits.dtype),
+            "dense_valid_ratio": valid_grid.detach().float().mean().to(dtype=proposal_logits.dtype),
+            "dense_oob_ratio": (~valid_grid).detach().float().mean().to(dtype=proposal_logits.dtype),
             "dense_flow_smoothness": self._smoothness(disp_full),
             "dense_warp_delta_abs_mean": (warped.detach() - proposal_logits.detach()).abs().mean(),
         }

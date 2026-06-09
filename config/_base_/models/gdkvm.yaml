@@ -8,3 +8,12 @@ model:
   use_kpff: true
   memory_core:
     type: "original_gdr"
+  temporal_memory:
+    type: "none"
+    bpm:
+      ENABLE: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0

@@ -254,6 +254,9 @@ class FAFModule(nn.Module):
             "residual_scale": residual_scale.detach(),
             "ode_dt": ode_dt.detach(),
             "dense_momentum_enabled": torch.tensor(float(self.use_dense_momentum), device=device, dtype=dtype),
+            "base_logits_abs_max": base_logits.detach().abs().amax(),
+            "proposal_logits_abs_max": mixture_logits.detach().abs().amax(),
+            "final_logits_abs_max": final_logits.detach().abs().amax(),
             "mode": "online",
         }
         aux.update(anchor)

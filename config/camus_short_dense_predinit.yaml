@@ -1,5 +1,4 @@
 defaults:
-  - camus_short_dense_oracle
   - _self_
 
 exp_id: "camus_short_dense_predinit"

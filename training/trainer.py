@@ -416,6 +416,15 @@ class Trainer:
         iou = inter / max(union, 1e-6)
         return dice, iou
 
+    def _binary_boundary_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        mask = (mask.float() > 0.5).float()
+        dilated = F.max_pool2d(mask, kernel_size=3, stride=1, padding=1)
+        eroded = 1.0 - F.max_pool2d(1.0 - mask, kernel_size=3, stride=1, padding=1)
+        return (dilated - eroded).clamp(0.0, 1.0)
+
+    def _boundary_dice(self, pred: torch.Tensor, gt: torch.Tensor) -> float:
+        return self._binary_overlap_metrics(self._binary_boundary_mask(pred), self._binary_boundary_mask(gt))[0]
+
     def _postprocess_enabled(self) -> bool:
         eval_cfg = self.cfg.get("evaluation", {})
         post_cfg = eval_cfg.get("postprocess", {})
@@ -701,6 +710,7 @@ class Trainer:
                 self._log_anchor_ode_stats(data, it)
                 self._log_functional_anchor_stats(data, it)
                 self._log_faf_stats(data, it)
+                self._log_gar_stats(data, it)
                 self._log_functional_anchor_grad_stats(it)
 
         return loss.detach()
@@ -740,9 +750,16 @@ class Trainer:
                 ("lambda_faf_residual_smallness", "residual_smallness"),
                 ("lambda_faf_affine", "affine"),
                 ("lambda_faf_velocity", "velocity"),
+                ("lambda_gar_base", "base"),
+                ("lambda_gar_proposal_oracle", "proposal_oracle"),
             ):
                 if hasattr(self.loss_computer, attr):
-                    prefix = "lambda_faf" if attr.startswith("lambda_faf_") else "lambda_functional_anchor"
+                    if attr.startswith("lambda_faf_"):
+                        prefix = "lambda_faf"
+                    elif attr.startswith("lambda_gar_"):
+                        prefix = "lambda_gar"
+                    else:
+                        prefix = "lambda_functional_anchor"
                     log_dict[f"{prefix}_{name}"] = getattr(self.loss_computer, attr)
             for group in self.optimizer.param_groups:
                 name = group.get("name")
@@ -1264,6 +1281,60 @@ class Trainer:
         except Exception:
             pass
 
+    def _log_gar_stats(self, data, it: int) -> None:
+        memory_keys = sorted(k for k in data.keys() if k.startswith("memory_aux_"))
+        if not memory_keys:
+            return
+        try:
+            buckets = {
+                "stage3_offset_abs_mean": [],
+                "stage3_offset_abs_p95": [],
+                "stage3_trust_mean": [],
+                "stage3_update_gate_mean": [],
+                "stage3_gamma": [],
+                "stage3_head_entropy": [],
+                "stage3_head_top1_usage": [],
+                "stage3_head_max_weight": [],
+                "stage2_offset_abs_mean": [],
+                "stage2_offset_abs_p95": [],
+                "stage2_trust_mean": [],
+                "stage2_update_gate_mean": [],
+                "stage2_gamma": [],
+                "stage2_head_entropy": [],
+                "stage2_head_top1_usage": [],
+                "stage2_head_max_weight": [],
+                "boundary_gamma": [],
+                "boundary_gate_mean": [],
+                "boundary_delta_abs_mean": [],
+                "final_minus_base_logit_abs_mean": [],
+                "state_detached": [],
+            }
+            for key in memory_keys:
+                aux = data.get(key)
+                gar = aux.get("gar_aux") if isinstance(aux, dict) else None
+                if not isinstance(gar, dict):
+                    continue
+                for name in buckets:
+                    value = gar.get(name)
+                    if torch.is_tensor(value):
+                        buckets[name].append(value.float().detach().flatten())
+            metrics = {}
+            for name, tensors in buckets.items():
+                if not tensors:
+                    continue
+                value = torch.cat(tensors).mean().item()
+                self.log.log_scalar(f"gar/{name}", value, it)
+                metrics[name] = value
+            if metrics:
+                logger = getattr(self, "mlflow_logger", None)
+                if logger is not None:
+                    if hasattr(logger, "log_gar_diagnostics"):
+                        logger.log_gar_diagnostics(metrics, step=it)
+                    else:
+                        logger.log_metrics(metrics, step=it, prefix="gar")
+        except Exception:
+            pass
+
     def evaluate(
         self, val_loader, epoch, run_path, it, local_rank=None, world_size=None, full_eval: bool = False
     ):
@@ -1343,6 +1414,8 @@ class Trainer:
             "assd_resized_count": 0.0,
             "assd_original_sum": 0.0,
             "assd_original_count": 0.0,
+            "boundary_dice_sum": 0.0,
+            "boundary_dice_count": 0.0,
             "precision_sum": 0.0,
             "recall_sum": 0.0,
             "acc_sum": 0.0,
@@ -1921,6 +1994,7 @@ class Trainer:
                             pred_bin = self._postprocess_binary_mask((pred > active_threshold).float())
                             gt_frame = gt[bi, ti, ...].unsqueeze(0).unsqueeze(0).float()
                             faf_base_dice_curr = None
+                            gar_base_dice_curr = None
                             faf_hard_curr = False
 
                             memory_aux = out.get(f"memory_aux_{ti}")
@@ -2057,6 +2131,61 @@ class Trainer:
                                     metric_totals["functional_anchor_phase_reliability_low_ratio_sum"] += float((rel < 0.5).float().mean().item())
                                 metric_totals["functional_anchor_aux_count"] += 1.0
 
+                            gar_aux = memory_aux.get("gar_aux") if isinstance(memory_aux, dict) else None
+                            if isinstance(gar_aux, dict):
+                                for src, prefix in (
+                                    ("base_object_logits", "gar_base"),
+                                    ("proposal_top1_logits", "gar_proposal_top1"),
+                                ):
+                                    aux_logits = gar_aux.get(src)
+                                    if torch.is_tensor(aux_logits) and aux_logits.shape[0] > bi:
+                                        aux_prob = torch.sigmoid(aux_logits[bi : bi + 1, :1])
+                                        aux_bin = self._postprocess_binary_mask((aux_prob > active_threshold).float())
+                                        aux_dice, _ = self._binary_overlap_metrics(aux_bin, gt_frame)
+                                        metric_totals[f"{prefix}_dice_sum"] = metric_totals.get(f"{prefix}_dice_sum", 0.0) + aux_dice
+                                        metric_totals[f"{prefix}_dice_count"] = metric_totals.get(f"{prefix}_dice_count", 0.0) + 1.0
+                                        if prefix == "gar_base":
+                                            gar_base_dice_curr = aux_dice
+                                proposal_logits = gar_aux.get("proposal_logits")
+                                if torch.is_tensor(proposal_logits) and proposal_logits.shape[0] > bi:
+                                    proposals = proposal_logits[bi : bi + 1, :1]
+                                    proposal_dices = []
+                                    for hi in range(proposals.shape[2]):
+                                        prop_prob = torch.sigmoid(proposals[:, :, hi])
+                                        prop_bin = self._postprocess_binary_mask((prop_prob > active_threshold).float())
+                                        prop_dice, _ = self._binary_overlap_metrics(prop_bin, gt_frame)
+                                        proposal_dices.append(prop_dice)
+                                    if proposal_dices:
+                                        dice_tensor = torch.tensor(proposal_dices, device=pred.device, dtype=torch.float32)
+                                        metric_totals["gar_proposal_oracle_dice_sum"] = metric_totals.get("gar_proposal_oracle_dice_sum", 0.0) + float(dice_tensor.max().item())
+                                        metric_totals["gar_proposal_mean_dice_sum"] = metric_totals.get("gar_proposal_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
+                                        metric_totals["gar_proposal_dice_count"] = metric_totals.get("gar_proposal_dice_count", 0.0) + 1.0
+                                for src, dst in (
+                                    ("stage3_offset_abs_mean", "gar_stage3_offset_abs_mean_sum"),
+                                    ("stage3_offset_abs_p95", "gar_stage3_offset_abs_p95_sum"),
+                                    ("stage3_trust_mean", "gar_stage3_trust_mean_sum"),
+                                    ("stage3_update_gate_mean", "gar_stage3_update_gate_mean_sum"),
+                                    ("stage3_gamma", "gar_stage3_gamma_sum"),
+                                    ("stage3_head_entropy", "gar_stage3_head_entropy_sum"),
+                                    ("stage3_head_top1_usage", "gar_stage3_head_top1_usage_sum"),
+                                    ("stage3_head_max_weight", "gar_stage3_head_max_weight_sum"),
+                                    ("stage2_offset_abs_mean", "gar_stage2_offset_abs_mean_sum"),
+                                    ("stage2_offset_abs_p95", "gar_stage2_offset_abs_p95_sum"),
+                                    ("stage2_trust_mean", "gar_stage2_trust_mean_sum"),
+                                    ("stage2_update_gate_mean", "gar_stage2_update_gate_mean_sum"),
+                                    ("stage2_gamma", "gar_stage2_gamma_sum"),
+                                    ("stage2_head_entropy", "gar_stage2_head_entropy_sum"),
+                                    ("stage2_head_top1_usage", "gar_stage2_head_top1_usage_sum"),
+                                    ("stage2_head_max_weight", "gar_stage2_head_max_weight_sum"),
+                                    ("boundary_gamma", "gar_boundary_gamma_sum"),
+                                    ("boundary_gate_mean", "gar_boundary_gate_mean_sum"),
+                                    ("boundary_delta_abs_mean", "gar_boundary_delta_abs_mean_sum"),
+                                ):
+                                    value = gar_aux.get(src)
+                                    if torch.is_tensor(value):
+                                        metric_totals[dst] = metric_totals.get(dst, 0.0) + float(value.float().mean().item())
+                                metric_totals["gar_aux_count"] = metric_totals.get("gar_aux_count", 0.0) + 1.0
+
                             faf_aux = memory_aux.get("faf_aux") if isinstance(memory_aux, dict) else None
                             if isinstance(faf_aux, dict):
                                 for src, prefix in (
@@ -2115,15 +2244,24 @@ class Trainer:
                                     ("slot_area_diversity", "faf_slot_area_diversity_sum"),
                                     ("write_strength_mean", "faf_write_strength_mean_sum"),
                                     ("memory_update_norm", "faf_memory_update_norm_sum"),
+                                    ("decay_mean", "faf_decay_mean_sum"),
                                     ("affine_delta_norm", "faf_affine_delta_norm_sum"),
                                     ("affine_state_norm", "faf_affine_state_norm_sum"),
+                                    ("affine_valid_ratio", "faf_affine_valid_ratio_sum"),
+                                    ("affine_oob_ratio", "faf_affine_oob_ratio_sum"),
+                                    ("affine_tx_pixel_mean", "faf_affine_tx_pixel_mean_sum"),
+                                    ("affine_ty_pixel_mean", "faf_affine_ty_pixel_mean_sum"),
+                                    ("affine_tx_pixel_abs_mean", "faf_affine_tx_pixel_abs_mean_sum"),
+                                    ("affine_ty_pixel_abs_mean", "faf_affine_ty_pixel_abs_mean_sum"),
                                     ("velocity_norm", "faf_velocity_norm_sum"),
+                                    ("online_state_detached", "faf_online_state_detached_sum"),
                                     ("confidence_mean", "faf_confidence_mean_sum"),
                                     ("confidence_easy_mean", "faf_confidence_easy_mean_sum"),
                                     ("confidence_hard_mean", "faf_confidence_hard_mean_sum"),
                                     ("identity_slot_usage", "faf_identity_slot_usage_sum"),
                                     ("residual_l1", "faf_residual_l1_sum"),
                                     ("residual_l2", "faf_residual_l2_sum"),
+                                    ("residual_abs_max", "faf_residual_abs_max_sum"),
                                     ("safety_residual_l1", "faf_safety_residual_l1_sum"),
                                     ("residual_clip_hit_ratio", "faf_residual_clip_hit_ratio_sum"),
                                     ("residual_scale", "faf_residual_scale_sum"),
@@ -2134,8 +2272,16 @@ class Trainer:
                                     ("feature_modulation_l1_mid", "faf_feature_modulation_l1_mid_sum"),
                                     ("feature_modulation_l1_high", "faf_feature_modulation_l1_high_sum"),
                                     ("feature_modulation_l1_dec", "faf_feature_modulation_l1_dec_sum"),
+                                    ("base_logits_abs_max", "faf_base_logits_abs_max_sum"),
+                                    ("warped_logits_abs_max", "faf_warped_logits_abs_max_sum"),
+                                    ("proposal_logits_abs_max", "faf_proposal_logits_abs_max_sum"),
+                                    ("final_logits_abs_max", "faf_final_logits_abs_max_sum"),
+                                    ("dense_momentum_enabled", "faf_dense_momentum_enabled_sum"),
                                     ("dense_flow_abs_mean", "faf_dense_flow_abs_mean_sum"),
                                     ("dense_flow_abs_max", "faf_dense_flow_abs_max_sum"),
+                                    ("dense_flow_pixel_mean", "faf_dense_flow_pixel_mean_sum"),
+                                    ("dense_valid_ratio", "faf_dense_valid_ratio_sum"),
+                                    ("dense_oob_ratio", "faf_dense_oob_ratio_sum"),
                                     ("dense_flow_smoothness", "faf_dense_flow_smoothness_sum"),
                                     ("dense_warp_delta_abs_mean", "faf_dense_warp_delta_abs_mean_sum"),
                                 ):
@@ -2145,12 +2291,15 @@ class Trainer:
                                 metric_totals["faf_aux_count"] = metric_totals.get("faf_aux_count", 0.0) + 1.0
 
                             dice_t, iou_t = self._binary_overlap_metrics(pred_bin, gt_frame)
+                            boundary_dice_t = self._boundary_dice(pred_bin, gt_frame)
                             if isinstance(memory_aux, dict) and isinstance(memory_aux.get("faf_aux"), dict):
                                 faf_final_area_values.append(pred_bin.float().mean().detach())
                             metric_totals["dice_frame_sum"] += dice_t
                             metric_totals["dice_frame_count"] += 1.0
                             metric_totals["iou_frame_sum"] += iou_t
                             metric_totals["iou_frame_count"] += 1.0
+                            metric_totals["boundary_dice_sum"] += boundary_dice_t
+                            metric_totals["boundary_dice_count"] += 1.0
                             sample_dice.append(dice_t)
                             sample_iou.append(iou_t)
 
@@ -2191,6 +2340,14 @@ class Trainer:
                                     )
                                     metric_totals[f"faf_final_minus_base_by_{phase_name.upper()}_count"] = (
                                         metric_totals.get(f"faf_final_minus_base_by_{phase_name.upper()}_count", 0.0) + 1.0
+                                    )
+                                if gar_base_dice_curr is not None:
+                                    metric_totals[f"gar_final_minus_base_by_{phase_name.upper()}_sum"] = (
+                                        metric_totals.get(f"gar_final_minus_base_by_{phase_name.upper()}_sum", 0.0)
+                                        + float(dice_t - gar_base_dice_curr)
+                                    )
+                                    metric_totals[f"gar_final_minus_base_by_{phase_name.upper()}_count"] = (
+                                        metric_totals.get(f"gar_final_minus_base_by_{phase_name.upper()}_count", 0.0) + 1.0
                                     )
                             if faf_base_dice_curr is not None and faf_hard_curr:
                                 metric_totals["faf_hard_frame_final_minus_base_sum"] = (
@@ -2652,6 +2809,7 @@ class Trainer:
             "es_hd95": es_hd95,
             "assd_resized": mean("assd_resized_sum", "assd_resized_count"),
             "assd_original": mean("assd_original_sum", "assd_original_count"),
+            "boundary_dice": mean("boundary_dice_sum", "boundary_dice_count"),
             "precision": mean("precision_sum", "conf_count"),
             "recall": mean("recall_sum", "conf_count"),
             "acc": mean("acc_sum", "conf_count"),
@@ -2665,6 +2823,7 @@ class Trainer:
             "iou": mean("iou_frame_sum", "iou_frame_count"),
             "hd95": mean("hd95_original_sum", "hd95_original_count") if metric_space == "original" else mean("hd95_resized_sum", "hd95_resized_count"),
             "assd": mean("assd_original_sum", "assd_original_count") if metric_space == "original" else mean("assd_resized_sum", "assd_resized_count"),
+            "boundary_dice_frame_mean": mean("boundary_dice_sum", "boundary_dice_count"),
             "gate_mean": mean("gate_mean_sum", "aux_count"),
             "residual_abs_mean": mean("residual_abs_mean_sum", "aux_count"),
             "memory_update_rate": mean("memory_update_rate_sum", "aux_count"),
@@ -2782,6 +2941,50 @@ class Trainer:
                 metrics["functional_anchor/proposal_minus_anchor"] = (
                     metrics["functional_anchor/proposal_dice"] - metrics["functional_anchor/anchor_only_dice"]
                 )
+        if reduced.get("gar_aux_count", 0.0) > 0:
+            def gar_mean(sum_key: str, count_key: str = "gar_aux_count"):
+                count = reduced.get(count_key, 0.0)
+                return reduced.get(sum_key, 0.0) / count if count > 0 else 0.0
+
+            metrics.update(
+                {
+                    "gar/base_dice": gar_mean("gar_base_dice_sum", "gar_base_dice_count"),
+                    "gar/proposal_top1_dice": gar_mean("gar_proposal_top1_dice_sum", "gar_proposal_top1_dice_count"),
+                    "gar/proposal_oracle_dice": gar_mean("gar_proposal_oracle_dice_sum", "gar_proposal_dice_count"),
+                    "gar/proposal_mean_dice": gar_mean("gar_proposal_mean_dice_sum", "gar_proposal_dice_count"),
+                    "gar/final_dice": metrics["dice_frame_mean"],
+                    "gar/boundary_dice": metrics["boundary_dice"],
+                    "gar/stage3_offset_abs_mean": gar_mean("gar_stage3_offset_abs_mean_sum"),
+                    "gar/stage3_offset_abs_p95": gar_mean("gar_stage3_offset_abs_p95_sum"),
+                    "gar/stage3_trust_mean": gar_mean("gar_stage3_trust_mean_sum"),
+                    "gar/stage3_update_gate_mean": gar_mean("gar_stage3_update_gate_mean_sum"),
+                    "gar/stage3_gamma": gar_mean("gar_stage3_gamma_sum"),
+                    "gar/stage3_head_entropy": gar_mean("gar_stage3_head_entropy_sum"),
+                    "gar/stage3_head_top1_usage": gar_mean("gar_stage3_head_top1_usage_sum"),
+                    "gar/stage3_head_max_weight": gar_mean("gar_stage3_head_max_weight_sum"),
+                    "gar/stage2_offset_abs_mean": gar_mean("gar_stage2_offset_abs_mean_sum"),
+                    "gar/stage2_offset_abs_p95": gar_mean("gar_stage2_offset_abs_p95_sum"),
+                    "gar/stage2_trust_mean": gar_mean("gar_stage2_trust_mean_sum"),
+                    "gar/stage2_update_gate_mean": gar_mean("gar_stage2_update_gate_mean_sum"),
+                    "gar/stage2_gamma": gar_mean("gar_stage2_gamma_sum"),
+                    "gar/stage2_head_entropy": gar_mean("gar_stage2_head_entropy_sum"),
+                    "gar/stage2_head_top1_usage": gar_mean("gar_stage2_head_top1_usage_sum"),
+                    "gar/stage2_head_max_weight": gar_mean("gar_stage2_head_max_weight_sum"),
+                    "gar/boundary_gamma": gar_mean("gar_boundary_gamma_sum"),
+                    "gar/boundary_gate_mean": gar_mean("gar_boundary_gate_mean_sum"),
+                    "gar/boundary_delta_abs_mean": gar_mean("gar_boundary_delta_abs_mean_sum"),
+                    "gar/final_minus_base_by_ED": gar_mean(
+                        "gar_final_minus_base_by_ED_sum", "gar_final_minus_base_by_ED_count"
+                    ),
+                    "gar/final_minus_base_by_ES": gar_mean(
+                        "gar_final_minus_base_by_ES_sum", "gar_final_minus_base_by_ES_count"
+                    ),
+                }
+            )
+            if reduced.get("gar_base_dice_count", 0.0) > 0:
+                metrics["gar/final_minus_base_dice"] = metrics["dice_frame_mean"] - metrics["gar/base_dice"]
+            if reduced.get("gar_proposal_dice_count", 0.0) > 0 and reduced.get("gar_base_dice_count", 0.0) > 0:
+                metrics["gar/oracle_gap_to_base"] = metrics["gar/proposal_oracle_dice"] - metrics["gar/base_dice"]
         if reduced.get("faf_aux_count", 0.0) > 0:
             def faf_mean(sum_key: str, count_key: str = "faf_aux_count"):
                 count = reduced.get(count_key, 0.0)
@@ -2806,15 +3009,24 @@ class Trainer:
                     "faf/slot_area_diversity": faf_mean("faf_slot_area_diversity_sum"),
                     "faf/write_strength_mean": faf_mean("faf_write_strength_mean_sum"),
                     "faf/memory_update_norm": faf_mean("faf_memory_update_norm_sum"),
+                    "faf/decay_mean": faf_mean("faf_decay_mean_sum"),
                     "faf/affine_delta_norm": faf_mean("faf_affine_delta_norm_sum"),
                     "faf/affine_state_norm": faf_mean("faf_affine_state_norm_sum"),
+                    "faf/affine_valid_ratio": faf_mean("faf_affine_valid_ratio_sum"),
+                    "faf/affine_oob_ratio": faf_mean("faf_affine_oob_ratio_sum"),
+                    "faf/affine_tx_pixel_mean": faf_mean("faf_affine_tx_pixel_mean_sum"),
+                    "faf/affine_ty_pixel_mean": faf_mean("faf_affine_ty_pixel_mean_sum"),
+                    "faf/affine_tx_pixel_abs_mean": faf_mean("faf_affine_tx_pixel_abs_mean_sum"),
+                    "faf/affine_ty_pixel_abs_mean": faf_mean("faf_affine_ty_pixel_abs_mean_sum"),
                     "faf/velocity_norm": faf_mean("faf_velocity_norm_sum"),
+                    "faf/online_state_detached": faf_mean("faf_online_state_detached_sum"),
                     "faf/confidence_mean": faf_mean("faf_confidence_mean_sum"),
                     "faf/confidence_easy_mean": faf_mean("faf_confidence_easy_mean_sum"),
                     "faf/confidence_hard_mean": faf_mean("faf_confidence_hard_mean_sum"),
                     "faf/identity_slot_usage": faf_mean("faf_identity_slot_usage_sum"),
                     "faf/residual_l1": faf_mean("faf_residual_l1_sum"),
                     "faf/residual_l2": faf_mean("faf_residual_l2_sum"),
+                    "faf/residual_abs_max": faf_mean("faf_residual_abs_max_sum"),
                     "faf/safety_residual_l1": faf_mean("faf_safety_residual_l1_sum"),
                     "faf/residual_clip_hit_ratio": faf_mean("faf_residual_clip_hit_ratio_sum"),
                     "faf/residual_scale": faf_mean("faf_residual_scale_sum"),
@@ -2825,8 +3037,16 @@ class Trainer:
                     "faf/feature_modulation_l1_mid": faf_mean("faf_feature_modulation_l1_mid_sum"),
                     "faf/feature_modulation_l1_high": faf_mean("faf_feature_modulation_l1_high_sum"),
                     "faf/feature_modulation_l1_dec": faf_mean("faf_feature_modulation_l1_dec_sum"),
+                    "faf/base_logits_abs_max": faf_mean("faf_base_logits_abs_max_sum"),
+                    "faf/warped_logits_abs_max": faf_mean("faf_warped_logits_abs_max_sum"),
+                    "faf/proposal_logits_abs_max": faf_mean("faf_proposal_logits_abs_max_sum"),
+                    "faf/final_logits_abs_max": faf_mean("faf_final_logits_abs_max_sum"),
+                    "faf/dense_momentum_enabled": faf_mean("faf_dense_momentum_enabled_sum"),
                     "faf/dense_flow_abs_mean": faf_mean("faf_dense_flow_abs_mean_sum"),
                     "faf/dense_flow_abs_max": faf_mean("faf_dense_flow_abs_max_sum"),
+                    "faf/dense_flow_pixel_mean": faf_mean("faf_dense_flow_pixel_mean_sum"),
+                    "faf/dense_valid_ratio": faf_mean("faf_dense_valid_ratio_sum"),
+                    "faf/dense_oob_ratio": faf_mean("faf_dense_oob_ratio_sum"),
                     "faf/dense_flow_smoothness": faf_mean("faf_dense_flow_smoothness_sum"),
                     "faf/dense_warp_delta_abs_mean": faf_mean("faf_dense_warp_delta_abs_mean_sum"),
                     "faf/final_minus_base_by_ED": faf_mean(

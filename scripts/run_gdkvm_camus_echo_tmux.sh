@@ -32,7 +32,13 @@ COMMON_ARGS=(
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
-  eval_stage.eval_interval=200
+  eval_stage.eval_interval=500
+  eval_stage.test_every_eval=false
+  eval_stage.num_vis=0
+  evaluation.threshold_search_during_training=false
+  evaluation.threshold_search_start=0.30
+  evaluation.threshold_search_end=0.75
+  evaluation.threshold_search_step=0.01
 )
 
 echo_cmd() {
@@ -60,8 +66,8 @@ ECHO_CMD="$(echo_cmd 0 gdkvm_echo gdkvm_echo \
   data.protocol_name=echonet_ed2es_endpoint \
   "data_path=${DATASETS_ROOT}/processed/echonet_png128_10f" \
   "mlflow.command_log_path=${PROJECT_DIR}/${LOG_DIR}/gdkvm_echo.log" \
-  main_training.batch_size=20 \
-  main_training.num_workers=10)"
+  main_training.batch_size=8 \
+  main_training.num_workers=4)"
 
 CAMUS_CMD="$(echo_cmd 1 gdkvm_camus gdkvm_camus \
   "${COMMON_ARGS[@]}" \
@@ -69,8 +75,8 @@ CAMUS_CMD="$(echo_cmd 1 gdkvm_camus gdkvm_camus \
   data.protocol_name=camus_short_dense \
   "data_path=${DATASETS_ROOT}/processed/camus_png256_10f" \
   "mlflow.command_log_path=${PROJECT_DIR}/${LOG_DIR}/gdkvm_camus.log" \
-  main_training.batch_size=8 \
-  main_training.num_workers=8)"
+  main_training.batch_size=4 \
+  main_training.num_workers=4)"
 
 tmux new-session -d -s "${SESSION_NAME}" -n echo "cd '${PROJECT_DIR}' && echo '[\$(date +%F\\ %T)] START gdkvm_echo' && ${ECHO_CMD} 2>&1 | tee '${LOG_DIR}/gdkvm_echo.log'; echo '[\$(date +%F\\ %T)] END gdkvm_echo'; exec bash"
 tmux new-window -t "${SESSION_NAME}" -n camus "cd '${PROJECT_DIR}' && echo '[\$(date +%F\\ %T)] START gdkvm_camus' && ${CAMUS_CMD} 2>&1 | tee '${LOG_DIR}/gdkvm_camus.log'; echo '[\$(date +%F\\ %T)] END gdkvm_camus'; exec bash"

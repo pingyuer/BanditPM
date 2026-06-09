@@ -1,5 +1,4 @@
 defaults:
-  - echonet_ed2es_endpoint_oracle
   - _self_
 
 exp_id: "echonet_ed2es_endpoint_predinit"

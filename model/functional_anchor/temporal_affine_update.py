@@ -4,7 +4,13 @@ import torch
 
 
 class TemporalAffineUpdater:
-    """Online temporal update for affine slot hypotheses."""
+    """Online temporal update for affine slot hypotheses.
+
+    truncated_bptt_steps semantics:
+    - -1: fully detached online filter.
+    - 0: no truncation; keep BPTT through the clip.
+    - N > 0: detach every N update steps.
+    """
 
     def __init__(
         self,
@@ -52,7 +58,12 @@ class TemporalAffineUpdater:
         motion = (0.5 + area_motion.unsqueeze(-1).clamp(0.0, 1.0))
         write = slot_weights * slot_confidence * fq * motion
 
-        allow_grad = self.truncated_bptt_steps > 0 and (step_count + 1) % self.truncated_bptt_steps != 0
+        if self.truncated_bptt_steps < 0:
+            allow_grad = False
+        elif self.truncated_bptt_steps == 0:
+            allow_grad = True
+        else:
+            allow_grad = (step_count + 1) % self.truncated_bptt_steps != 0
         delta = affine_delta if allow_grad else affine_delta.detach()
         if self.enable:
             next_velocity = self.velocity_momentum * velocity_state + (1.0 - self.velocity_momentum) * delta
@@ -80,7 +91,9 @@ class TemporalAffineUpdater:
         return next_state, {
             "write_strength": write.detach(),
             "write_strength_mean": write.detach().mean(),
+            "decay_mean": decay.detach().mean() if self.enable else torch.zeros((), device=affine_state.device, dtype=affine_state.dtype),
             "memory_update_norm": update.float().pow(2).mean(dim=-1).sqrt().mean().to(dtype=affine_state.dtype),
             "velocity_norm": next_velocity.detach().float().pow(2).mean(dim=-1).sqrt().mean().to(dtype=affine_state.dtype),
             "online_state_detached": torch.tensor(float(not allow_grad), device=affine_state.device, dtype=affine_state.dtype),
+            "truncated_bptt_steps": torch.tensor(float(self.truncated_bptt_steps), device=affine_state.device, dtype=affine_state.dtype),
         }

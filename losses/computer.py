@@ -137,6 +137,15 @@ class LossComputer(nn.Module):
         selector_cfg = faf_cfg.get("selector", {})
         self.faf_assignment_temperature = float(selector_cfg.get("assignment_temperature", 0.15)) if hasattr(selector_cfg, "get") else 0.15
         self.faf_residual_smallness_start_iter = int(faf_cfg.get("residual_smallness_start_iter", 0))
+        gar_cfg = cfg.model.get("unext_gar", {})
+        self.is_gar = str(cfg.model.get("name", "")).lower() in {
+            "unext_gar",
+            "grid_anchor_router",
+            "gar",
+        }
+        self.lambda_gar_base = float(gar_cfg.get("lambda_gar_base", 0.4))
+        self.lambda_gar_proposal_oracle = float(gar_cfg.get("lambda_gar_proposal_oracle", 0.2))
+        self.gar_proposal_loss = str(gar_cfg.get("proposal_loss", "best")).lower()
 
     def _default_supervision_mask(
         self,
@@ -299,6 +308,9 @@ class LossComputer(nn.Module):
         faf_terms = self._compute_faf_losses(data, supervised_mask)
         for k, v in faf_terms.items():
             losses[k] += v
+        gar_terms = self._compute_gar_losses(data, supervised_mask)
+        for k, v in gar_terms.items():
+            losses[k] += v
 
         total_loss = torch.zeros((), device=data["rgb"].device, dtype=torch.float32)
         for key, value in losses.items():
@@ -456,6 +468,66 @@ class LossComputer(nn.Module):
                 out[f"aux_faf_{name}"] = raw * weight
         if not out:
             out["aux_faf_zero"] = zero
+        return out
+
+    def _compute_gar_losses(
+        self,
+        data: Dict[str, torch.Tensor],
+        supervised_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        if not self.is_gar or "cls_gt" not in data:
+            return {}
+
+        batch_size = data["rgb"].shape[0]
+        device = data["rgb"].device
+        zero = torch.zeros((), device=device, dtype=torch.float32)
+        base_terms = []
+        proposal_terms = []
+
+        for bi in range(batch_size):
+            curr_num_obj = int(data["info"]["num_objects"][bi].item()) if "info" in data else 1
+            frame_ids = self._frame_ids_for_sample(supervised_mask, bi)
+            for ti in frame_ids:
+                memory_aux = data.get(f"memory_aux_{ti}")
+                aux = memory_aux.get("gar_aux") if isinstance(memory_aux, dict) else None
+                if not isinstance(aux, dict):
+                    continue
+                soft_gt = cls_to_one_hot(data["cls_gt"][bi, ti : ti + 1], curr_num_obj)
+
+                base_obj = aux.get("base_object_logits")
+                if torch.is_tensor(base_obj) and self.lambda_gar_base > 0:
+                    base_obj = base_obj[bi : bi + 1, :curr_num_obj]
+                    base_logits = aggregate(torch.sigmoid(base_obj), dim=1)
+                    ce, dice = self.mask_loss(base_logits, soft_gt)
+                    base_terms.append(ce + dice)
+
+                proposals = aux.get("proposal_logits")
+                if torch.is_tensor(proposals) and self.lambda_gar_proposal_oracle > 0:
+                    proposals = proposals[bi : bi + 1, :curr_num_obj]
+                    head_losses = []
+                    for ki in range(proposals.shape[2]):
+                        prop_obj = proposals[:, :, ki]
+                        prop_logits = aggregate(torch.sigmoid(prop_obj), dim=1)
+                        ce, dice = self.mask_loss(prop_logits, soft_gt)
+                        head_losses.append(ce + dice)
+                    if head_losses:
+                        stacked = torch.stack(head_losses)
+                        if self.gar_proposal_loss == "softmin":
+                            proposal_terms.append(-torch.logsumexp(-stacked, dim=0))
+                        else:
+                            proposal_terms.append(stacked.min())
+
+        out: Dict[str, torch.Tensor] = {}
+        if base_terms:
+            raw = torch.stack(base_terms).mean()
+            out["raw_gar_base"] = raw.detach()
+            out["aux_gar_base"] = raw * self.lambda_gar_base
+        if proposal_terms:
+            raw = torch.stack(proposal_terms).mean()
+            out["raw_gar_proposal_oracle"] = raw.detach()
+            out["aux_gar_proposal_oracle"] = raw * self.lambda_gar_proposal_oracle
+        if not out:
+            out["aux_gar_zero"] = zero
         return out
 
     def _compute_delay_ode_regularizers(self, data: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:

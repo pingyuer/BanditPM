@@ -9,8 +9,7 @@ import torch.nn.functional as F
 
 def _safe_rms_norm(x: torch.Tensor, dim=None, eps: float = 1.0e-8) -> torch.Tensor:
     raw = x.float().pow(2).mean(dim=dim)
-    value = torch.where(raw > 0.0, (raw + eps).sqrt(), torch.zeros_like(raw))
-    return value.to(dtype=x.dtype)
+    return (raw + eps).sqrt().to(dtype=x.dtype)
 
 
 class AffineMixtureGenerator(nn.Module):
@@ -96,10 +95,19 @@ class AffineMixtureGenerator(nn.Module):
         warped = warped.view(B, N, K, H, W)
         mixture_logits = (slot_weights.unsqueeze(-1).unsqueeze(-1) * warped).sum(dim=2)
         slot_area = torch.sigmoid(warped).mean(dim=(-2, -1))
+        valid_grid = (grid[..., 0].abs() <= 1.0) & (grid[..., 1].abs() <= 1.0)
+        affine_abs = candidate_state.detach().abs()
         return warped, mixture_logits, {
             "affine_delta": affine_delta,
             "affine_state_candidate": candidate_state,
             "slot_area": slot_area,
             "affine_delta_norm": _safe_rms_norm(affine_delta, dim=-1).mean().to(dtype=base_logits.dtype),
             "affine_state_norm": _safe_rms_norm(affine_state, dim=-1).mean().to(dtype=base_logits.dtype),
+            "affine_valid_ratio": valid_grid.detach().float().mean().to(dtype=base_logits.dtype),
+            "affine_oob_ratio": (~valid_grid).detach().float().mean().to(dtype=base_logits.dtype),
+            "affine_tx_pixel_mean": (candidate_state[..., 0].detach().mean() * (W / 2.0)).to(dtype=base_logits.dtype),
+            "affine_ty_pixel_mean": (candidate_state[..., 1].detach().mean() * (H / 2.0)).to(dtype=base_logits.dtype),
+            "affine_tx_pixel_abs_mean": (affine_abs[..., 0].mean() * (W / 2.0)).to(dtype=base_logits.dtype),
+            "affine_ty_pixel_abs_mean": (affine_abs[..., 1].mean() * (H / 2.0)).to(dtype=base_logits.dtype),
+            "warped_logits_abs_max": warped.detach().abs().amax().to(dtype=base_logits.dtype),
         }

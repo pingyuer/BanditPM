@@ -10,3 +10,10 @@ model:
     type: "none"
   temporal_memory:
     type: "none"
+    bpm:
+      ENABLE: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0

@@ -37,13 +37,16 @@ COMMON_ARGS=(
   save=1
   save_weights_interval=500
   save_checkpoint_interval=0
-  eval_stage.eval_interval=1000
+  eval_stage.eval_interval=500
   eval_stage.final_eval=true
   eval_stage.final_test=true
-  eval_stage.test_every_eval=true
+  eval_stage.test_every_eval=false
   eval_stage.test_interval=0
-  evaluation.threshold_search_during_training=true
-  evaluation.threshold_search_interval=2000
+  eval_stage.num_vis=0
+  evaluation.threshold_search_during_training=false
+  evaluation.threshold_search_start=0.30
+  evaluation.threshold_search_end=0.75
+  evaluation.threshold_search_step=0.01
 )
 
 wait_for_session() {
@@ -88,13 +91,13 @@ run_one() {
 
 run_echo_queue() {
   wait_for_session "${WAIT_FOR_SESSION}"
-  run_one 0 gdkvm_echo gdkvm_echo echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 20 10 "${PROJECT_DIR}/${LOG_DIR}/gdkvm_echo.log" \
+  run_one 0 gdkvm_echo gdkvm_echo echonet echonet_ed2es_endpoint "${DATASETS_ROOT}/processed/echonet_png128_10f" 8 4 "${PROJECT_DIR}/${LOG_DIR}/gdkvm_echo.log" \
     2>&1 | tee "${LOG_DIR}/gdkvm_echo.log"
 }
 
 run_camus_queue() {
   wait_for_session "${WAIT_FOR_SESSION}"
-  run_one 1 gdkvm_camus gdkvm_camus camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 8 8 "${PROJECT_DIR}/${LOG_DIR}/gdkvm_camus.log" \
+  run_one 1 gdkvm_camus gdkvm_camus camus camus_short_dense "${DATASETS_ROOT}/processed/camus_png256_10f" 4 4 "${PROJECT_DIR}/${LOG_DIR}/gdkvm_camus.log" \
     2>&1 | tee "${LOG_DIR}/gdkvm_camus.log"
 }
 

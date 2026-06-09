@@ -62,6 +62,61 @@ class FrameworkRefactorTests(unittest.TestCase):
                 self.assertTrue(bool(cfg.evaluation.exclude_init_frame))
                 self.assertEqual(str(cfg.evaluation.protocol_version), "v3_canonical_no_leak")
 
+    def test_gdkvm_configs_use_aligned_eval_window(self):
+        expected = {
+            "gdkvm_echo": {
+                "batch_size": 8,
+                "tta": False,
+                "tta_modes": ["identity"],
+                "postprocess_min_size": 16,
+                "binary_closing": True,
+                "frame_scope": "supervised_only",
+            },
+            "gdkvm_camus": {
+                "batch_size": 4,
+                "tta": True,
+                "tta_modes": ["identity", "hflip"],
+                "postprocess_min_size": 8,
+                "binary_closing": False,
+                "frame_scope": "all_available",
+            },
+        }
+        for name, values in expected.items():
+            with self.subTest(config=name):
+                cfg = self._compose(name)
+                self.assertEqual(str(cfg.evaluation.init_mode), "pred_or_zero")
+                self.assertTrue(bool(cfg.evaluation.exclude_init_frame))
+                self.assertEqual(str(cfg.evaluation.frame_scope), values["frame_scope"])
+                self.assertFalse(bool(cfg.evaluation.threshold_search_during_training))
+                self.assertEqual(float(cfg.evaluation.threshold_search_start), 0.30)
+                self.assertEqual(float(cfg.evaluation.threshold_search_end), 0.75)
+                self.assertEqual(float(cfg.evaluation.threshold_search_step), 0.01)
+                self.assertEqual(bool(cfg.evaluation.tta.enabled), values["tta"])
+                self.assertEqual(list(cfg.evaluation.tta.modes), values["tta_modes"])
+                self.assertTrue(bool(cfg.evaluation.postprocess.enabled))
+                self.assertEqual(int(cfg.evaluation.postprocess.min_size), values["postprocess_min_size"])
+                self.assertEqual(bool(cfg.evaluation.postprocess.binary_closing), values["binary_closing"])
+                self.assertFalse(bool(cfg.eval_stage.test_every_eval))
+                self.assertEqual(int(cfg.eval_stage.eval_interval), 500)
+                self.assertEqual(int(cfg.eval_stage.num_vis), 0)
+                self.assertEqual(int(cfg.main_training.num_iterations), 4000)
+                self.assertEqual(int(cfg.main_training.batch_size), values["batch_size"])
+                self.assertEqual(int(cfg.main_training.num_workers), 4)
+
+    def test_legacy_gdkvm_eval_windows_are_removed(self):
+        forbidden = [
+            "config_gdkvm_01.yaml",
+            "config_gdkvm_bpm.yaml",
+            "config_gdkvm_proto_fast.yaml",
+            "config_gdkvm_proto_slow.yaml",
+            "config_gdkvm_proto_ablate_fuse_concat.yaml",
+            "config_gdkvm_proto_ablate_no_temporal.yaml",
+            "config_gdkvm_proto_ablate_replace.yaml",
+        ]
+        for filename in forbidden:
+            with self.subTest(filename=filename):
+                self.assertFalse((CONFIG_DIR / filename).exists())
+
     def test_base_configs_compose(self):
         for name in BASE_CONFIGS:
             with self.subTest(config=name):

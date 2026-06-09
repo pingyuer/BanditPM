@@ -60,7 +60,10 @@ class ConfidenceFusion(nn.Module):
         if disable_residual:
             residual = torch.zeros_like(base_logits)
         else:
-            residual = torch.tanh(raw[:, :, 1].clamp(-self.residual_clip, self.residual_clip)) * residual_scale
+            residual = (torch.tanh(raw[:, :, 1]) * residual_scale).clamp(
+                min=-self.residual_clip,
+                max=self.residual_clip,
+            )
             residual = residual * boundary_map.detach().clamp(0.0, 1.0)
         final = base_logits + confidence * diff + residual
         easy = uncertainty_map.detach() < 0.35
@@ -75,5 +78,6 @@ class ConfidenceFusion(nn.Module):
             "confidence_hard_mean": confidence.detach().masked_select(hard).mean() if hard.any() else confidence.detach().mean(),
             "residual_l1": residual.detach().abs().mean(),
             "residual_l2": residual.detach().float().pow(2).mean().sqrt().to(dtype=residual.dtype),
-            "residual_clip_hit_ratio": (raw[:, :, 1].detach().abs() >= self.residual_clip * 0.99).float().mean(),
+            "residual_abs_max": residual.detach().abs().amax(),
+            "residual_clip_hit_ratio": (residual.detach().abs() >= self.residual_clip * 0.99).float().mean(),
         }

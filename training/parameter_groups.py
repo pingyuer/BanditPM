@@ -62,6 +62,10 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'injector.',
                 'fusion.',
                 'faf.',
+                'gar_stage3.',
+                'gar_stage2.',
+                'boundary_fusion.',
+                'proposal_head.',
             )):
                 temporal_params.append(param)
                 if print_log:

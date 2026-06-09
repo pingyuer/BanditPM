@@ -259,6 +259,12 @@ class MLflowLogger:
                 out[f"loss/raw/faf/{key_str.removeprefix('raw_faf_')}"] = value
             elif key_str.startswith("lambda_faf_"):
                 out[f"lambda/faf/{key_str.removeprefix('lambda_faf_')}"] = value
+            elif key_str.startswith("aux_gar_"):
+                out[f"loss/weighted/gar/{key_str.removeprefix('aux_gar_')}"] = value
+            elif key_str.startswith("raw_gar_"):
+                out[f"loss/raw/gar/{key_str.removeprefix('raw_gar_')}"] = value
+            elif key_str.startswith("lambda_gar_"):
+                out[f"lambda/gar/{key_str.removeprefix('lambda_gar_')}"] = value
         self.log_metrics(out, step=step, prefix="train")
 
     def log_eval_summary(self, metrics: Mapping[str, Any], *, mode: str, step: int | None = None) -> None:
@@ -273,6 +279,9 @@ class MLflowLogger:
         anchor = self._anchor_ode_metrics(metrics, require_explicit=True)
         if anchor:
             self.log_metrics(anchor, step=step, prefix=f"{mode}/anchor_ode")
+        gar = self._gar_metrics(metrics)
+        if gar:
+            self.log_metrics(gar, step=step, prefix=f"{mode}/gar")
 
     def log_best(self, metrics: Mapping[str, Any], *, epoch: int, iteration: int) -> None:
         best = {
@@ -334,6 +343,55 @@ class MLflowLogger:
 
     def log_faf_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
         self.log_metrics(self._faf_metrics(metrics), step=step, prefix="faf")
+
+    def log_gar_diagnostics(self, metrics: Mapping[str, Any], *, step: int | None = None) -> None:
+        self.log_metrics(self._gar_metrics(metrics), step=step, prefix="gar")
+
+    @classmethod
+    def _gar_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:
+        aliases = {
+            "base_dice": ("base_dice", "gar/base_dice"),
+            "proposal_oracle_dice": ("proposal_oracle_dice", "gar/proposal_oracle_dice"),
+            "proposal_top1_dice": ("proposal_top1_dice", "gar/proposal_top1_dice"),
+            "final_dice": ("final_dice", "dice_frame_mean", "dice", "gar/final_dice"),
+            "boundary_dice": ("boundary_dice", "boundary_dice_frame_mean", "gar/boundary_dice"),
+            "final_minus_base_dice": ("final_minus_base_dice", "final_minus_base", "gar/final_minus_base_dice"),
+            "final_minus_base_by_ED": ("final_minus_base_by_ED", "gar/final_minus_base_by_ED"),
+            "final_minus_base_by_ES": ("final_minus_base_by_ES", "gar/final_minus_base_by_ES"),
+            "stage3_offset_abs_mean": ("stage3_offset_abs_mean", "gar/stage3_offset_abs_mean"),
+            "stage3_offset_abs_p95": ("stage3_offset_abs_p95", "gar/stage3_offset_abs_p95"),
+            "stage3_trust_mean": ("stage3_trust_mean", "gar/stage3_trust_mean"),
+            "stage3_gamma": ("stage3_gamma", "gar/stage3_gamma"),
+            "stage3_head_entropy": ("stage3_head_entropy", "gar/stage3_head_entropy"),
+            "stage3_head_top1_usage": ("stage3_head_top1_usage", "gar/stage3_head_top1_usage"),
+            "stage3_head_max_weight": ("stage3_head_max_weight", "gar/stage3_head_max_weight"),
+            "stage2_offset_abs_mean": ("stage2_offset_abs_mean", "gar/stage2_offset_abs_mean"),
+            "stage2_offset_abs_p95": ("stage2_offset_abs_p95", "gar/stage2_offset_abs_p95"),
+            "stage2_trust_mean": ("stage2_trust_mean", "gar/stage2_trust_mean"),
+            "stage2_gamma": ("stage2_gamma", "gar/stage2_gamma"),
+            "stage2_head_entropy": ("stage2_head_entropy", "gar/stage2_head_entropy"),
+            "stage2_head_top1_usage": ("stage2_head_top1_usage", "gar/stage2_head_top1_usage"),
+            "stage2_head_max_weight": ("stage2_head_max_weight", "gar/stage2_head_max_weight"),
+            "boundary_gamma": ("boundary_gamma", "gar/boundary_gamma"),
+            "boundary_gate_mean": ("boundary_gate_mean", "gar/boundary_gate_mean"),
+            "boundary_delta_abs_mean": ("boundary_delta_abs_mean", "gar/boundary_delta_abs_mean"),
+        }
+        out = {}
+        for dst, keys in aliases.items():
+            for key in keys:
+                if key in metrics:
+                    out[dst] = metrics[key]
+                    break
+        if "final_minus_base_dice" not in out and "final_dice" in out and "base_dice" in out:
+            final = cls._to_float(out["final_dice"])
+            base = cls._to_float(out["base_dice"])
+            if final is not None and base is not None:
+                out["final_minus_base_dice"] = final - base
+        if not any(str(key).startswith("gar/") for key in metrics) and not any(
+            key in metrics for key in ("stage2_offset_abs_mean", "proposal_oracle_dice")
+        ):
+            return {}
+        return out
 
     @classmethod
     def _faf_metrics(cls, metrics: Mapping[str, Any]) -> dict[str, Any]:

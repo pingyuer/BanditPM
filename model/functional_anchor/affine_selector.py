@@ -72,7 +72,7 @@ class AffineSelector(nn.Module):
         affine_summary = state["affine_state"].mean(dim=2)
         quality = state["slot_quality"]
         usage = state["usage"]
-        velocity_norm = state["velocity_state"].float().pow(2).mean(dim=-1).sqrt().to(dtype=dtype)
+        velocity_norm = (state["velocity_state"].float().pow(2).mean(dim=-1) + 1.0e-8).sqrt().to(dtype=dtype)
         selector_in = torch.cat([pooled, stats, prev_query, affine_summary, quality, usage, velocity_norm], dim=-1)
         query = F.normalize(self.query_net(selector_in), dim=-1)
         slot_logits = self.slot_head(query)

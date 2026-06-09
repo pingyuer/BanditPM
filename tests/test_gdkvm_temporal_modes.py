@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 from hydra import compose, initialize
+from omegaconf import OmegaConf, open_dict
 
 from model.gdkvm01 import GDKVM
 
@@ -26,7 +27,43 @@ class GDKVMTemporalModeTests(unittest.TestCase):
         mock_resnet18.return_value = DummyBackbone()
 
         with initialize(version_base="1.3.2", config_path="../config"):
-            cfg = compose(config_name="config_gdkvm_bpm.yaml")
+            cfg = compose(config_name="gdkvm_echo")
+        with open_dict(cfg):
+            cfg.model.temporal_memory = OmegaConf.create(
+                {
+                    "type": "bpm",
+                    "bpm": {
+                        "ENABLE": True,
+                        "USE_RULE_BASED_POLICY": True,
+                        "USE_LEARNED_POLICY": True,
+                        "EXEC_POLICY": "rule",
+                        "ENABLE_POLICY_LOSS": True,
+                        "ENABLE_POLICY_CE_LOSS": True,
+                        "ENABLE_RL_LOSS": False,
+                        "TRAIN_POLICY_ONLY": False,
+                        "FREEZE_BACKBONE": False,
+                        "BANK_SIZE": 4,
+                        "PROTO_ALPHA": 0.1,
+                        "REFINE_EMA_ALPHA": 0.2,
+                        "POLICY_WARMUP_EPOCHS": 20,
+                        "POLICY_LOSS_WEIGHT": 0.2,
+                        "LAMBDA_POLICY_CE": 0.2,
+                        "LAMBDA_RL": 0.05,
+                        "LAMBDA_ENTROPY": 0.001,
+                        "RL_BASELINE_MOMENTUM": 0.95,
+                        "ADV_CLAMP": 1.0,
+                        "EPSILON_RULE_MIX_INIT": 1.0,
+                        "EPSILON_RULE_MIX_FINAL": 0.1,
+                        "EPSILON_RULE_MIX_EPOCHS": 30,
+                        "SPAWN_WITHOUT_EMPTY_SLOT": "replace_fallback",
+                        "SIM_THRESHOLD_HIGH": 0.8,
+                        "SIM_THRESHOLD_LOW": 0.5,
+                        "FUSION_TYPE": "add",
+                        "PROTO_POOLING": "mask",
+                        "DEBUG_MODE": False,
+                    },
+                }
+            )
         model = GDKVM(
             use_first_frame_gt_init=bool(cfg.model.get("use_first_frame_gt_init", True)),
             prototype_value_cfg=cfg.model.get("prototype_value", None),
