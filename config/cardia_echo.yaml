@@ -48,6 +48,9 @@ mlflow:
   experiment_name: "cardia_runtime_deformation"
   tags:
     method: "CARDIA"
-    temporal_module: "RuntimeMemoryODE"
+    dataset: "echonet"
+    view: "A4C"
+    protocol: "echonet_ed2es_endpoint"
+    temporal_module: "RuntimeMemoryGridODE"
     routing_scales: "stage3,stage2"
     state_type: "runtime_state_detached"

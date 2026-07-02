@@ -17,12 +17,12 @@ log = logging.getLogger()
 from model.kpff import KPFF, KeyProj, PixProj, PixelFuser, MultiscaleSensoryUpdater, SensoryUpdater, FeatureFuser
 
 class ImageEncoder(nn.Module):
-    def __init__(self, encoder_type: str = 'resnet50'):
+    def __init__(self, encoder_type: str = 'resnet50', pretrained: bool = True):
         super().__init__()
         if encoder_type == 'resnet18':
-            network = resnet.resnet18(pretrained=True)
+            network = resnet.resnet18(pretrained=pretrained)
         elif encoder_type == 'resnet50':
-            network = resnet.resnet50(pretrained=True)
+            network = resnet.resnet50(pretrained=pretrained)
         else:
             raise NotImplementedError
         self.conv1 = network.conv1
@@ -58,13 +58,14 @@ class MaskEncoder(nn.Module):
         pix_dim: int,
         value_dim: int,
         sensory_dim: int,
-        encoder_type: str = 'resnet18'
+        encoder_type: str = 'resnet18',
+        pretrained: bool = True,
     ):
         super().__init__()
         if encoder_type == 'resnet18':
-            network = resnet.resnet18(pretrained=True, extra_dim=2)
+            network = resnet.resnet18(pretrained=pretrained, extra_dim=2)
         elif encoder_type == 'resnet50':
-            network = resnet.resnet50(pretrained=True, extra_dim=2)
+            network = resnet.resnet50(pretrained=pretrained, extra_dim=2)
         else:
             raise NotImplementedError
 
@@ -249,10 +250,12 @@ class GDKVM(nn.Module):
             temporal_memory_cfg=None,
             memory_core_cfg=None,
             use_kpff: bool = True,
+            backbone_pretrained: bool = True,
     ) -> None:
         super().__init__()
         self.use_first_frame_gt_init = use_first_frame_gt_init
         self.use_kpff = use_kpff
+        self.backbone_pretrained = bool(backbone_pretrained)
         self.ms_dims = {
             'resnet50': [1024, 512, 256], 
             'resnet18': [256, 128, 64],
@@ -275,10 +278,15 @@ class GDKVM(nn.Module):
         self.num_queries = 16
         self.ff_dim = 2048
 
-        self.image_encoder = ImageEncoder(encoder_type=image_encoder_type)
+        self.image_encoder = ImageEncoder(
+            encoder_type=image_encoder_type,
+            pretrained=self.backbone_pretrained,
+        )
         self.mask_encoder = MaskEncoder(
             self.pixel_dim, self.value_dim, self.sensory_dim, 
-            encoder_type=mask_encoder_type)
+            encoder_type=mask_encoder_type,
+            pretrained=self.backbone_pretrained,
+        )
         
         self.key_projector = KeyProj(self.ms_dims[0], self.pixel_dim, self.key_dim)
         self.pix_projector = PixProj(self.ms_dims[0], self.pixel_dim)

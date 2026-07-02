@@ -1,0 +1,28 @@
+defaults:
+  - cardia_echo
+  - _self_
+
+exp_id: "cardia_official_echo"
+
+model_name: "CARDIAOfficialUNeXt"
+
+model:
+  cardia:
+    base_dim: 108
+    backbone:
+      name: "official"
+      official:
+        mlp_expansion: 3.0
+        latent_blocks: 2
+        decoder_mlp_blocks: 1
+
+mlflow:
+  tags:
+    method: "CARDIA"
+    backbone: "unext_official"
+    dataset: "echonet"
+    view: "A4C"
+    protocol: "echonet_ed2es_endpoint"
+    temporal_module: "RuntimeMemoryGridODE"
+    routing_scales: "stage3,stage2"
+    state_type: "runtime_state_detached"

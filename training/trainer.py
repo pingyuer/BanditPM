@@ -17,6 +17,14 @@ from omegaconf import DictConfig
 
 from evaluation import EvaluationResult, Evaluator
 from training.logging import TrainingLogger
+from training.hooks import (
+    log_cardia_grad_stats,
+    log_cardia_stats,
+    log_debel_grad_stats,
+    log_debel_stats,
+    log_rebel_grad_stats,
+    log_rebel_stats,
+)
 from utils.log_integrator import Integrator
 from utils.time_estimator import TimeEstimator
 from models.registry import build_model
@@ -24,6 +32,7 @@ from training.parameter_groups import get_parameter_groups
 from losses import LossComputer
 from visualization import visualize_sequence
 from utils.frame_validity import (
+    build_single_target_mask,
     mask_to_frame_ids,
     normalize_frame_validity_mask,
     summarize_frame_mask,
@@ -117,6 +126,7 @@ class Trainer:
         self.world_size = dist.get_world_size() if self.is_distributed else 1
         self.main_process = self.rank == 0
         self._logged_eval_protocol_summaries = set()
+        self._logged_train_protocol_summary = False
 
         model = build_model_from_cfg(cfg, self.device)
         model = model.to(memory_format=torch.channels_last)
@@ -144,6 +154,7 @@ class Trainer:
                     f"selector={capacity['parameters_m_faf_selector']:.3f}M | "
                     f"affine={capacity['parameters_m_faf_affine_mixture']:.3f}M | "
                     f"fusion={capacity['parameters_m_faf_fusion']:.3f}M | "
+                    f"backbone_name={capacity.get('backbone_name', '')} | "
                     f"base_dim={capacity['unext_base_dim']} | "
                     f"channels={capacity['unext_channels']} | "
                     f"value_dim={capacity['value_dim']}"
@@ -157,6 +168,11 @@ class Trainer:
                         "model/parameters_m_faf_affine_mixture": capacity["parameters_m_faf_affine_mixture"],
                         "model/parameters_m_faf_fusion": capacity["parameters_m_faf_fusion"],
                         "model/parameters_m_method": capacity["parameters_m_method"],
+                        "model/parameters_m_encoder": capacity.get("parameters_m_encoder", capacity["parameters_m_backbone"]),
+                        "model/parameters_m_rebel": capacity.get("parameters_m_rebel", capacity["parameters_m_method"]),
+                        "model/parameters_m_memory": capacity.get("parameters_m_memory", 0.0),
+                        "model/parameters_m_ode": capacity.get("parameters_m_ode", 0.0),
+                        "model/parameters_m_decoder": capacity.get("parameters_m_decoder", 0.0),
                         "model/unext_base_dim": capacity["unext_base_dim"] or 0,
                         "model/value_dim": capacity["value_dim"] or 0,
                     },
@@ -173,6 +189,12 @@ class Trainer:
                             "model/parameters_m_faf_affine_mixture": capacity["parameters_m_faf_affine_mixture"],
                             "model/parameters_m_faf_fusion": capacity["parameters_m_faf_fusion"],
                             "model/parameters_m_method": capacity["parameters_m_method"],
+                            "model/parameters_m_encoder": capacity.get("parameters_m_encoder", capacity["parameters_m_backbone"]),
+                            "model/parameters_m_rebel": capacity.get("parameters_m_rebel", capacity["parameters_m_method"]),
+                            "model/parameters_m_memory": capacity.get("parameters_m_memory", 0.0),
+                            "model/parameters_m_ode": capacity.get("parameters_m_ode", 0.0),
+                            "model/parameters_m_decoder": capacity.get("parameters_m_decoder", 0.0),
+                            "model/backbone_name": capacity.get("backbone_name", ""),
                             "model/unext_base_dim": capacity["unext_base_dim"],
                             "model/unext_channels": capacity["unext_channels"],
                             "model/value_dim": capacity["value_dim"],
@@ -340,8 +362,110 @@ class Trainer:
             )
         )
 
+    def _prediction_mode(self) -> str:
+        eval_cfg = self.cfg.get("evaluation", {})
+        return str(self.cfg.get("prediction_mode", eval_cfg.get("prediction_mode", "dense10"))).lower()
+
+    def _target_index(self) -> int:
+        eval_cfg = self.cfg.get("evaluation", {})
+        return int(self.cfg.get("target_index", eval_cfg.get("target_index", -1)))
+
+    def _temporal_access(self) -> str:
+        model_cfg = self.cfg.get("model", {})
+        model_name = str(model_cfg.get("name", self.cfg.get("model_name", ""))).lower()
+        default = "full_window" if model_name == "debel" else "recurrent"
+        return str(self.cfg.get("temporal_access", model_cfg.get("temporal_access", default))).lower()
+
+    def _backbone_pretrain_summary(self) -> tuple[bool, str]:
+        model_cfg = self.cfg.get("model", {})
+        model_name = str(model_cfg.get("name", self.cfg.get("model_name", ""))).lower()
+        if "backbone_pretrained" in model_cfg:
+            pretrained = bool(model_cfg.get("backbone_pretrained"))
+        elif model_name == "gdkvm":
+            pretrained = True
+        else:
+            method_cfg = model_cfg.get(model_name, {}) if hasattr(model_cfg, "get") else {}
+            backbone_cfg = method_cfg.get("backbone", {}) if hasattr(method_cfg, "get") else {}
+            pretrained = bool(
+                method_cfg.get(
+                    "require_pretrained_unext",
+                    backbone_cfg.get("pretrained", False) if hasattr(backbone_cfg, "get") else False,
+                )
+            )
+        if pretrained:
+            source = str(model_cfg.get("pretrain_source", "torchvision_resnet_default" if model_name == "gdkvm" else "configured_checkpoint"))
+        else:
+            source = str(model_cfg.get("pretrain_source", "none"))
+        return pretrained, source
+
+    def _protocol_training_budget(self) -> dict[str, int | str | bool]:
+        effective_batch_size = int(self.stage_cfg.get("batch_size", 1)) * int(self.world_size)
+        num_iterations = int(self.stage_cfg.get("num_iterations", 0))
+        backbone_pretrained, pretrain_source = self._backbone_pretrain_summary()
+        return {
+            "prediction_mode": self._prediction_mode(),
+            "target_index": int(self._target_index()),
+            "temporal_access": self._temporal_access(),
+            "effective_batch_size": effective_batch_size,
+            "batch_size_per_gpu": int(self.stage_cfg.get("batch_size", 1)),
+            "world_size": int(self.world_size),
+            "num_iterations": num_iterations,
+            "seen_samples": int(effective_batch_size * num_iterations),
+            "lr_schedule": str(self.stage_cfg.get("lr_schedule", "step")),
+            "lr_warmup_iters": int(self.stage_cfg.get("lr_warmup_iters", 0)),
+            "lr_min_ratio": float(self.stage_cfg.get("lr_min_ratio", 0.0)),
+            "use_first_frame_gt_init": bool(self._oracle_init_allowed()),
+            "backbone_pretrained": bool(backbone_pretrained),
+            "pretrain_source": pretrain_source,
+        }
+
+    def _target_only_mask(self, data) -> torch.Tensor:
+        return build_single_target_mask(
+            batch_size=data["rgb"].shape[0],
+            total_frames=data["rgb"].shape[1],
+            target_index=self._target_index(),
+            device=self.device,
+        )
+
+    def _log_train_protocol_once(self, it: int, data, supervised_indices: torch.Tensor) -> None:
+        if not self.main_process or self._logged_train_protocol_summary:
+            return
+        self._logged_train_protocol_summary = True
+        summary = self._protocol_training_budget()
+        summary.update(
+            {
+                "iteration": int(it),
+                "init_mode": str(data.get("init_mode", self._resolve_phase_init("train"))),
+                "supervised_indices": self._format_frame_mask(supervised_indices),
+            }
+        )
+        self.log.info(
+            "[TrainProtocol] "
+            f"prediction_mode={summary['prediction_mode']} | "
+            f"target_index={summary['target_index']} | "
+            f"temporal_access={summary['temporal_access']} | "
+            f"supervised_indices={summary['supervised_indices']} | "
+            f"batch_size={summary['batch_size_per_gpu']} | "
+            f"effective_batch_size={summary['effective_batch_size']} | "
+            f"iterations={summary['num_iterations']} | "
+            f"seen_samples={summary['seen_samples']} | "
+            f"lr_schedule={summary['lr_schedule']} | "
+            f"use_first_frame_gt_init={summary['use_first_frame_gt_init']} | "
+            f"init_mode={summary['init_mode']} | "
+            f"backbone_pretrained={summary['backbone_pretrained']} | "
+            f"pretrain_source={summary['pretrain_source']}"
+        )
+        logger = getattr(self, "mlflow_logger", None)
+        if logger is not None:
+            logger.log_params({f"protocol/{k}": v for k, v in summary.items()})
+            path = self.run_path / "train_protocol.json"
+            path.write_text(json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
+            logger.log_artifact(path, artifact_path="data")
+
     def _resolve_eval_indices(self, data):
         T = data["rgb"].shape[1]
+        if self._prediction_mode() == "causal_target10":
+            return self._target_only_mask(data)
         eval_cfg = self.cfg.get("evaluation", {})
         frame_scope = str(eval_cfg.get("frame_scope", "supervised_only"))
         if frame_scope == "all_available":
@@ -389,6 +513,9 @@ class Trainer:
         summary = {
             "mode": mode,
             "iteration": int(it),
+            "prediction_mode": self._prediction_mode(),
+            "target_index": self._target_index(),
+            "temporal_access": self._temporal_access(),
             "eval_protocol": self._eval_protocol_name(),
             "frame_scope": str(self.cfg.get("evaluation", {}).get("frame_scope", "supervised_only")),
             "exclude_init_frame": bool(self.cfg.get("evaluation", {}).get("exclude_init_frame", False)),
@@ -399,6 +526,9 @@ class Trainer:
         if logger is not None:
             logger.log_params(
                 {
+                    f"eval/{mode}/prediction_mode": summary["prediction_mode"],
+                    f"eval/{mode}/target_index": summary["target_index"],
+                    f"eval/{mode}/temporal_access": summary["temporal_access"],
                     f"eval/{mode}/protocol": summary["eval_protocol"],
                     f"eval/{mode}/indices_first_batch": indices_per_sample,
                     f"eval/{mode}/valid_count_first_batch": valid_counts,
@@ -640,6 +770,17 @@ class Trainer:
 
     def _resolve_supervised_indices(self, data):
         T = data["rgb"].shape[1]
+        if self._prediction_mode() == "causal_target10":
+            return self._target_only_mask(data)
+        if torch.is_tensor(data.get("loss_visibility")):
+            frame_mask = self._resolve_frame_valid_mask(
+                data.get("loss_visibility"),
+                batch_size=data["rgb"].shape[0],
+                total_frames=T,
+            )
+            if not frame_mask.any(dim=1).all():
+                raise ValueError("loss_visibility selects no supervised frames for at least one sample")
+            return frame_mask
         frame_mask = self._resolve_frame_valid_mask(
             data.get("label_valid"),
             batch_size=data["rgb"].shape[0],
@@ -676,6 +817,7 @@ class Trainer:
             data.update(out)
 
             supervised_indices = self._resolve_supervised_indices(data)
+            self._log_train_protocol_once(it, data, supervised_indices)
             required_frame_ids = sorted(torch.nonzero(supervised_indices.any(dim=0), as_tuple=False).flatten().tolist())
             all_logits_keys = [f"logits_{ti}" for ti in required_frame_ids]
             if not all(k in data for k in all_logits_keys):
@@ -726,9 +868,13 @@ class Trainer:
                 self._log_functional_anchor_stats(data, it)
                 self._log_faf_stats(data, it)
                 self._log_gar_stats(data, it)
-                self._log_cardia_stats(data, it)
+                log_cardia_stats(self, data, it)
+                log_debel_stats(self, data, it)
+                log_rebel_stats(self, data, it)
                 self._log_functional_anchor_grad_stats(it)
-                self._log_cardia_grad_stats(it)
+                log_cardia_grad_stats(self, it)
+                log_debel_grad_stats(self, it)
+                log_rebel_grad_stats(self, it)
 
         return loss.detach()
 
@@ -747,12 +893,17 @@ class Trainer:
                 active_lambda_prefixes = ("lambda_faf_",)
             elif model_name == "functional_anchor":
                 active_lambda_prefixes = ("lambda_functional_anchor_",)
+            elif model_name in {"rebel", "resampled_belief"}:
+                active_lambda_prefixes = ("lambda_rebel_",)
+            elif model_name in {"geomaskformer", "geo_maskformer"}:
+                active_lambda_prefixes = ("lambda_geomaskformer_",)
             else:
                 active_lambda_prefixes = (
                     "lambda_cardia_",
                     "lambda_gar_",
                     "lambda_faf_",
                     "lambda_functional_anchor_",
+                    "lambda_geomaskformer_",
                 )
             for k, v in losses.items():
                 if isinstance(v, torch.Tensor):
@@ -790,11 +941,25 @@ class Trainer:
                 ("lambda_gar_boundary_aux", "boundary_aux"),
                 ("lambda_cardia_base", "base"),
                 ("lambda_cardia_proposal_oracle", "proposal_oracle"),
+                ("lambda_cardia_proposal_top1", "proposal_top1"),
                 ("lambda_cardia_selector", "selector"),
+                ("lambda_cardia_selector_margin", "selector_margin"),
                 ("lambda_cardia_flow_smooth", "flow_smooth"),
                 ("lambda_cardia_stage3_flow_smooth", "stage3_flow_smooth"),
                 ("lambda_cardia_stage2_flow_smooth", "stage2_flow_smooth"),
                 ("lambda_cardia_boundary_aux", "boundary_aux"),
+                ("lambda_rebel_final", "final"),
+                ("lambda_rebel_base_aux", "base_aux"),
+                ("lambda_rebel_belief_prior", "belief_prior"),
+                ("lambda_rebel_obs_aux", "obs_aux"),
+                ("lambda_rebel_correction", "correction"),
+                ("lambda_rebel_temporal", "temporal"),
+                ("lambda_rebel_offset_smooth", "offset_smooth"),
+                ("lambda_rebel_write_reg", "write_reg"),
+                ("lambda_geomaskformer_mask", "mask"),
+                ("lambda_geomaskformer_boundary", "boundary"),
+                ("lambda_geomaskformer_score", "score"),
+                ("lambda_geomaskformer_temporal", "temporal"),
             ):
                 if not attr.startswith(active_lambda_prefixes):
                     continue
@@ -805,6 +970,10 @@ class Trainer:
                         prefix = "lambda_gar"
                     elif attr.startswith("lambda_cardia_"):
                         prefix = "lambda_cardia"
+                    elif attr.startswith("lambda_rebel_"):
+                        prefix = "lambda_rebel"
+                    elif attr.startswith("lambda_geomaskformer_"):
+                        prefix = "lambda_geomaskformer"
                     else:
                         prefix = "lambda_functional_anchor"
                     log_dict[f"{prefix}_{name}"] = getattr(self.loss_computer, attr)
@@ -870,7 +1039,7 @@ class Trainer:
             "cardia/grad/offset_head_norm": ("ode_gen2.offset_head.", "ode_gen3.offset_head."),
             "cardia/grad/odegen_norm": ("ode_gen2.", "ode_gen3."),
             "cardia/grad/delta_proj_norm": ("fuse2.delta_proj.", "fuse3.delta_proj.", "boundary_fusion.delta_proj."),
-            "cardia/grad/runtime_memory_norm": ("runtime_memory2.", "runtime_memory3."),
+            "cardia/grad/sldm_norm": ("sldm2.", "sldm3."),
         }.items():
             value = self._grad_norm_for_prefixes(prefixes)
             if value is not None:
@@ -1435,9 +1604,14 @@ class Trainer:
                 "stage3_write_mean": [],
                 "stage3_decay_mean": [],
                 "stage3_gamma": [],
+                "stage3_fusion_gate_mean": [],
+                "stage3_fusion_gate_p05": [],
+                "stage3_fusion_gate_p95": [],
                 "stage3_dynamic_anchor_minus_anchor_abs_mean": [],
                 "stage3_fused_minus_anchor_abs_mean": [],
+                "stage3_delta_proj_abs_mean": [],
                 "stage3_injected_minus_base_abs_mean": [],
+                "stage3_grid_oob_ratio": [],
                 "stage3_injection_scale": [],
                 "stage3_runtime_update_mean": [],
                 "stage3_runtime_reset_mean": [],
@@ -1447,6 +1621,13 @@ class Trainer:
                 "stage3_runtime_token_abs_mean": [],
                 "stage3_runtime_token_rms": [],
                 "stage3_runtime_token_update_mean": [],
+                "stage3_sldm_memory_norm_mean": [],
+                "stage3_sldm_memory_norm_p95": [],
+                "stage3_sldm_update_norm_mean": [],
+                "stage3_sldm_forget_mean": [],
+                "stage3_sldm_write_mean": [],
+                "stage3_sldm_read_abs_mean": [],
+                "stage3_sldm_delta_abs_mean": [],
                 "stage3_global_selector_entropy": [],
                 "stage3_global_spatial_agreement": [],
                 "stage2_flow_smooth": [],
@@ -1455,8 +1636,13 @@ class Trainer:
                 "stage2_write_mean": [],
                 "stage2_decay_mean": [],
                 "stage2_gamma": [],
+                "stage2_fusion_gate_mean": [],
+                "stage2_fusion_gate_p05": [],
+                "stage2_fusion_gate_p95": [],
                 "stage2_dynamic_anchor_minus_anchor_abs_mean": [],
                 "stage2_fused_minus_anchor_abs_mean": [],
+                "stage2_delta_proj_abs_mean": [],
+                "stage2_grid_oob_ratio": [],
                 "stage2_selector_logit_scale": [],
                 "stage2_global_selector_entropy": [],
                 "stage2_head_entropy": [],
@@ -1470,6 +1656,13 @@ class Trainer:
                 "stage2_runtime_token_abs_mean": [],
                 "stage2_runtime_token_rms": [],
                 "stage2_runtime_token_update_mean": [],
+                "stage2_sldm_memory_norm_mean": [],
+                "stage2_sldm_memory_norm_p95": [],
+                "stage2_sldm_update_norm_mean": [],
+                "stage2_sldm_forget_mean": [],
+                "stage2_sldm_write_mean": [],
+                "stage2_sldm_read_abs_mean": [],
+                "stage2_sldm_delta_abs_mean": [],
                 "boundary_gamma": [],
                 "boundary_edge_gate_mean": [],
                 "boundary_edge_effective_mean": [],
@@ -1477,7 +1670,22 @@ class Trainer:
                 "boundary_edge_gate_p95": [],
                 "boundary_channel_gate_mean": [],
                 "boundary_delta_abs_mean": [],
+                "boundary_delta_on_band_mean": [],
+                "boundary_delta_off_band_mean": [],
+                "boundary_delta_band_ratio": [],
+                "boundary_edge_gate_on_band_mean": [],
+                "boundary_edge_gate_off_band_mean": [],
                 "final_minus_base_logit_abs_mean": [],
+                "runtime_logit_fusion_enabled": [],
+                "logit_fusion_temperature": [],
+                "logit_fusion_entropy": [],
+                "logit_fusion_fused_minus_base_abs_mean": [],
+                "logit_fusion_fused_minus_dynamic_abs_mean": [],
+                "logit_fusion_weight_dynamic": [],
+                "logit_fusion_weight_base": [],
+                "logit_fusion_weight_proposal_top1": [],
+                "logit_fusion_weight_proposal_mixture": [],
+                "logit_fusion_weight_memory_prior": [],
                 "runtime_state_detached": [],
             }
             for key in memory_keys:
@@ -1496,6 +1704,34 @@ class Trainer:
                             usage_mean = usage.float().detach().mean(dim=0)
                             for idx, value in enumerate(usage_mean.flatten()):
                                 buckets.setdefault(f"{stage}_{usage_name}_{idx}", []).append(value.reshape(1))
+                if "cls_gt" in data:
+                    try:
+                        ti = int(key.rsplit("_", 1)[-1])
+                        gt = (data["cls_gt"][:, ti].float() > 0).float()
+                        edge = cardia.get("boundary_edge_gate")
+                        delta = cardia.get("boundary_delta_map")
+                        if torch.is_tensor(edge) and torch.is_tensor(delta):
+                            if gt.dim() == 3:
+                                gt = gt.unsqueeze(1)
+                            if gt.shape[-2:] != edge.shape[-2:]:
+                                gt = torch.nn.functional.interpolate(gt, size=edge.shape[-2:], mode="nearest")
+                            dil = torch.nn.functional.max_pool2d(gt, kernel_size=3, stride=1, padding=1)
+                            ero = 1.0 - torch.nn.functional.max_pool2d(1.0 - gt, kernel_size=3, stride=1, padding=1)
+                            band = (dil - ero).clamp(0.0, 1.0).bool()
+                            edge_item = edge.detach().float()
+                            delta_item = delta.detach().abs().float().mean(dim=1, keepdim=True)
+                            on_delta = delta_item[band]
+                            off_delta = delta_item[~band]
+                            on_edge = edge_item[band]
+                            off_edge = edge_item[~band]
+                            if on_delta.numel() > 0 and off_delta.numel() > 0:
+                                buckets["boundary_delta_on_band_mean"].append(on_delta.mean().reshape(1))
+                                buckets["boundary_delta_off_band_mean"].append(off_delta.mean().reshape(1))
+                                buckets["boundary_delta_band_ratio"].append((on_delta.mean() / off_delta.mean().clamp_min(1.0e-6)).reshape(1))
+                                buckets["boundary_edge_gate_on_band_mean"].append(on_edge.mean().reshape(1))
+                                buckets["boundary_edge_gate_off_band_mean"].append(off_edge.mean().reshape(1))
+                    except Exception:
+                        pass
             metrics = {}
             for name, tensors in buckets.items():
                 if not tensors:
@@ -1503,7 +1739,10 @@ class Trainer:
                 value = torch.cat(tensors).mean().item()
                 if name.startswith("stage"):
                     stage, metric = name.split("_", 1)
-                    log_name = f"cardia/{stage}/{metric}"
+                    if metric.startswith("sldm_"):
+                        log_name = f"cardia/{stage}/sldm/{metric.removeprefix('sldm_')}"
+                    else:
+                        log_name = f"cardia/{stage}/{metric}"
                 elif name.startswith("boundary_"):
                     log_name = f"cardia/boundary/{name.removeprefix('boundary_')}"
                 else:
@@ -1994,6 +2233,9 @@ class Trainer:
                         uses_oracle_gt = batch_data["init_mode"] == "oracle_gt" and self._oracle_init_allowed()
                         self.log.info(
                             f"[{mode.capitalize()}] init_mode={batch_data['init_mode']} | "
+                            f"prediction_mode={self._prediction_mode()} | "
+                            f"target_index={self._target_index()} | "
+                            f"temporal_access={self._temporal_access()} | "
                             f"oracle_gt_init_allowed={self._oracle_init_allowed()} | "
                             f"uses_oracle_gt={uses_oracle_gt} | "
                             f"metric_space={str(self.cfg.get('evaluation', {}).get('metric_space', 'original'))} | "
@@ -2439,6 +2681,8 @@ class Trainer:
                                 for src, prefix in (
                                     ("base_object_logits", "cardia_base"),
                                     ("proposal_top1_logits", "cardia_proposal_top1"),
+                                    ("proposal_spatial_top1_logits", "cardia_proposal_spatial_top1"),
+                                    ("proposal_mixture_proxy_logits", "cardia_proposal_mixture_proxy"),
                                 ):
                                     aux_logits = cardia_aux.get(src)
                                     if torch.is_tensor(aux_logits) and aux_logits.shape[0] > bi:
@@ -2469,6 +2713,14 @@ class Trainer:
                                             selector_idx = int(selector_item.float().argmax().item())
                                             metric_totals["cardia_selector_oracle_alignment_sum"] = metric_totals.get("cardia_selector_oracle_alignment_sum", 0.0) + float(selector_idx == best_idx)
                                             metric_totals["cardia_selector_oracle_alignment_count"] = metric_totals.get("cardia_selector_oracle_alignment_count", 0.0) + 1.0
+                                            metric_totals["cardia_selector_oracle_alignment_global_sum"] = metric_totals.get("cardia_selector_oracle_alignment_global_sum", 0.0) + float(selector_idx == best_idx)
+                                            metric_totals["cardia_selector_oracle_alignment_global_count"] = metric_totals.get("cardia_selector_oracle_alignment_global_count", 0.0) + 1.0
+                                        spatial_logits = cardia_aux.get("spatial_pooled_selector_logits")
+                                        if torch.is_tensor(spatial_logits) and spatial_logits.shape[0] > bi:
+                                            spatial_item = spatial_logits[bi, 0] if spatial_logits.dim() == 3 else spatial_logits[bi]
+                                            spatial_idx = int(spatial_item.float().argmax().item())
+                                            metric_totals["cardia_selector_oracle_alignment_spatial_sum"] = metric_totals.get("cardia_selector_oracle_alignment_spatial_sum", 0.0) + float(spatial_idx == best_idx)
+                                            metric_totals["cardia_selector_oracle_alignment_spatial_count"] = metric_totals.get("cardia_selector_oracle_alignment_spatial_count", 0.0) + 1.0
                                         metric_totals["cardia_proposal_oracle_dice_sum"] = metric_totals.get("cardia_proposal_oracle_dice_sum", 0.0) + float(dice_tensor.max().item())
                                         metric_totals["cardia_proposal_mean_dice_sum"] = metric_totals.get("cardia_proposal_mean_dice_sum", 0.0) + float(dice_tensor.mean().item())
                                         metric_totals["cardia_proposal_dice_count"] = metric_totals.get("cardia_proposal_dice_count", 0.0) + 1.0
@@ -2482,34 +2734,104 @@ class Trainer:
                                     ("stage3_flow_smooth", "cardia_stage3_flow_smooth_sum"),
                                     ("stage3_offset_px_mean", "cardia_stage3_offset_px_mean_sum"),
                                     ("stage3_offset_px_p95", "cardia_stage3_offset_px_p95_sum"),
+                                    ("stage3_grid_oob_ratio", "cardia_stage3_grid_oob_ratio_sum"),
                                     ("stage3_write_mean", "cardia_stage3_write_mean_sum"),
                                     ("stage3_decay_mean", "cardia_stage3_decay_mean_sum"),
+                                    ("stage3_context_gate", "cardia_stage3_context_gate_sum"),
+                                    ("stage3_dynamic_trust_mean", "cardia_stage3_dynamic_trust_mean_sum"),
                                     ("stage3_gamma", "cardia_stage3_gamma_sum"),
+                                    ("stage3_fusion_gate_mean", "cardia_stage3_fusion_gate_mean_sum"),
+                                    ("stage3_fusion_gate_p05", "cardia_stage3_fusion_gate_p05_sum"),
+                                    ("stage3_fusion_gate_p95", "cardia_stage3_fusion_gate_p95_sum"),
+                                    ("stage3_delta_proj_abs_mean", "cardia_stage3_delta_proj_abs_mean_sum"),
                                     ("stage3_runtime_update_mean", "cardia_stage3_runtime_update_mean_sum"),
                                     ("stage3_runtime_state_norm", "cardia_stage3_runtime_state_norm_sum"),
+                                    ("stage3_memory_reliability", "cardia_stage3_memory_reliability_sum"),
+                                    ("stage3_memory_write_mean", "cardia_stage3_memory_write_mean_sum"),
+                                    ("stage3_memory_decay_mean", "cardia_stage3_memory_decay_mean_sum"),
+                                    ("stage3_memory_read_gate_mean", "cardia_stage3_memory_read_gate_mean_sum"),
+                                    ("stage3_memory_current_agreement", "cardia_stage3_memory_current_agreement_sum"),
+                                    ("stage3_memory_boundary_quality", "cardia_stage3_memory_boundary_quality_sum"),
+                                    ("stage3_memory_area_ok", "cardia_stage3_memory_area_ok_sum"),
+                                    ("stage3_memory_readout_abs_mean", "cardia_stage3_memory_readout_abs_mean_sum"),
+                                    ("stage3_sldm_memory_norm_mean", "cardia_stage3_sldm_memory_norm_mean_sum"),
+                                    ("stage3_sldm_memory_norm_p95", "cardia_stage3_sldm_memory_norm_p95_sum"),
+                                    ("stage3_sldm_update_norm_mean", "cardia_stage3_sldm_update_norm_mean_sum"),
+                                    ("stage3_sldm_forget_mean", "cardia_stage3_sldm_forget_mean_sum"),
+                                    ("stage3_sldm_write_mean", "cardia_stage3_sldm_write_mean_sum"),
+                                    ("stage3_sldm_read_abs_mean", "cardia_stage3_sldm_read_abs_mean_sum"),
+                                    ("stage3_sldm_delta_abs_mean", "cardia_stage3_sldm_delta_abs_mean_sum"),
                                     ("stage3_global_selector_entropy", "cardia_stage3_global_selector_entropy_sum"),
                                     ("stage2_flow_smooth", "cardia_stage2_flow_smooth_sum"),
                                     ("stage2_offset_px_mean", "cardia_stage2_offset_px_mean_sum"),
                                     ("stage2_offset_px_p95", "cardia_stage2_offset_px_p95_sum"),
+                                    ("stage2_grid_oob_ratio", "cardia_stage2_grid_oob_ratio_sum"),
                                     ("stage2_write_mean", "cardia_stage2_write_mean_sum"),
                                     ("stage2_decay_mean", "cardia_stage2_decay_mean_sum"),
+                                    ("stage2_context_gate", "cardia_stage2_context_gate_sum"),
+                                    ("stage2_dynamic_trust_mean", "cardia_stage2_dynamic_trust_mean_sum"),
                                     ("stage2_gamma", "cardia_stage2_gamma_sum"),
+                                    ("stage2_fusion_gate_mean", "cardia_stage2_fusion_gate_mean_sum"),
+                                    ("stage2_fusion_gate_p05", "cardia_stage2_fusion_gate_p05_sum"),
+                                    ("stage2_fusion_gate_p95", "cardia_stage2_fusion_gate_p95_sum"),
+                                    ("stage2_delta_proj_abs_mean", "cardia_stage2_delta_proj_abs_mean_sum"),
                                     ("stage2_selector_logit_scale", "cardia_stage2_selector_logit_scale_sum"),
                                     ("stage2_global_selector_entropy", "cardia_stage2_global_selector_entropy_sum"),
                                     ("stage2_head_usage_entropy", "cardia_stage2_head_usage_entropy_sum"),
                                     ("stage2_runtime_update_mean", "cardia_stage2_runtime_update_mean_sum"),
                                     ("stage2_runtime_state_norm", "cardia_stage2_runtime_state_norm_sum"),
+                                    ("stage2_memory_reliability", "cardia_stage2_memory_reliability_sum"),
+                                    ("stage2_memory_write_mean", "cardia_stage2_memory_write_mean_sum"),
+                                    ("stage2_memory_decay_mean", "cardia_stage2_memory_decay_mean_sum"),
+                                    ("stage2_memory_read_gate_mean", "cardia_stage2_memory_read_gate_mean_sum"),
+                                    ("stage2_memory_current_agreement", "cardia_stage2_memory_current_agreement_sum"),
+                                    ("stage2_memory_boundary_quality", "cardia_stage2_memory_boundary_quality_sum"),
+                                    ("stage2_memory_area_ok", "cardia_stage2_memory_area_ok_sum"),
+                                    ("stage2_memory_readout_abs_mean", "cardia_stage2_memory_readout_abs_mean_sum"),
+                                    ("stage2_sldm_memory_norm_mean", "cardia_stage2_sldm_memory_norm_mean_sum"),
+                                    ("stage2_sldm_memory_norm_p95", "cardia_stage2_sldm_memory_norm_p95_sum"),
+                                    ("stage2_sldm_update_norm_mean", "cardia_stage2_sldm_update_norm_mean_sum"),
+                                    ("stage2_sldm_forget_mean", "cardia_stage2_sldm_forget_mean_sum"),
+                                    ("stage2_sldm_write_mean", "cardia_stage2_sldm_write_mean_sum"),
+                                    ("stage2_sldm_read_abs_mean", "cardia_stage2_sldm_read_abs_mean_sum"),
+                                    ("stage2_sldm_delta_abs_mean", "cardia_stage2_sldm_delta_abs_mean_sum"),
                                     ("boundary_gamma", "cardia_boundary_gamma_sum"),
                                     ("boundary_edge_gate_mean", "cardia_boundary_edge_gate_mean_sum"),
                                     ("boundary_edge_gate_p05", "cardia_boundary_edge_gate_p05_sum"),
                                     ("boundary_edge_gate_p95", "cardia_boundary_edge_gate_p95_sum"),
                                     ("boundary_channel_gate_mean", "cardia_boundary_channel_gate_mean_sum"),
                                     ("boundary_delta_abs_mean", "cardia_boundary_delta_abs_mean_sum"),
+                                    ("context_enabled", "cardia_context_enabled_sum"),
+                                    ("context_area", "cardia_context_area_sum"),
+                                    ("context_delta_area", "cardia_context_delta_area_sum"),
+                                    ("context_centroid_x", "cardia_context_centroid_x_sum"),
+                                    ("context_centroid_y", "cardia_context_centroid_y_sum"),
+                                    ("context_delta_centroid_abs", "cardia_context_delta_centroid_abs_sum"),
+                                    ("context_scale_x", "cardia_context_scale_x_sum"),
+                                    ("context_scale_y", "cardia_context_scale_y_sum"),
+                                    ("context_boundary_energy", "cardia_context_boundary_energy_sum"),
+                                    ("context_uncertainty", "cardia_context_uncertainty_sum"),
+                                    ("context_token_rms", "cardia_context_token_rms_sum"),
+                                    ("context_update_mean", "cardia_context_update_mean_sum"),
+                                    ("dynamic_context_trust", "cardia_dynamic_context_trust_sum"),
+                                    ("memory_type_kv", "cardia_memory_type_kv_sum"),
+                                    ("deformation_source_memory", "cardia_deformation_source_memory_sum"),
+                                    ("runtime_logit_fusion_enabled", "cardia_runtime_logit_fusion_enabled_sum"),
+                                    ("logit_fusion_temperature", "cardia_logit_fusion_temperature_sum"),
+                                    ("logit_fusion_entropy", "cardia_logit_fusion_entropy_sum"),
+                                    ("logit_fusion_fused_minus_base_abs_mean", "cardia_logit_fusion_fused_minus_base_abs_mean_sum"),
+                                    ("logit_fusion_fused_minus_dynamic_abs_mean", "cardia_logit_fusion_fused_minus_dynamic_abs_mean_sum"),
+                                    ("logit_fusion_weight_dynamic", "cardia_logit_fusion_weight_dynamic_sum"),
+                                    ("logit_fusion_weight_base", "cardia_logit_fusion_weight_base_sum"),
+                                    ("logit_fusion_weight_proposal_top1", "cardia_logit_fusion_weight_proposal_top1_sum"),
+                                    ("logit_fusion_weight_proposal_mixture", "cardia_logit_fusion_weight_proposal_mixture_sum"),
+                                    ("logit_fusion_weight_memory_prior", "cardia_logit_fusion_weight_memory_prior_sum"),
                                 ):
                                     value = cardia_aux.get(src)
                                     if torch.is_tensor(value):
                                         metric_totals[dst] = metric_totals.get(dst, 0.0) + float(value.float().mean().item())
                                 edge_gate = cardia_aux.get("boundary_edge_gate")
+                                delta_map = cardia_aux.get("boundary_delta_map")
                                 if torch.is_tensor(edge_gate) and edge_gate.shape[0] > bi:
                                     gt_fg = gt_frame.to(device=edge_gate.device, dtype=edge_gate.dtype)
                                     if gt_fg.shape[-2:] != edge_gate.shape[-2:]:
@@ -2524,6 +2846,15 @@ class Trainer:
                                         metric_totals["cardia_boundary_inside_response_sum"] = metric_totals.get("cardia_boundary_inside_response_sum", 0.0) + float(inside.mean().item())
                                         metric_totals["cardia_boundary_outside_response_sum"] = metric_totals.get("cardia_boundary_outside_response_sum", 0.0) + float(outside.mean().item())
                                         metric_totals["cardia_boundary_response_count"] = metric_totals.get("cardia_boundary_response_count", 0.0) + 1.0
+                                    if torch.is_tensor(delta_map) and delta_map.shape[0] > bi:
+                                        delta_item = delta_map[bi : bi + 1].detach().abs().float().mean(dim=1, keepdim=True)
+                                        on_delta = delta_item[boundary_mask]
+                                        off_delta = delta_item[~boundary_mask]
+                                        if on_delta.numel() > 0 and off_delta.numel() > 0:
+                                            metric_totals["cardia_boundary_delta_on_band_sum"] = metric_totals.get("cardia_boundary_delta_on_band_sum", 0.0) + float(on_delta.mean().item())
+                                            metric_totals["cardia_boundary_delta_off_band_sum"] = metric_totals.get("cardia_boundary_delta_off_band_sum", 0.0) + float(off_delta.mean().item())
+                                            metric_totals["cardia_boundary_delta_band_ratio_sum"] = metric_totals.get("cardia_boundary_delta_band_ratio_sum", 0.0) + float((on_delta.mean() / off_delta.mean().clamp_min(1.0e-6)).item())
+                                            metric_totals["cardia_boundary_delta_band_count"] = metric_totals.get("cardia_boundary_delta_band_count", 0.0) + 1.0
                                 for stage in ("stage2", "stage3"):
                                     usage = cardia_aux.get(f"{stage}_head_usage")
                                     if torch.is_tensor(usage):
@@ -3373,28 +3704,82 @@ class Trainer:
                 {
                     "cardia/base_dice": cardia_mean("cardia_base_dice_sum", "cardia_base_dice_count"),
                     "cardia/proposal_top1": cardia_mean("cardia_proposal_top1_dice_sum", "cardia_proposal_top1_dice_count"),
+                    "cardia/proposal/global_top1_dice": cardia_mean("cardia_proposal_top1_dice_sum", "cardia_proposal_top1_dice_count"),
+                    "cardia/proposal/spatial_pooled_top1_dice": cardia_mean("cardia_proposal_spatial_top1_dice_sum", "cardia_proposal_spatial_top1_dice_count"),
+                    "cardia/proposal/mixture_proxy_dice": cardia_mean("cardia_proposal_mixture_proxy_dice_sum", "cardia_proposal_mixture_proxy_dice_count"),
                     "cardia/proposal_oracle": cardia_mean("cardia_proposal_oracle_dice_sum", "cardia_proposal_dice_count"),
+                    "cardia/proposal/oracle_dice": cardia_mean("cardia_proposal_oracle_dice_sum", "cardia_proposal_dice_count"),
                     "cardia/proposal_oracle_minus_top1": cardia_mean("cardia_proposal_oracle_minus_top1_sum", "cardia_proposal_oracle_minus_top1_count"),
                     "cardia/proposal_top1_minus_base": cardia_mean("cardia_proposal_top1_minus_base_sum", "cardia_proposal_top1_minus_base_count"),
                     "cardia/selector_oracle_alignment": cardia_mean("cardia_selector_oracle_alignment_sum", "cardia_selector_oracle_alignment_count"),
+                    "cardia/selector/oracle_alignment_global": cardia_mean("cardia_selector_oracle_alignment_global_sum", "cardia_selector_oracle_alignment_global_count"),
+                    "cardia/selector/oracle_alignment_spatial": cardia_mean("cardia_selector_oracle_alignment_spatial_sum", "cardia_selector_oracle_alignment_spatial_count"),
                     "cardia/final_dice": metrics["dice_frame_mean"],
                     "cardia/boundary_dice": metrics["boundary_dice"],
                     "cardia/stage3/flow_smooth": cardia_mean("cardia_stage3_flow_smooth_sum"),
+                    "cardia/stage3/solver/offset_px_mean": cardia_mean("cardia_stage3_offset_px_mean_sum"),
+                    "cardia/stage3/solver/offset_px_p95": cardia_mean("cardia_stage3_offset_px_p95_sum"),
+                    "cardia/stage3/solver/grid_oob_ratio": cardia_mean("cardia_stage3_grid_oob_ratio_sum"),
                     "cardia/stage3/write_mean": cardia_mean("cardia_stage3_write_mean_sum"),
                     "cardia/stage3/decay_mean": cardia_mean("cardia_stage3_decay_mean_sum"),
+                    "cardia/stage3/context_gate": cardia_mean("cardia_stage3_context_gate_sum"),
+                    "cardia/stage3/dynamic_trust_mean": cardia_mean("cardia_stage3_dynamic_trust_mean_sum"),
                     "cardia/stage3/gamma": cardia_mean("cardia_stage3_gamma_sum"),
+                    "cardia/stage3/fusion_gate_mean": cardia_mean("cardia_stage3_fusion_gate_mean_sum"),
+                    "cardia/stage3/fusion_gate_p05": cardia_mean("cardia_stage3_fusion_gate_p05_sum"),
+                    "cardia/stage3/fusion_gate_p95": cardia_mean("cardia_stage3_fusion_gate_p95_sum"),
+                    "cardia/stage3/delta_proj_abs_mean": cardia_mean("cardia_stage3_delta_proj_abs_mean_sum"),
                     "cardia/stage3/runtime_update_mean": cardia_mean("cardia_stage3_runtime_update_mean_sum"),
                     "cardia/stage3/runtime_state_norm": cardia_mean("cardia_stage3_runtime_state_norm_sum"),
+                    "cardia/stage3/memory/reliability": cardia_mean("cardia_stage3_memory_reliability_sum"),
+                    "cardia/stage3/memory/write_mean": cardia_mean("cardia_stage3_memory_write_mean_sum"),
+                    "cardia/stage3/memory/decay_mean": cardia_mean("cardia_stage3_memory_decay_mean_sum"),
+                    "cardia/stage3/memory/read_gate_mean": cardia_mean("cardia_stage3_memory_read_gate_mean_sum"),
+                    "cardia/stage3/memory/current_agreement": cardia_mean("cardia_stage3_memory_current_agreement_sum"),
+                    "cardia/stage3/memory/boundary_quality": cardia_mean("cardia_stage3_memory_boundary_quality_sum"),
+                    "cardia/stage3/memory/area_ok": cardia_mean("cardia_stage3_memory_area_ok_sum"),
+                    "cardia/stage3/memory/readout_abs_mean": cardia_mean("cardia_stage3_memory_readout_abs_mean_sum"),
+                    "cardia/stage3/sldm/memory_norm_mean": cardia_mean("cardia_stage3_sldm_memory_norm_mean_sum"),
+                    "cardia/stage3/sldm/memory_norm_p95": cardia_mean("cardia_stage3_sldm_memory_norm_p95_sum"),
+                    "cardia/stage3/sldm/update_norm_mean": cardia_mean("cardia_stage3_sldm_update_norm_mean_sum"),
+                    "cardia/stage3/sldm/forget_mean": cardia_mean("cardia_stage3_sldm_forget_mean_sum"),
+                    "cardia/stage3/sldm/write_mean": cardia_mean("cardia_stage3_sldm_write_mean_sum"),
+                    "cardia/stage3/sldm/read_abs_mean": cardia_mean("cardia_stage3_sldm_read_abs_mean_sum"),
+                    "cardia/stage3/sldm/delta_abs_mean": cardia_mean("cardia_stage3_sldm_delta_abs_mean_sum"),
                     "cardia/stage3/global_selector_entropy": cardia_mean("cardia_stage3_global_selector_entropy_sum"),
                     "cardia/stage2/flow_smooth": cardia_mean("cardia_stage2_flow_smooth_sum"),
+                    "cardia/stage2/solver/offset_px_mean": cardia_mean("cardia_stage2_offset_px_mean_sum"),
+                    "cardia/stage2/solver/offset_px_p95": cardia_mean("cardia_stage2_offset_px_p95_sum"),
+                    "cardia/stage2/solver/grid_oob_ratio": cardia_mean("cardia_stage2_grid_oob_ratio_sum"),
                     "cardia/stage2/write_mean": cardia_mean("cardia_stage2_write_mean_sum"),
                     "cardia/stage2/decay_mean": cardia_mean("cardia_stage2_decay_mean_sum"),
+                    "cardia/stage2/context_gate": cardia_mean("cardia_stage2_context_gate_sum"),
+                    "cardia/stage2/dynamic_trust_mean": cardia_mean("cardia_stage2_dynamic_trust_mean_sum"),
                     "cardia/stage2/gamma": cardia_mean("cardia_stage2_gamma_sum"),
+                    "cardia/stage2/fusion_gate_mean": cardia_mean("cardia_stage2_fusion_gate_mean_sum"),
+                    "cardia/stage2/fusion_gate_p05": cardia_mean("cardia_stage2_fusion_gate_p05_sum"),
+                    "cardia/stage2/fusion_gate_p95": cardia_mean("cardia_stage2_fusion_gate_p95_sum"),
+                    "cardia/stage2/delta_proj_abs_mean": cardia_mean("cardia_stage2_delta_proj_abs_mean_sum"),
                     "cardia/stage2/selector_logit_scale": cardia_mean("cardia_stage2_selector_logit_scale_sum"),
                     "cardia/stage2/global_selector_entropy": cardia_mean("cardia_stage2_global_selector_entropy_sum"),
                     "cardia/stage2/head_usage_entropy": cardia_mean("cardia_stage2_head_usage_entropy_sum"),
                     "cardia/stage2/runtime_update_mean": cardia_mean("cardia_stage2_runtime_update_mean_sum"),
                     "cardia/stage2/runtime_state_norm": cardia_mean("cardia_stage2_runtime_state_norm_sum"),
+                    "cardia/stage2/memory/reliability": cardia_mean("cardia_stage2_memory_reliability_sum"),
+                    "cardia/stage2/memory/write_mean": cardia_mean("cardia_stage2_memory_write_mean_sum"),
+                    "cardia/stage2/memory/decay_mean": cardia_mean("cardia_stage2_memory_decay_mean_sum"),
+                    "cardia/stage2/memory/read_gate_mean": cardia_mean("cardia_stage2_memory_read_gate_mean_sum"),
+                    "cardia/stage2/memory/current_agreement": cardia_mean("cardia_stage2_memory_current_agreement_sum"),
+                    "cardia/stage2/memory/boundary_quality": cardia_mean("cardia_stage2_memory_boundary_quality_sum"),
+                    "cardia/stage2/memory/area_ok": cardia_mean("cardia_stage2_memory_area_ok_sum"),
+                    "cardia/stage2/memory/readout_abs_mean": cardia_mean("cardia_stage2_memory_readout_abs_mean_sum"),
+                    "cardia/stage2/sldm/memory_norm_mean": cardia_mean("cardia_stage2_sldm_memory_norm_mean_sum"),
+                    "cardia/stage2/sldm/memory_norm_p95": cardia_mean("cardia_stage2_sldm_memory_norm_p95_sum"),
+                    "cardia/stage2/sldm/update_norm_mean": cardia_mean("cardia_stage2_sldm_update_norm_mean_sum"),
+                    "cardia/stage2/sldm/forget_mean": cardia_mean("cardia_stage2_sldm_forget_mean_sum"),
+                    "cardia/stage2/sldm/write_mean": cardia_mean("cardia_stage2_sldm_write_mean_sum"),
+                    "cardia/stage2/sldm/read_abs_mean": cardia_mean("cardia_stage2_sldm_read_abs_mean_sum"),
+                    "cardia/stage2/sldm/delta_abs_mean": cardia_mean("cardia_stage2_sldm_delta_abs_mean_sum"),
                     "cardia/solver/offset_px_mean": 0.5
                     * (
                         cardia_mean("cardia_stage2_offset_px_mean_sum")
@@ -3411,6 +3796,34 @@ class Trainer:
                     "cardia/boundary/delta_abs_mean": cardia_mean("cardia_boundary_delta_abs_mean_sum"),
                     "cardia/boundary/inside_response": cardia_mean("cardia_boundary_inside_response_sum", "cardia_boundary_response_count"),
                     "cardia/boundary/outside_response": cardia_mean("cardia_boundary_outside_response_sum", "cardia_boundary_response_count"),
+                    "cardia/boundary/delta_on_band_mean": cardia_mean("cardia_boundary_delta_on_band_sum", "cardia_boundary_delta_band_count"),
+                    "cardia/boundary/delta_off_band_mean": cardia_mean("cardia_boundary_delta_off_band_sum", "cardia_boundary_delta_band_count"),
+                    "cardia/boundary/delta_band_ratio": cardia_mean("cardia_boundary_delta_band_ratio_sum", "cardia_boundary_delta_band_count"),
+                    "cardia/context/enabled": cardia_mean("cardia_context_enabled_sum"),
+                    "cardia/context/area": cardia_mean("cardia_context_area_sum"),
+                    "cardia/context/delta_area": cardia_mean("cardia_context_delta_area_sum"),
+                    "cardia/context/centroid_x": cardia_mean("cardia_context_centroid_x_sum"),
+                    "cardia/context/centroid_y": cardia_mean("cardia_context_centroid_y_sum"),
+                    "cardia/context/delta_centroid_abs": cardia_mean("cardia_context_delta_centroid_abs_sum"),
+                    "cardia/context/scale_x": cardia_mean("cardia_context_scale_x_sum"),
+                    "cardia/context/scale_y": cardia_mean("cardia_context_scale_y_sum"),
+                    "cardia/context/boundary_energy": cardia_mean("cardia_context_boundary_energy_sum"),
+                    "cardia/context/uncertainty": cardia_mean("cardia_context_uncertainty_sum"),
+                    "cardia/context/token_rms": cardia_mean("cardia_context_token_rms_sum"),
+                    "cardia/context/update_mean": cardia_mean("cardia_context_update_mean_sum"),
+                    "cardia/context/dynamic_trust": cardia_mean("cardia_dynamic_context_trust_sum"),
+                    "cardia/memory/type_kv": cardia_mean("cardia_memory_type_kv_sum"),
+                    "cardia/solver/deformation_source_memory": cardia_mean("cardia_deformation_source_memory_sum"),
+                    "cardia/logit_fusion/enabled": cardia_mean("cardia_runtime_logit_fusion_enabled_sum"),
+                    "cardia/logit_fusion/temperature": cardia_mean("cardia_logit_fusion_temperature_sum"),
+                    "cardia/logit_fusion/entropy": cardia_mean("cardia_logit_fusion_entropy_sum"),
+                    "cardia/logit_fusion/fused_minus_base_abs_mean": cardia_mean("cardia_logit_fusion_fused_minus_base_abs_mean_sum"),
+                    "cardia/logit_fusion/fused_minus_dynamic_abs_mean": cardia_mean("cardia_logit_fusion_fused_minus_dynamic_abs_mean_sum"),
+                    "cardia/logit_fusion/weight_dynamic": cardia_mean("cardia_logit_fusion_weight_dynamic_sum"),
+                    "cardia/logit_fusion/weight_base": cardia_mean("cardia_logit_fusion_weight_base_sum"),
+                    "cardia/logit_fusion/weight_proposal_top1": cardia_mean("cardia_logit_fusion_weight_proposal_top1_sum"),
+                    "cardia/logit_fusion/weight_proposal_mixture": cardia_mean("cardia_logit_fusion_weight_proposal_mixture_sum"),
+                    "cardia/logit_fusion/weight_memory_prior": cardia_mean("cardia_logit_fusion_weight_memory_prior_sum"),
                 }
             )
             if reduced.get("cardia_base_dice_count", 0.0) > 0:
@@ -3537,7 +3950,7 @@ class Trainer:
         weights_path = self.run_path / f"{self.model_name}_iter_{it}.pth"
         torch.save(self.model_without_ddp.state_dict(), weights_path)
         self.log.info(f"Saved weights: {weights_path}")
-        latest_path = self.run_path / "latest.pth"
+        latest_path = self.run_path / "latest_weights.pth"
         torch.save(self.model_without_ddp.state_dict(), latest_path)
         manifest = {
             "iteration": int(it),
@@ -3551,7 +3964,7 @@ class Trainer:
             ema_path = self.run_path / f"{self.model_name}_ema_iter_{it}.pth"
             torch.save(self.ema.state_dict(), ema_path)
             self.log.info(f"Saved EMA weights: {ema_path}")
-            latest_ema_path = self.run_path / "latest_ema.pth"
+            latest_ema_path = self.run_path / "latest_ema_weights.pth"
             torch.save(self.ema.state_dict(), latest_ema_path)
             manifest["latest_ema"] = latest_ema_path.name
         manifest_path = self.run_path / "model_manifest.json"
@@ -3559,9 +3972,9 @@ class Trainer:
             json.dump(manifest, handle, indent=2, sort_keys=True)
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:
-            logger.log_checkpoint(latest_path, artifact_name="latest.pth")
+            logger.log_checkpoint(latest_path, artifact_name="latest_weights.pth")
             if self.ema is not None:
-                logger.log_checkpoint(self.run_path / "latest_ema.pth", artifact_name="latest_ema.pth")
+                logger.log_checkpoint(self.run_path / "latest_ema_weights.pth", artifact_name="latest_ema_weights.pth")
             logger.log_checkpoint(manifest_path, artifact_name="model_manifest.json")
 
     def save_checkpoint(self, it: int):
@@ -3581,11 +3994,11 @@ class Trainer:
             "best_val_metric": self.best_val_metric,
         }
         torch.save(payload, ckpt_path)
-        latest_path = self.run_path / "latest.pth"
+        latest_path = self.run_path / "latest_checkpoint.pth"
         torch.save(payload, latest_path)
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:
-            logger.log_checkpoint(latest_path, artifact_name="latest.pth")
+            logger.log_checkpoint(latest_path, artifact_name="latest_checkpoint.pth")
         self.log.info(f"Saved checkpoint: {ckpt_path}")
 
     def upload_summary_artifact(self) -> None:
@@ -3605,14 +4018,23 @@ class Trainer:
                 self.log.warning(f"Failed to prepare summary.json artifact: {exc}")
             logger.log_artifact(summary_path, artifact_path="eval")
         if logger is not None:
+            if not hasattr(logger, "log_run_logs"):
+                return
             try:
                 logger.log_run_logs()
             except Exception as exc:
-                self.log.warning(f"Failed to upload run logs to MLflow: {exc}")
+                trainer_log = getattr(self, "log", log)
+                trainer_log.warning(f"Failed to upload run logs to MLflow: {exc}")
 
     def load_checkpoint(self, path: str):
         self.log.info(f"Loading checkpoint: {path}")
         ckpt = torch.load(path, map_location=self.device)
+        if not isinstance(ckpt, dict) or "model" not in ckpt:
+            raise ValueError(
+                "Expected a full training checkpoint with keys like 'model', "
+                "'optimizer', and 'scheduler'. For model-only weights, load the "
+                "state_dict explicitly instead of Trainer.load_checkpoint()."
+            )
         self.model_without_ddp.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler.load_state_dict(ckpt["scheduler"])

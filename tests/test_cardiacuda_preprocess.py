@@ -5,7 +5,9 @@ from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
-import SimpleITK as sitk
+import pytest
+
+sitk = pytest.importorskip("SimpleITK")
 
 from dataset.echo import EchoDataset
 from tools.preprocess_cardiacuda import preprocess_dataset

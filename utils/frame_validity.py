@@ -18,6 +18,27 @@ def build_default_endpoint_mask(
     return mask
 
 
+def build_single_target_mask(
+    batch_size: int,
+    total_frames: int,
+    target_index: int = -1,
+    *,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    if total_frames <= 0:
+        raise ValueError(f"total_frames must be positive, got {total_frames}")
+    index = int(target_index)
+    if index < 0:
+        index = total_frames + index
+    if index < 0 or index >= total_frames:
+        raise ValueError(
+            f"target_index={target_index} resolves to {index}, outside [0, {total_frames})"
+        )
+    mask = torch.zeros((batch_size, total_frames), device=device, dtype=torch.bool)
+    mask[:, index] = True
+    return mask
+
+
 def normalize_frame_validity_mask(
     source: torch.Tensor | None,
     *,

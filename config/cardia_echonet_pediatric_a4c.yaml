@@ -1,0 +1,21 @@
+defaults:
+  - cardia_echo
+  - _self_
+
+exp_id: "cardia_echonet_pediatric_a4c"
+
+data_path: "${processed_root}/echonet_pediatric_a4c_png128_10f"
+
+data:
+  protocol_name: "echonet_pediatric_a4c_endpoint"
+
+mlflow:
+  experiment_name: "cardia_runtime_deformation"
+  tags:
+    method: "CARDIA"
+    dataset: "echonet_pediatric"
+    view: "A4C"
+    protocol: "echonet_pediatric_a4c_endpoint"
+    temporal_module: "RuntimeMemoryGridODE"
+    routing_scales: "stage3,stage2"
+    state_type: "runtime_state_detached"

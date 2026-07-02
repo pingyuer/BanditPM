@@ -1,0 +1,16 @@
+defaults:
+  - /geomaskformer_echo
+  - _self_
+
+exp_id: "geomaskformer_k10_echo"
+
+model:
+  geomaskformer:
+    num_queries: 10
+    loss:
+      topk: 4
+
+mlflow:
+  tags:
+    search_axis: "num_queries"
+    num_queries: "10"

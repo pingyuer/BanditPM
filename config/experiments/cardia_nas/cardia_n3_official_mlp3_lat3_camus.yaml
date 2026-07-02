@@ -1,0 +1,13 @@
+defaults:
+  - cardia_s7_camus
+  - _self_
+exp_id: "cardia_n3_official_mlp3_lat2"
+model:
+  cardia:
+    backbone:
+      name: official
+      official:
+        mlp_expansion: 3.0
+        latent_blocks: 2
+mlflow:
+  tags: { method: "CARDIA_nas2", version: "n3_official_mlp3_lat3" }

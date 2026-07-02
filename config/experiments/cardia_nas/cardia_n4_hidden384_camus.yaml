@@ -1,0 +1,9 @@
+defaults:
+  - cardia_s7_camus
+  - _self_
+exp_id: "cardia_n4_hidden384"
+model:
+  cardia:
+    hidden_dim: 384
+mlflow:
+  tags: { method: "CARDIA_nas2", version: "n4_hidden384" }

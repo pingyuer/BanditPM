@@ -1,0 +1,30 @@
+defaults:
+  - cardia_cardiacuda_sparse_sitegen
+  - /_base_/models/debel@_global_
+  - _self_
+
+exp_id: "debel_cardiacuda_sparse_sitegen"
+model_name: "DEBEL"
+
+model:
+  name: "debel"
+
+loss:
+  name: "debel"
+
+main_training:
+  cardia_lr_ratio: null
+  rebel_lr_ratio: null
+  debel_lr_ratio: 2.0
+
+mlflow:
+  experiment_name: "debel"
+  run_name: "debel_cardiacuda_sparse_sitegen"
+  tags:
+    method: "DEBEL"
+    dataset: "cardiacuda"
+    view: "A4C"
+    protocol: "sitegen_G100R126_to_G29"
+    backbone: "unext_official"
+    temporal_module: "FactorizedDETRQueryMemory"
+    solver: "bounded_euler_grid_sample"

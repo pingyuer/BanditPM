@@ -1,0 +1,20 @@
+defaults:
+  - gdkvm_cardiacuda_sparse_sitegen
+  - _self_
+
+exp_id: "gdkvm_cardiacuda_r2g"
+
+data_path: "${processed_root}/cardiacuda_a4c_lv_r2g_png128_10f"
+
+data:
+  protocol_name: "cardiacuda_a4c_lv_sparse_r2g"
+
+evaluation:
+  eval_protocol: "cardiacuda_r2g_noinit"
+
+mlflow:
+  experiment_name: "cardiacuda_cross_domain_r2g"
+  tags:
+    protocol: "R_to_G"
+    source_domain: "R"
+    target_domain: "G"

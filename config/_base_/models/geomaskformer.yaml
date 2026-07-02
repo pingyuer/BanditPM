@@ -1,0 +1,43 @@
+# GeoMaskFormer: geometry-token proposal selection transformer
+model_name: "GeoMaskFormer"
+
+model:
+  name: "geomaskformer"
+  allow_oracle_init_when_requested: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0
+  temporal_memory:
+    type: none
+    bpm:
+      ENABLE: false
+  geomaskformer:
+    in_channels: 1
+    num_classes: 2
+    dim: 128
+    base_channels: 32
+    depth: 3
+    heads: 4
+    num_queries: 20
+    decoder_layers: 2
+    max_frames: 16
+    use_geometry_tokenizer: true
+    gated_image_from_mask: true
+    inference: "top1"
+    training_stage: "stage2"
+    image_token_dropout: 0.05
+    mask_token_dropout: 0.10
+    condition_dropout: 0.10
+    protocol:
+      no_mask: 0.50
+      first_frame: 0.25
+      random_keyframe: 0.25
+    loss:
+      mask: 1.0
+      boundary: 0.2
+      score: 0.5
+      temporal: 0.03
+      topk: 4
+      boundary_kernel: 5

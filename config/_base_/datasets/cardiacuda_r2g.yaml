@@ -1,0 +1,18 @@
+# @package _global_
+dataset_name: "cardiacuda"
+data_path: "${processed_root}/cardiacuda_a4c_lv_r2g_png128_10f"
+
+data:
+  protocol_name: "cardiacuda_a4c_lv_sparse_r2g"
+
+main_training:
+  crop_size: [128, 128]
+
+eval_stage:
+  crop_size: [128, 128]
+
+evaluation:
+  init_mode: "pred_or_zero"
+  exclude_init_frame: true
+  eval_protocol: "cardiacuda_r2g_noinit"
+  protocol_version: "v3_canonical_no_leak"

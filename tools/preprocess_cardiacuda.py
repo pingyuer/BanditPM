@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dense_seed", type=int, default=42)
     parser.add_argument("--dense_val_count", type=int, default=2)
     parser.add_argument("--dense_test_count", type=int, default=2)
+    parser.add_argument(
+        "--output_name",
+        type=str,
+        default=None,
+        help="Optional processed dataset directory name. Defaults to the canonical CardiacUDA name.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -226,6 +232,9 @@ def resolve_protocol_name(target_label: int, supervision_mode: str = "sparse") -
 
 
 def resolve_output_dataset_name(args: argparse.Namespace) -> str:
+    output_name = getattr(args, "output_name", None)
+    if output_name:
+        return str(output_name)
     target_label = int(getattr(args, "target_label", 1))
     image_size = int(getattr(args, "image_size", 128))
     target_name = TARGET_LABEL_NAMES[target_label]

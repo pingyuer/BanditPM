@@ -1,0 +1,28 @@
+defaults:
+  - cardia_echonet_pediatric_a4c
+  - /_base_/models/rebel@_global_
+  - _self_
+
+exp_id: "rebel_echonet_pediatric_a4c"
+model_name: "ReBel"
+
+model:
+  name: "rebel"
+
+loss:
+  name: "rebel"
+
+main_training:
+  cardia_lr_ratio: null
+  rebel_lr_ratio: 1.0
+
+mlflow:
+  experiment_name: "rebel"
+  run_name: "rebel_echonet_pediatric_a4c"
+  tags:
+    method: "ReBel"
+    full_name: "Resampled Belief Network for Decoupled Video Segmentation"
+    dataset: "echonet_pediatric"
+    view: "A4C"
+    protocol: "echonet_pediatric_a4c_endpoint"
+    backbone: "unext_official"

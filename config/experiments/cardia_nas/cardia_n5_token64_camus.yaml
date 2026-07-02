@@ -1,0 +1,9 @@
+defaults:
+  - cardia_s7_camus
+  - _self_
+exp_id: "cardia_n5_token64"
+model:
+  cardia:
+    runtime_token_dim: 64
+mlflow:
+  tags: { method: "CARDIA_nas2", version: "n5_token64" }

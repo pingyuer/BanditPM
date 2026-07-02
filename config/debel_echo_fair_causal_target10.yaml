@@ -1,0 +1,13 @@
+defaults:
+  - debel_echo_fair_endpoint10
+  - _self_
+
+exp_id: "debel_echo_fair_causal_target10"
+prediction_mode: "causal_target10"
+target_index: -1
+
+mlflow:
+  run_name: "debel_echo_fair_causal_target10"
+  tags:
+    protocol: "fair_causal_target10"
+    prediction_mode: "causal_target10"

@@ -1,0 +1,9 @@
+defaults:
+  - cardia_s7_camus
+  - _self_
+exp_id: "cardia_n7_silu"
+model:
+  cardia:
+    activation: SiLU
+mlflow:
+  tags: { method: "CARDIA_nas2", version: "n7_silu" }

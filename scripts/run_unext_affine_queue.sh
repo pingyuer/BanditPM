@@ -35,6 +35,8 @@ ckpt_for() {
   local stage0_dir="$1"
   if [[ -f "${stage0_dir}/best_raw.pth" ]]; then
     printf "%s\n" "${stage0_dir}/best_raw.pth"
+  elif [[ -f "${stage0_dir}/latest_weights.pth" ]]; then
+    printf "%s\n" "${stage0_dir}/latest_weights.pth"
   elif [[ -f "${stage0_dir}/latest.pth" ]]; then
     printf "%s\n" "${stage0_dir}/latest.pth"
   else

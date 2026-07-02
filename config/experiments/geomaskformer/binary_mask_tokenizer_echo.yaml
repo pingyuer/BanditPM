@@ -1,0 +1,14 @@
+defaults:
+  - /geomaskformer_echo
+  - _self_
+
+exp_id: "geomaskformer_binary_mask_tokenizer_echo"
+
+model:
+  geomaskformer:
+    use_geometry_tokenizer: false
+
+mlflow:
+  tags:
+    search_axis: "mask_tokenizer"
+    mask_tokenizer: "binary"

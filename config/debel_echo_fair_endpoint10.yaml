@@ -1,0 +1,30 @@
+defaults:
+  - debel_echo
+  - _self_
+
+exp_id: "debel_echo_fair_endpoint10"
+prediction_mode: "dense10"
+target_index: -1
+temporal_access: "full_window"
+
+model:
+  backbone_pretrained: false
+  pretrain_source: "none"
+
+main_training:
+  num_iterations: 4000
+  batch_size: 8
+  lr_schedule: warmup_cosine
+  lr_warmup_iters: 300
+  lr_min_ratio: 0.05
+
+mlflow:
+  experiment_name: "fair_debel_gdkvm_six_tasks"
+  run_name: "debel_echo_fair_endpoint10"
+  tags:
+    method: "DEBEL"
+    dataset: "echonet"
+    protocol: "fair_endpoint10"
+    temporal_access: "full_window"
+    prediction_mode: "dense10"
+    task: "echonet_adult"

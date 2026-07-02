@@ -1,0 +1,15 @@
+defaults:
+  - cardia_n2_camus
+  - _self_
+
+exp_id: "cardia_n2_lite_camus"
+model_name: "CARDIA_N2_Lite"
+
+model:
+  cardia:
+    base_dim: 108
+
+mlflow:
+  tags:
+    method: "CARDIA_N2_Lite"
+    version: "n2_lite_official_mlp2"

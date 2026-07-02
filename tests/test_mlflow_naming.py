@@ -52,7 +52,7 @@ class MLflowNamingTests(unittest.TestCase):
         run_name = resolve_mlflow_run_name(cfg, timestamp="0519-1032", git_hash="abc1234")
         self.assertEqual(
             run_name,
-            "gdkvm_echonet_ed2es_train_s7_0519-1032_abc1234",
+            "gdkvm_echo_gdkvm_echonet_ed2es_train_s7_0519-1032_abc1234",
         )
         self.assertRegex(run_name, re.compile(r".*_s7_\d{4}-\d{4}_[0-9a-z]+$"))
 

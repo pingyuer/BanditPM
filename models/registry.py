@@ -9,8 +9,11 @@ from model.anchor_ode import UNeXtAnchorODEAffineSegmenter, UNeXtAnchorODESegmen
 from model.functional_anchor import FunctionalAnchorSegmenter
 from model.unext_faf import UNeXtFAF
 from model.unext_gar import UNeXtGAR
-from model.cardia import CARDIA
+from cardia import CARDIA
+from debel import DEBEL
+from geomaskformer import GeoMaskFormer
 from model.unext_dynakey import UNeXtDynaKeySegmenter
+from rebel import ReBelSegmenter
 
 
 MODEL_REGISTRY = Registry("model")
@@ -39,6 +42,7 @@ def build_gdkvm(cfg, *, device: torch.device | str):
         temporal_memory_cfg=model_cfg.get("temporal_memory", None),
         memory_core_cfg=model_cfg.get("memory_core", None),
         use_kpff=bool(model_cfg.get("use_kpff", True)),
+        backbone_pretrained=bool(model_cfg.get("backbone_pretrained", True)),
     ).to(device)
 
 
@@ -51,6 +55,7 @@ def build_kpff(cfg, *, device: torch.device | str):
         temporal_memory_cfg={"type": "none"},
         memory_core_cfg={"type": "none"},
         use_kpff=True,
+        backbone_pretrained=bool(model_cfg.get("backbone_pretrained", True)),
     ).to(device)
 
 
@@ -109,8 +114,25 @@ def build_cardia(cfg, *, device: torch.device | str):
     return CARDIA(_model_cfg(cfg)).to(device)
 
 
+@MODEL_REGISTRY.register("rebel")
+@MODEL_REGISTRY.register("resampled_belief")
+def build_rebel(cfg, *, device: torch.device | str):
+    return ReBelSegmenter(_model_cfg(cfg)).to(device)
+
+
+@MODEL_REGISTRY.register("debel")
+def build_debel(cfg, *, device: torch.device | str):
+    return DEBEL(_model_cfg(cfg)).to(device)
+
+
+@MODEL_REGISTRY.register("geomaskformer")
+@MODEL_REGISTRY.register("geo_maskformer")
+def build_geomaskformer(cfg, *, device: torch.device | str):
+    return GeoMaskFormer(_model_cfg(cfg)).to(device)
+
+
 def build_model(cfg, *, device: torch.device | str):
     model_cfg = _model_cfg(cfg)
     if not str(model_cfg.get("name", "")).strip():
-        model_cfg.name = "gdkvm"
+        model_cfg.name = "cardia"
     return MODEL_REGISTRY.build(cfg, device=device)

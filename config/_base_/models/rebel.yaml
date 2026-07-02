@@ -1,0 +1,82 @@
+model_name: "ReBel"
+
+model:
+  name: "rebel"
+  allow_oracle_init_when_requested: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0
+  rebel:
+    in_channels: 1
+    num_classes: 2
+    backbone:
+      name: official
+      base_dim: 96
+      mlp_expansion: 2.0
+      latent_blocks: 2
+      decoder_mlp_blocks: 1
+    belief_dim: 192
+    decoder_dim: 160
+    ode:
+      hidden_dim: 160
+      num_blocks: 3
+      activation: silu
+      norm: groupnorm
+      max_offset_px_stage4: 6.0
+      offset_warmup_iters: 800
+      offset_warmup_start_ratio: 0.25
+      padding_mode: border
+      align_corners: false
+    memory:
+      type: resampled_belief
+      use_working: true
+      use_stable: true
+      detach_update: true
+      write_fast_init: 0.25
+      write_slow_init: 0.05
+      decay_fast_init: 0.75
+      decay_slow_init: 0.95
+      stable_reliability_threshold: 0.55
+    decoder:
+      use_gated_skips: true
+      num_up_blocks: 3
+      activation: silu
+      norm: groupnorm
+    correction:
+      enabled: true
+      init_scale: 0.25
+      max_scale: 1.0
+      start_iter: 1000
+    fusion:
+      hidden_dim: 160
+      init_base_bias: 1.2
+      init_obs_bias: 0.4
+      init_belief_bias: -0.2
+      init_rebel_bias: 0.0
+      init_corrected_bias: -0.4
+      init_temperature: 1.25
+      min_base_weight: 0.05
+
+loss:
+  name: rebel
+  rebel:
+    final: 1.0
+    base_aux: 0.35
+    belief_prior: 0.15
+    obs_aux: 0.20
+    rebel_aux: 0.10
+    corrected_aux: 0.05
+    candidate_oracle: 0.15
+    candidate_oracle_temperature: 0.20
+    arbitration: 0.05
+    correction: 0.05
+    temporal: 0.03
+    offset_smooth: 0.005
+    write_reg: 0.01
+
+mlflow:
+  tags:
+    method: ReBel
+    full_name: "Resampled Belief Network for Decoupled Video Segmentation"

@@ -1,0 +1,14 @@
+defaults:
+  - debel_camus_fair_dense10
+  - _self_
+
+exp_id: "debel_camus_fair_dense10_maxdisp075"
+
+model:
+  debel:
+    max_disp: 0.075
+
+mlflow:
+  run_name: "debel_camus_fair_dense10_maxdisp075"
+  tags:
+    max_disp: "0.075"

@@ -1,0 +1,9 @@
+defaults:
+  - rebel_cardiacuda_sparse_sitegen
+  - _self_
+
+seed: 2
+exp_id: "rebel_cardiacuda_sparse_sitegen_seed2"
+
+mlflow:
+  run_name: "rebel_sitegen_seed2"

@@ -1,0 +1,26 @@
+defaults:
+  - cardia_echonet_pediatric_a4c
+  - _self_
+
+exp_id: "cardia_n2_echonet_pediatric_a4c"
+model_name: "CARDIA_N2"
+
+model:
+  cardia:
+    base_dim: 120
+    backbone:
+      name: "official"
+      official:
+        mlp_expansion: 2.0
+        latent_blocks: 2
+        decoder_mlp_blocks: 1
+
+mlflow:
+  experiment_name: "cardia_nas"
+  tags:
+    method: "CARDIA_N2"
+    version: "n2_official_mlp2"
+    dataset: "echonet_pediatric"
+    view: "A4C"
+    protocol: "echonet_pediatric_a4c_endpoint"
+    backbone: "unext_official"

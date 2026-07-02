@@ -34,7 +34,7 @@ class MLflowLoggerTests(unittest.TestCase):
         cfg = OmegaConf.create(
             {
                 "enabled": True,
-                "tracking_uri": "http://172.16.240.77:5000",
+                "tracking_uri": "http://test-mlflow-server:5000",
                 "experiment_name": "anchor_ode",
                 "run_name": None,
                 "resume_run_id": "abc",
@@ -50,7 +50,7 @@ class MLflowLoggerTests(unittest.TestCase):
             logger.log_metrics({"dice": 0.9, "bad": float("nan")}, step=3, prefix="val")
             logger.mark_failed()
 
-        self.assertIn(("tracking_uri", "http://172.16.240.77:5000"), calls)
+        self.assertIn(("tracking_uri", "http://test-mlflow-server:5000"), calls)
         self.assertIn(("experiment", "anchor_ode"), calls)
         self.assertIn(("start_run", {"run_id": "abc"}), calls)
         self.assertIn(("metrics", {"val/dice": 0.9}, 3), calls)
@@ -112,8 +112,8 @@ class MLflowLoggerTests(unittest.TestCase):
             logger.log_train_step({"total_loss": 1.0, "dice_loss": 0.2, "lr": 1.0e-4}, step=5)
             logger.log_eval_summary({"dice_frame_mean": 0.8, "iou_frame_mean": 0.7}, mode="val", step=6)
             logger.log_best({"dice_frame_mean": 0.8, "iou_frame_mean": 0.7, "hd95": 2.0}, epoch=1, iteration=6)
-            logger.log_anchor_ode_diagnostics(
-                {"base_dice": 0.7, "guided_dice": 0.75, "final_dice": 0.8, "gate_mean": 0.3},
+            logger.log_cardia_diagnostics(
+                {"stage2_head_usage_entropy": 0.5, "stage2_flow_smooth": 0.01, "boundary_edge_gate_mean": 0.3},
                 step=6,
             )
         self.assertIn(("metrics", {"train/loss/total": 1.0, "train/loss/dice": 0.2, "train/lr": 1.0e-4}, 5), calls)
@@ -128,7 +128,7 @@ class MLflowLoggerTests(unittest.TestCase):
         )
         self.assertIn(("metrics", {"best/val_dice": 0.8, "best/val_iou": 0.7, "best/val_hd95": 2.0, "best/epoch": 1.0, "best/iter": 6.0}, 6), calls)
         self.assertTrue(
-            any(call[0] == "metrics" and call[1].get("anchor_ode/final_minus_base_dice") == 0.10000000000000009 for call in calls)
+            any(call[0] == "metrics" and call[1].get("cardia/stage2/head_usage_entropy") == 0.5 for call in calls)
         )
 
     def test_eval_summary_logs_phase_and_overall_metrics(self):
@@ -221,7 +221,7 @@ class MLflowLoggerTests(unittest.TestCase):
         cfg = OmegaConf.create(
             {
                 "enabled": True,
-                "tracking_uri": "http://172.16.240.77:5000",
+                "tracking_uri": "http://test-mlflow-server:5000",
                 "experiment_name": "evals",
                 "run_name": "eval-debug",
                 "resume_run_id": None,

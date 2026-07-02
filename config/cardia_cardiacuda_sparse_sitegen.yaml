@@ -1,0 +1,53 @@
+defaults:
+  - cardiacuda_a4c_lv_predinit
+  - _base_/datasets/cardiacuda_sparse_sitegen
+  - /_base_/models/cardia@_global_
+  - _base_/runtime/default_runtime
+  - _base_/schedules/default_3k
+  - _self_
+
+exp_id: "cardia_cardiacuda_sparse_sitegen"
+
+main_training:
+  num_iterations: 4000
+  batch_size: 8
+  num_workers: 4
+  lr_schedule: warmup_cosine
+  lr_warmup_iters: 300
+  lr_min_ratio: 0.05
+  lr_schedule_steps: [2000, 3200]
+  lr_schedule_gamma: 0.1
+  use_ema: false
+  ema_eval: false
+
+evaluation:
+  threshold_search_during_training: false
+  threshold_search_start: 0.30
+  threshold_search_end: 0.75
+  threshold_search_step: 0.01
+  tta:
+    enabled: false
+    modes: ["identity"]
+  postprocess:
+    enabled: true
+    largest_component: true
+    fill_holes: true
+    remove_small_objects: true
+    min_size: 16
+    binary_closing: true
+
+eval_stage:
+  test_every_eval: false
+  eval_interval: 500
+  num_vis: 0
+
+mlflow:
+  experiment_name: "cardiacuda_sparse_sitegen"
+  tags:
+    method: "CARDIA"
+    dataset: "cardiacuda"
+    view: "A4C"
+    protocol: "sitegen_G100R126_to_G29"
+    temporal_module: "RuntimeMemoryGridODE"
+    routing_scales: "stage3,stage2"
+    state_type: "runtime_state_detached"

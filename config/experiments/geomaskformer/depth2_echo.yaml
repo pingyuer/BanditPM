@@ -1,0 +1,14 @@
+defaults:
+  - /geomaskformer_echo
+  - _self_
+
+exp_id: "geomaskformer_depth2_echo"
+
+model:
+  geomaskformer:
+    depth: 2
+
+mlflow:
+  tags:
+    search_axis: "depth"
+    depth: "2"

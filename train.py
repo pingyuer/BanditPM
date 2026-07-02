@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.utils.data as data
+from torch.utils.data._utils.collate import default_collate
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import RandomSampler, SequentialSampler
 
@@ -59,6 +60,98 @@ def _label_valid_hist(label_valid: torch.Tensor | None) -> dict[str, int]:
     return {str(k): int(v) for k, v in sorted(hist.items())}
 
 
+def _cfg_get(container, key: str, default=None):
+    return container.get(key, default) if hasattr(container, "get") else default
+
+
+def _infer_temporal_access(cfg: DictConfig) -> str:
+    model_cfg = cfg.get("model", {})
+    model_name = str(_cfg_get(model_cfg, "name", cfg.get("model_name", ""))).lower()
+    default = "full_window" if model_name == "debel" else "recurrent"
+    return str(cfg.get("temporal_access", _cfg_get(model_cfg, "temporal_access", default))).lower()
+
+
+def _infer_backbone_pretrain(cfg: DictConfig) -> tuple[bool, str]:
+    model_cfg = cfg.get("model", {})
+    model_name = str(_cfg_get(model_cfg, "name", cfg.get("model_name", ""))).lower()
+    if "backbone_pretrained" in model_cfg:
+        pretrained = bool(_cfg_get(model_cfg, "backbone_pretrained", False))
+    elif model_name == "gdkvm":
+        pretrained = True
+    else:
+        method_cfg = _cfg_get(model_cfg, model_name, {})
+        backbone_cfg = _cfg_get(method_cfg, "backbone", {})
+        pretrained = bool(
+            _cfg_get(
+                method_cfg,
+                "require_pretrained_unext",
+                _cfg_get(backbone_cfg, "pretrained", False),
+            )
+        )
+    if pretrained:
+        source = str(_cfg_get(model_cfg, "pretrain_source", "torchvision_resnet_default" if model_name == "gdkvm" else "configured_checkpoint"))
+    else:
+        source = str(_cfg_get(model_cfg, "pretrain_source", "none"))
+    return pretrained, source
+
+
+def _experiment_protocol_summary(cfg: DictConfig, stage_cfg: DictConfig, world_size: int) -> dict:
+    eval_cfg = cfg.get("evaluation", {})
+    model_cfg = cfg.get("model", {})
+    effective_batch_size = int(stage_cfg.batch_size) * int(world_size)
+    num_iterations = int(stage_cfg.num_iterations)
+    backbone_pretrained, pretrain_source = _infer_backbone_pretrain(cfg)
+    return {
+        "prediction_mode": str(cfg.get("prediction_mode", eval_cfg.get("prediction_mode", "dense10"))).lower(),
+        "target_index": int(cfg.get("target_index", eval_cfg.get("target_index", -1))),
+        "temporal_access": _infer_temporal_access(cfg),
+        "batch_size_per_gpu": int(stage_cfg.batch_size),
+        "effective_batch_size": int(effective_batch_size),
+        "world_size": int(world_size),
+        "num_iterations": num_iterations,
+        "seen_samples": int(effective_batch_size * num_iterations),
+        "lr_schedule": str(stage_cfg.get("lr_schedule", "step")),
+        "lr_warmup_iters": int(stage_cfg.get("lr_warmup_iters", 0)),
+        "lr_min_ratio": float(stage_cfg.get("lr_min_ratio", 0.0)),
+        "use_first_frame_gt_init": bool(
+            model_cfg.get(
+                "allow_oracle_init_when_requested",
+                model_cfg.get("use_first_frame_gt_init", True),
+            )
+        ),
+        "init_mode_train": str(cfg.get("phase_init", {}).get("train", eval_cfg.get("init_mode", "oracle_gt"))),
+        "init_mode_val": str(cfg.get("phase_init", {}).get("val", eval_cfg.get("init_mode", "oracle_gt"))),
+        "init_mode_test": str(cfg.get("phase_init", {}).get("test", eval_cfg.get("init_mode", "oracle_gt"))),
+        "backbone_pretrained": bool(backbone_pretrained),
+        "pretrain_source": pretrain_source,
+    }
+
+
+def _flexible_collate(batch):
+    """Collate tensors while preserving variable-length metadata lists.
+
+    CardiacUDA sparse samples can expose a variable number of valid label frames.
+    PyTorch's default collate is correct for tensors, but too strict for those
+    metadata lists. Keeping metadata as Python lists mirrors common detection
+    dataset collation and leaves the training tensors unchanged.
+    """
+    elem = batch[0]
+    if isinstance(elem, dict):
+        return {key: _flexible_collate([sample[key] for sample in batch]) for key in elem}
+    if isinstance(elem, (list, tuple)):
+        lengths = [len(item) for item in batch]
+        if len(set(lengths)) != 1:
+            return list(batch)
+        try:
+            return type(elem)(_flexible_collate(list(items)) for items in zip(*batch))
+        except TypeError:
+            return [_flexible_collate(list(items)) for items in zip(*batch)]
+    try:
+        return default_collate(batch)
+    except (RuntimeError, TypeError, ValueError):
+        return list(batch)
+
+
 def _probe_dataset_batch(loader, batch_size: int) -> dict:
     dataset = getattr(loader, "dataset", None)
     if dataset is None or len(dataset) == 0:
@@ -68,7 +161,13 @@ def _probe_dataset_batch(loader, batch_size: int) -> dict:
     python_state = random.getstate()
     probe_batch_size = max(1, min(int(batch_size), len(dataset)))
     try:
-        probe_loader = data.DataLoader(dataset, batch_size=probe_batch_size, shuffle=False, num_workers=0)
+        probe_loader = data.DataLoader(
+            dataset,
+            batch_size=probe_batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=_flexible_collate,
+        )
         batch = next(iter(probe_loader))
     finally:
         torch.random.set_rng_state(torch_state)
@@ -100,6 +199,7 @@ def _log_data_flow_summary(
     run_dir: str,
     mlflow_logger: MLflowLogger,
     main_process: bool,
+    world_size: int,
 ) -> None:
     if not main_process:
         return
@@ -124,6 +224,7 @@ def _log_data_flow_summary(
             "exclude_init_frame": bool(cfg.get("evaluation", {}).get("exclude_init_frame", False)),
             "eval_protocol": str(cfg.get("evaluation", {}).get("eval_protocol", "")),
         },
+        "protocol": _experiment_protocol_summary(cfg, stage_cfg, world_size),
     }
     info_if_rank_zero("[DataFlow] " + json.dumps(summary, sort_keys=True, default=str))
     params = {
@@ -140,6 +241,7 @@ def _log_data_flow_summary(
         "eval/exclude_init_frame": summary["evaluation"]["exclude_init_frame"],
         "eval/protocol": summary["evaluation"]["eval_protocol"],
     }
+    params.update({f"protocol/{key}": value for key, value in summary["protocol"].items()})
     mlflow_logger.log_params(params)
     path = Path(run_dir) / "data_flow_summary.json"
     path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
@@ -241,6 +343,7 @@ def train(cfg: DictConfig):
                     shuffle=False,
                     drop_last=drop_last,
                     worker_init_fn=seed_dataloader_worker,
+                    collate_fn=_flexible_collate,
                 )
             except Exception as e:
                 if main_process:
@@ -255,6 +358,7 @@ def train(cfg: DictConfig):
                     pin_memory=False,
                     shuffle=False,
                     drop_last=drop_last,
+                    collate_fn=_flexible_collate,
                 )
 
         def build_loader(mode, *, shuffle, drop_last):
@@ -301,6 +405,7 @@ def train(cfg: DictConfig):
             run_dir=run_dir,
             mlflow_logger=mlflow_logger,
             main_process=main_process,
+            world_size=world_size,
         )
 
         # -------- Trainer --------
