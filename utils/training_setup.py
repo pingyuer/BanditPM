@@ -17,7 +17,7 @@ def seed_everything(base_seed: int, rank: int) -> None:
 def scale_stage_for_world_size(stage_cfg: DictConfig, world_size: int) -> None:
     scale = max(int(world_size), 1)
     stage_cfg.batch_size = max(int(stage_cfg.batch_size) // scale, 1)
-    stage_cfg.num_workers = max(int(stage_cfg.num_workers) // scale, 1)
+    stage_cfg.num_workers = max(int(stage_cfg.num_workers) // scale, 0)
 
 
 def seed_dataloader_worker(_worker_id: int) -> None:
