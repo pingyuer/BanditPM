@@ -924,8 +924,7 @@ class MLflowLogger:
             "overall/Dice": metrics.get("overall_dice", metrics.get("dice", metrics.get("dice_frame_mean"))),
             "overall/HD95": metrics.get("overall_hd95", metrics.get("hd95", metrics.get("hd95_original", metrics.get("hd95_resized")))),
             "area_smoothness": metrics.get("area_smoothness"),
-            "area_acceleration": metrics.get("area_acceleration"),
-            "temporal_jitter": metrics.get("temporal_jitter", metrics.get("temporal_drift")),
+            "temporal_drift": metrics.get("temporal_drift"),
         }
 
     @staticmethod

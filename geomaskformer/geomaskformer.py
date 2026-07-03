@@ -81,7 +81,7 @@ def _soft_boundary(mask: torch.Tensor, kernel_size: int = 5) -> torch.Tensor:
     return (dil - ero).clamp(0.0, 1.0)
 
 
-def _pseudo_signed_distance(mask: torch.Tensor) -> torch.Tensor:
+def _local_geometry_prior(mask: torch.Tensor) -> torch.Tensor:
     inside = mask
     outside = 1.0 - mask
     smooth_inside = F.avg_pool2d(inside, 9, stride=1, padding=4)
@@ -91,7 +91,11 @@ def _pseudo_signed_distance(mask: torch.Tensor) -> torch.Tensor:
 
 
 class MaskTokenizer(nn.Module):
-    """Geometry-aware mask tokenizer with a learnable [MASK] token."""
+    """Geometry-aware mask tokenizer with a learnable [MASK] token.
+
+    The middle geometry channel is a bounded local inside/outside prior, not a
+    true Euclidean signed distance transform.
+    """
 
     def __init__(self, dim: int = 128, max_frames: int = 16, max_grid: int = 64, use_geometry: bool = True) -> None:
         super().__init__()
@@ -123,7 +127,7 @@ class MaskTokenizer(nn.Module):
         masks = masks.float().clamp(0.0, 1.0)
         if not self.use_geometry:
             return masks
-        signed = _pseudo_signed_distance(masks)
+        signed = _local_geometry_prior(masks)
         boundary = _soft_boundary(masks)
         return torch.cat([masks, signed, boundary], dim=1)
 
@@ -180,6 +184,7 @@ class MaskTokenizer(nn.Module):
         tokens = tokens + cond.reshape(b, t, 1, self.dim)
         aux = {
             "geometry": geom.detach(),
+            "geometry_channel_names": ("binary", "local_geometry_prior", "boundary_band"),
             "condition_prev": prev,
             "condition_next": nxt,
             "visible_frame_count": (visibility > 0).float().sum(dim=1),
@@ -239,12 +244,18 @@ class DualStreamBlock(nn.Module):
 
         xf = self.norms[4](x).reshape(b, t * n, d)
         mf = self.norms[5](m).reshape(b, t * n, d)
-        m = m + self.m_from_x(mf, xf, xf, need_weights=False)[0].reshape(b, t, n, d)
+        m_from_x = self.m_from_x(mf, xf, xf, need_weights=False)[0]
+        m = m + m_from_x.reshape(b, t, n, d)
         gate = self.x_from_m_gate
-        x = x + gate * self.x_from_m(xf, mf, mf, need_weights=False)[0].reshape(b, t, n, d)
+        x_from_m = self.x_from_m(xf, mf, mf, need_weights=False)[0]
+        x = x + gate * x_from_m.reshape(b, t, n, d)
         x = x + self.x_mlp(self.norms[6](x))
         m = m + self.m_mlp(self.norms[7](m))
-        return x, m, {"image_from_mask_gate": gate.detach()}
+        return x, m, {
+            "image_from_mask_gate": gate.detach(),
+            "image_to_mask_cross_attention_norm": m_from_x.detach().norm(dim=-1).mean(),
+            "mask_to_image_cross_attention_norm": (gate.detach() * x_from_m.detach()).norm(dim=-1).mean(),
+        }
 
 
 class DualStreamFactorizedTransformer(nn.Module):
@@ -293,6 +304,8 @@ class ProposalDecoder(nn.Module):
         self.query_embed = nn.Parameter(torch.empty(num_queries, dim))
         self.frame_cond = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
         self.temporal_embed = nn.Embedding(max_frames, dim)
+        self.cond_prev_embed = nn.Embedding(max_frames + 1, dim)
+        self.cond_next_embed = nn.Embedding(max_frames + 1, dim)
         self.layers = nn.ModuleList(
             [
                 nn.ModuleDict(
@@ -313,13 +326,25 @@ class ProposalDecoder(nn.Module):
         nn.init.trunc_normal_(self.query_embed, std=0.02)
         nn.init.constant_(self.quality[-1].bias, -2.0)
 
-    def forward(self, x: torch.Tensor, m: torch.Tensor, pixel_embedding: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        m: torch.Tensor,
+        pixel_embedding: torch.Tensor,
+        condition_prev: torch.Tensor | None = None,
+        condition_next: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
         b, t, n, d = x.shape
         context = torch.cat([x, m], dim=2).reshape(b, t * n * 2, d)
         pooled = x.mean(dim=2)
         q = self.query_embed.reshape(1, 1, self.num_queries, d) + self.frame_cond(pooled).unsqueeze(2)
         time = torch.arange(t, device=x.device).clamp_max(self.temporal_embed.num_embeddings - 1)
         q = q + self.temporal_embed(time).reshape(1, t, 1, d)
+        if condition_prev is not None and condition_next is not None:
+            max_idx = self.cond_prev_embed.num_embeddings - 1
+            cp = condition_prev.long().clamp(0, max_idx)
+            cn = condition_next.long().clamp(0, max_idx)
+            q = q + self.cond_prev_embed(cp).unsqueeze(2) + self.cond_next_embed(cn).unsqueeze(2)
         q = q.reshape(b * t, self.num_queries, d)
         ctx = context.repeat_interleave(t, dim=0)
         for layer in self.layers:
@@ -356,6 +381,9 @@ class GeoMaskFormer(nn.Module):
         self.image_token_dropout = float(_cfg_get(method_cfg, "image_token_dropout", 0.05))
         self.mask_token_dropout = float(_cfg_get(method_cfg, "mask_token_dropout", 0.10))
         self.condition_dropout = float(_cfg_get(method_cfg, "condition_dropout", 0.10))
+        self.visible_reconstruction_weight = float(
+            _cfg_get(_cfg_section(method_cfg, "loss"), "visible_reconstruction", 0.0)
+        )
         self.image_tokenizer = ImageTokenizer(self.in_channels, self.dim, self.base_channels)
         self.mask_tokenizer = MaskTokenizer(
             self.dim,
@@ -430,12 +458,19 @@ class GeoMaskFormer(nn.Module):
         if self.training and self.condition_dropout > 0:
             keep = torch.rand_like(mask_visibility.float()) > self.condition_dropout
             mask_visibility = mask_visibility * keep.long()
-        if "geomaskformer_loss_visibility" in data:
+        explicit_loss_visibility = "geomaskformer_loss_visibility" in data
+        if explicit_loss_visibility:
             loss_visibility = data["geomaskformer_loss_visibility"].to(device=device).bool()
         elif torch.is_tensor(data.get("label_valid")):
             loss_visibility = data["label_valid"].to(device=device).bool()
         else:
             loss_visibility = torch.ones(b, t, dtype=torch.bool, device=device)
+        if self.training and not explicit_loss_visibility and self.stage in {"stage2", "stage3"}:
+            main_loss_visibility = loss_visibility & (mask_visibility == 0)
+            empty = ~main_loss_visibility.any(dim=1)
+            if empty.any():
+                main_loss_visibility[empty] = loss_visibility[empty]
+            loss_visibility = main_loss_visibility
         return mask_visibility, loss_visibility
 
     def _apply_token_dropout(self, x: torch.Tensor, m: torch.Tensor, mask_visibility: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
@@ -477,7 +512,13 @@ class GeoMaskFormer(nn.Module):
         x, m, drop_aux = self._apply_token_dropout(x, m, mask_visibility)
         x, m, former_aux = self.transformer(x, m)
         pixel = self.pixel_decoder(x, img)
-        proposal = self.proposal_decoder(x, m, pixel)
+        proposal = self.proposal_decoder(
+            x,
+            m,
+            pixel,
+            condition_prev=mask_aux.get("condition_prev"),
+            condition_next=mask_aux.get("condition_next"),
+        )
         prop_logits = proposal["proposal_logits"]
         scores = proposal["quality_scores"]
         if self.topk_inference == "top3":
@@ -518,6 +559,12 @@ class GeoMaskFormer(nn.Module):
                 "best_query": best_idx.detach(),
                 "quality_prob_mean": torch.sigmoid(scores).mean().detach(),
                 "active_query_count": best_idx.flatten().unique().numel(),
+                "masked_token_norm": m[mask_visibility == 0].detach().norm(dim=-1).mean()
+                if (mask_visibility == 0).any()
+                else torch.zeros((), device=images.device),
+                "visible_token_norm": m[mask_visibility > 0].detach().norm(dim=-1).mean()
+                if (mask_visibility > 0).any()
+                else torch.zeros((), device=images.device),
             },
             "num_objects": [1] * images.shape[0],
         }

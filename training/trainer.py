@@ -127,6 +127,7 @@ class Trainer:
         self.main_process = self.rank == 0
         self._logged_eval_protocol_summaries = set()
         self._logged_train_protocol_summary = False
+        self._logged_geomaskformer_loss_config = False
 
         model = build_model_from_cfg(cfg, self.device)
         model = model.to(memory_format=torch.channels_last)
@@ -145,42 +146,38 @@ class Trainer:
         if self.main_process:
             try:
                 capacity = infer_unext_capacity(self.model, self.cfg)
-                self.log.info(
-                    "[ModelCapacity] "
-                    f"total={capacity['parameters_m_total']:.3f}M | "
-                    f"backbone={capacity['parameters_m_backbone']:.3f}M | "
-                    f"method={capacity['parameters_m_method']:.3f}M | "
-                    f"faf={capacity['parameters_m_faf']:.3f}M | "
-                    f"selector={capacity['parameters_m_faf_selector']:.3f}M | "
-                    f"affine={capacity['parameters_m_faf_affine_mixture']:.3f}M | "
-                    f"fusion={capacity['parameters_m_faf_fusion']:.3f}M | "
-                    f"backbone_name={capacity.get('backbone_name', '')} | "
-                    f"base_dim={capacity['unext_base_dim']} | "
-                    f"channels={capacity['unext_channels']} | "
-                    f"value_dim={capacity['value_dim']}"
-                )
-                self._log_metrics(
-                    {
-                        "model/parameters_m_total": capacity["parameters_m_total"],
-                        "model/parameters_m_backbone": capacity["parameters_m_backbone"],
-                        "model/parameters_m_faf": capacity["parameters_m_faf"],
-                        "model/parameters_m_faf_selector": capacity["parameters_m_faf_selector"],
-                        "model/parameters_m_faf_affine_mixture": capacity["parameters_m_faf_affine_mixture"],
-                        "model/parameters_m_faf_fusion": capacity["parameters_m_faf_fusion"],
-                        "model/parameters_m_method": capacity["parameters_m_method"],
-                        "model/parameters_m_encoder": capacity.get("parameters_m_encoder", capacity["parameters_m_backbone"]),
-                        "model/parameters_m_rebel": capacity.get("parameters_m_rebel", capacity["parameters_m_method"]),
-                        "model/parameters_m_memory": capacity.get("parameters_m_memory", 0.0),
-                        "model/parameters_m_ode": capacity.get("parameters_m_ode", 0.0),
-                        "model/parameters_m_decoder": capacity.get("parameters_m_decoder", 0.0),
-                        "model/unext_base_dim": capacity["unext_base_dim"] or 0,
-                        "model/value_dim": capacity["value_dim"] or 0,
-                    },
-                    step=0,
-                )
-                logger = getattr(self, "mlflow_logger", None)
-                if logger is not None:
-                    logger.log_params(
+                if self._is_geomaskformer_model():
+                    geo_capacity = self._geomaskformer_capacity_metrics()
+                    self.log.info(
+                        "[ModelCapacity][GeoMaskFormer] "
+                        f"total={geo_capacity['model/params_m_total']:.3f}M | "
+                        f"image_tokenizer={geo_capacity['model/params_m_image_tokenizer']:.3f}M | "
+                        f"mask_tokenizer={geo_capacity['model/params_m_mask_tokenizer']:.3f}M | "
+                        f"transformer={geo_capacity['model/params_m_dual_stream_transformer']:.3f}M | "
+                        f"pixel_decoder={geo_capacity['model/params_m_pixel_decoder']:.3f}M | "
+                        f"proposal_decoder={geo_capacity['model/params_m_proposal_decoder']:.3f}M | "
+                        f"quality_head={geo_capacity['model/params_m_quality_head']:.3f}M"
+                    )
+                    self._log_metrics(geo_capacity, step=0)
+                    logger = getattr(self, "mlflow_logger", None)
+                    if logger is not None:
+                        logger.log_params(self._geomaskformer_capacity_params(geo_capacity))
+                else:
+                    self.log.info(
+                        "[ModelCapacity] "
+                        f"total={capacity['parameters_m_total']:.3f}M | "
+                        f"backbone={capacity['parameters_m_backbone']:.3f}M | "
+                        f"method={capacity['parameters_m_method']:.3f}M | "
+                        f"faf={capacity['parameters_m_faf']:.3f}M | "
+                        f"selector={capacity['parameters_m_faf_selector']:.3f}M | "
+                        f"affine={capacity['parameters_m_faf_affine_mixture']:.3f}M | "
+                        f"fusion={capacity['parameters_m_faf_fusion']:.3f}M | "
+                        f"backbone_name={capacity.get('backbone_name', '')} | "
+                        f"base_dim={capacity['unext_base_dim']} | "
+                        f"channels={capacity['unext_channels']} | "
+                        f"value_dim={capacity['value_dim']}"
+                    )
+                    self._log_metrics(
                         {
                             "model/parameters_m_total": capacity["parameters_m_total"],
                             "model/parameters_m_backbone": capacity["parameters_m_backbone"],
@@ -194,12 +191,33 @@ class Trainer:
                             "model/parameters_m_memory": capacity.get("parameters_m_memory", 0.0),
                             "model/parameters_m_ode": capacity.get("parameters_m_ode", 0.0),
                             "model/parameters_m_decoder": capacity.get("parameters_m_decoder", 0.0),
-                            "model/backbone_name": capacity.get("backbone_name", ""),
-                            "model/unext_base_dim": capacity["unext_base_dim"],
-                            "model/unext_channels": capacity["unext_channels"],
-                            "model/value_dim": capacity["value_dim"],
-                        }
+                            "model/unext_base_dim": capacity["unext_base_dim"] or 0,
+                            "model/value_dim": capacity["value_dim"] or 0,
+                        },
+                        step=0,
                     )
+                    logger = getattr(self, "mlflow_logger", None)
+                    if logger is not None:
+                        logger.log_params(
+                            {
+                                "model/parameters_m_total": capacity["parameters_m_total"],
+                                "model/parameters_m_backbone": capacity["parameters_m_backbone"],
+                                "model/parameters_m_faf": capacity["parameters_m_faf"],
+                                "model/parameters_m_faf_selector": capacity["parameters_m_faf_selector"],
+                                "model/parameters_m_faf_affine_mixture": capacity["parameters_m_faf_affine_mixture"],
+                                "model/parameters_m_faf_fusion": capacity["parameters_m_faf_fusion"],
+                                "model/parameters_m_method": capacity["parameters_m_method"],
+                                "model/parameters_m_encoder": capacity.get("parameters_m_encoder", capacity["parameters_m_backbone"]),
+                                "model/parameters_m_rebel": capacity.get("parameters_m_rebel", capacity["parameters_m_method"]),
+                                "model/parameters_m_memory": capacity.get("parameters_m_memory", 0.0),
+                                "model/parameters_m_ode": capacity.get("parameters_m_ode", 0.0),
+                                "model/parameters_m_decoder": capacity.get("parameters_m_decoder", 0.0),
+                                "model/backbone_name": capacity.get("backbone_name", ""),
+                                "model/unext_base_dim": capacity["unext_base_dim"],
+                                "model/unext_channels": capacity["unext_channels"],
+                                "model/value_dim": capacity["value_dim"],
+                            }
+                        )
             except Exception:
                 self.log.info("Model Parameters: Count failed")
 
@@ -331,6 +349,62 @@ class Trainer:
         if getattr(self, "main_process", False) and logger is not None:
             logger.log_metrics(metrics, step=step, prefix=prefix)
 
+    def _is_geomaskformer_model(self) -> bool:
+        return str(self.cfg.get("model", {}).get("name", "")).lower() in {"geomaskformer", "geo_maskformer"}
+
+    @staticmethod
+    def _count_module_parameters(module: nn.Module | None) -> int:
+        if module is None:
+            return 0
+        return sum(param.numel() for param in module.parameters())
+
+    def _geomaskformer_capacity_metrics(self) -> dict[str, float]:
+        model = self.model_without_ddp
+        image = self._count_module_parameters(getattr(model, "image_tokenizer", None))
+        mask = self._count_module_parameters(getattr(model, "mask_tokenizer", None))
+        transformer = self._count_module_parameters(getattr(model, "transformer", None))
+        pixel = self._count_module_parameters(getattr(model, "pixel_decoder", None))
+        proposal_module = getattr(model, "proposal_decoder", None)
+        quality = self._count_module_parameters(getattr(proposal_module, "quality", None))
+        proposal_total = self._count_module_parameters(proposal_module)
+        proposal_without_quality = max(proposal_total - quality, 0)
+        total = self._count_module_parameters(model)
+        classified = image + mask + transformer + pixel + proposal_total
+        unclassified = max(total - classified, 0)
+        return {
+            "model/params_m_total": total / 1.0e6,
+            "model/params_m_image_tokenizer": image / 1.0e6,
+            "model/params_m_mask_tokenizer": mask / 1.0e6,
+            "model/params_m_dual_stream_transformer": transformer / 1.0e6,
+            "model/params_m_pixel_decoder": pixel / 1.0e6,
+            "model/params_m_proposal_decoder": proposal_without_quality / 1.0e6,
+            "model/params_m_quality_head": quality / 1.0e6,
+            "model/params_m_unclassified": unclassified / 1.0e6,
+            "debug/unclassified_parameter_count": float(unclassified),
+        }
+
+    def _geomaskformer_capacity_params(self, metrics: dict[str, float]) -> dict[str, object]:
+        model = self.model_without_ddp
+        geomask_cfg = self.cfg.get("model", {}).get("geomaskformer", {})
+        return {
+            **metrics,
+            "model/num_queries": int(getattr(model, "num_queries", geomask_cfg.get("num_queries", 0))),
+            "model/hidden_dim": int(getattr(model, "dim", geomask_cfg.get("dim", 0))),
+            "model/transformer_depth": int(geomask_cfg.get("depth", 0)),
+            "model/num_attention_heads": int(geomask_cfg.get("heads", 0)),
+            "model/token_stride": int(getattr(model, "token_stride", geomask_cfg.get("token_stride", geomask_cfg.get("stride", 8)))),
+        }
+
+    def _lr_scheduler_stage(self, it: int) -> float:
+        warmup = int(self.stage_cfg.get("lr_warmup_iters", 0))
+        if warmup > 0 and int(it) < warmup:
+            return 0.0
+        steps = self.stage_cfg.get("lr_schedule_steps", [])
+        try:
+            return 1.0 + float(sum(int(it) >= int(step) for step in steps))
+        except Exception:
+            return 1.0
+
     def _resolve_commit_hash(self) -> str:
         try:
             return subprocess.check_output(
@@ -373,8 +447,16 @@ class Trainer:
     def _temporal_access(self) -> str:
         model_cfg = self.cfg.get("model", {})
         model_name = str(model_cfg.get("name", self.cfg.get("model_name", ""))).lower()
+        method_cfg = model_cfg.get(model_name, {}) if hasattr(model_cfg, "get") else {}
+        if model_name in {"geomaskformer", "geo_maskformer"} and hasattr(model_cfg, "get"):
+            method_cfg = model_cfg.get("geomaskformer", method_cfg)
         default = "full_window" if model_name == "debel" else "recurrent"
-        return str(self.cfg.get("temporal_access", model_cfg.get("temporal_access", default))).lower()
+        return str(
+            self.cfg.get(
+                "temporal_access",
+                method_cfg.get("temporal_access", model_cfg.get("temporal_access", default)) if hasattr(method_cfg, "get") else model_cfg.get("temporal_access", default),
+            )
+        ).lower()
 
     def _backbone_pretrain_summary(self) -> tuple[bool, str]:
         model_cfg = self.cfg.get("model", {})
@@ -439,6 +521,28 @@ class Trainer:
                 "supervised_indices": self._format_frame_mask(supervised_indices),
             }
         )
+        if torch.is_tensor(data.get("mask_visibility")):
+            visible = data["mask_visibility"].to(device=supervised_indices.device) > 0
+            supervised = supervised_indices.bool()
+            visible_count = visible.float().sum(dim=1).mean()
+            supervised_count = supervised.float().sum(dim=1).mean()
+            masked = ~visible
+            overlap = visible & supervised
+            masked_supervised = masked & supervised
+            summary.update(
+                {
+                    "name": str(self.cfg.get("model", {}).get("geomaskformer", {}).get("training_stage", self.stage)),
+                    "visible_frame_count": float(visible_count.item()),
+                    "masked_frame_count": float(masked.float().sum(dim=1).mean().item()),
+                    "supervised_frame_count": float(supervised_count.item()),
+                    "visible_and_supervised_ratio": float(
+                        overlap.float().sum().item() / max(supervised.float().sum().item(), 1.0)
+                    ),
+                    "masked_and_supervised_ratio": float(
+                        masked_supervised.float().sum().item() / max(supervised.float().sum().item(), 1.0)
+                    ),
+                }
+            )
         self.log.info(
             "[TrainProtocol] "
             f"prediction_mode={summary['prediction_mode']} | "
@@ -453,7 +557,13 @@ class Trainer:
             f"use_first_frame_gt_init={summary['use_first_frame_gt_init']} | "
             f"init_mode={summary['init_mode']} | "
             f"backbone_pretrained={summary['backbone_pretrained']} | "
-            f"pretrain_source={summary['pretrain_source']}"
+            f"pretrain_source={summary['pretrain_source']} | "
+            f"protocol/name={summary.get('name', self.stage)} | "
+            f"protocol/visible_frame_count={summary.get('visible_frame_count', 0.0):.2f} | "
+            f"protocol/masked_frame_count={summary.get('masked_frame_count', 0.0):.2f} | "
+            f"protocol/supervised_frame_count={summary.get('supervised_frame_count', 0.0):.2f} | "
+            f"protocol/visible_and_supervised_ratio={summary.get('visible_and_supervised_ratio', 0.0):.4f} | "
+            f"protocol/masked_and_supervised_ratio={summary.get('masked_and_supervised_ratio', 0.0):.4f}"
         )
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:
@@ -880,6 +990,58 @@ class Trainer:
 
     def _log_train_metrics(self, losses, total_loss, it):
         try:
+            if self._is_geomaskformer_model():
+                logger = getattr(self, "mlflow_logger", None)
+                if logger is not None and not self._logged_geomaskformer_loss_config:
+                    self._logged_geomaskformer_loss_config = True
+                    logger.log_params(
+                        {
+                            "config/lambda_mask": float(getattr(self.loss_computer, "lambda_geomaskformer_mask", 0.0)),
+                            "config/lambda_boundary": float(getattr(self.loss_computer, "lambda_geomaskformer_boundary", 0.0)),
+                            "config/lambda_quality": float(getattr(self.loss_computer, "lambda_geomaskformer_score", 0.0)),
+                            "config/lambda_temporal": float(getattr(self.loss_computer, "lambda_geomaskformer_temporal", 0.0)),
+                            "config/lambda_visible_reconstruction": float(
+                                getattr(self.loss_computer, "lambda_geomaskformer_visible_reconstruction", 0.0)
+                            ),
+                        }
+                    )
+                log_dict = {
+                    "loss_total": float(total_loss.detach().item() if torch.is_tensor(total_loss) else total_loss),
+                    "lr_current": self.scheduler.get_last_lr()[0],
+                    "lr_initial": float(self.stage_cfg.get("learning_rate", self.optimizer.param_groups[0].get("initial_lr", 0.0))),
+                    "lr_scheduler_stage": self._lr_scheduler_stage(it),
+                }
+                geo_terms = (
+                    ("lambda_geomaskformer_mask", "raw_geomaskformer_bestofk_mask", "loss_mask"),
+                    ("lambda_geomaskformer_score", "raw_geomaskformer_score", "loss_quality"),
+                    ("lambda_geomaskformer_boundary", "raw_geomaskformer_boundary", "loss_boundary"),
+                    ("lambda_geomaskformer_temporal", "raw_geomaskformer_temporal", "loss_temporal"),
+                    (
+                        "lambda_geomaskformer_visible_reconstruction",
+                        "raw_geomaskformer_visible_reconstruction",
+                        "loss_visible_reconstruction",
+                    ),
+                )
+                for weight_name, loss_key, log_key in geo_terms:
+                    if float(getattr(self.loss_computer, weight_name, 0.0)) <= 0:
+                        continue
+                    value = losses.get(loss_key)
+                    if torch.is_tensor(value):
+                        log_dict[log_key] = float(value.detach().item())
+                for raw_key, log_key in (
+                    ("geomaskformer/proposal_selected_dice", "proposal/selected_dice"),
+                    ("geomaskformer/proposal_oracle_best_dice", "proposal/oracle_best_dice"),
+                    ("geomaskformer/proposal_selection_gap", "proposal/selection_gap"),
+                    ("geomaskformer/proposal_score_dice_rank_corr", "proposal/score_dice_rank_corr"),
+                    ("geomaskformer/proposal_active_query_count", "proposal/active_query_count"),
+                    ("geomaskformer/proposal_query_usage_entropy", "proposal/query_usage_entropy"),
+                ):
+                    value = losses.get(raw_key)
+                    if torch.is_tensor(value):
+                        log_dict[log_key] = float(value.detach().item())
+                if logger is not None:
+                    logger.log_metrics(log_dict, step=it, prefix="train")
+                return
             log_dict = {
                 "total_loss": total_loss,
                 "lr": self.scheduler.get_last_lr()[0],
@@ -1858,6 +2020,44 @@ class Trainer:
             "area_smoothness_count": 0.0,
             "centroid_jitter_sum": 0.0,
             "centroid_jitter_count": 0.0,
+            "geomaskformer_visible_frame_count_sum": 0.0,
+            "geomaskformer_masked_frame_count_sum": 0.0,
+            "geomaskformer_supervised_frame_count_sum": 0.0,
+            "geomaskformer_supervised_frame_total": 0.0,
+            "geomaskformer_visible_and_supervised_sum": 0.0,
+            "geomaskformer_masked_and_supervised_sum": 0.0,
+            "geomaskformer_samples_with_visible_condition_sum": 0.0,
+            "geomaskformer_protocol_sample_count": 0.0,
+            "geomaskformer_condition_nomask_dice_sum": 0.0,
+            "geomaskformer_condition_nomask_dice_count": 0.0,
+            "geomaskformer_condition_conditioned_dice_sum": 0.0,
+            "geomaskformer_condition_conditioned_dice_count": 0.0,
+            "geomaskformer_condition_all_mask_invisible_dice_sum": 0.0,
+            "geomaskformer_condition_all_mask_invisible_dice_count": 0.0,
+            "geomaskformer_condition_first_frame_visible_dice_sum": 0.0,
+            "geomaskformer_condition_first_frame_visible_dice_count": 0.0,
+            "geomaskformer_condition_random_keyframe_visible_dice_sum": 0.0,
+            "geomaskformer_condition_random_keyframe_visible_dice_count": 0.0,
+            "geomaskformer_condition_ed_es_visible_dice_sum": 0.0,
+            "geomaskformer_condition_ed_es_visible_dice_count": 0.0,
+            "geomaskformer_condition_distance_0_2_gain_sum": 0.0,
+            "geomaskformer_condition_distance_0_2_gain_count": 0.0,
+            "geomaskformer_condition_distance_3_5_gain_sum": 0.0,
+            "geomaskformer_condition_distance_3_5_gain_count": 0.0,
+            "geomaskformer_condition_distance_6plus_gain_sum": 0.0,
+            "geomaskformer_condition_distance_6plus_gain_count": 0.0,
+            "geomaskformer_condition_gain_vs_nomask_sum": 0.0,
+            "geomaskformer_condition_gain_vs_nomask_count": 0.0,
+            "geomaskformer_proposal_selected_dice_sum": 0.0,
+            "geomaskformer_proposal_oracle_best_dice_sum": 0.0,
+            "geomaskformer_proposal_oracle_topk_mean_dice_sum": 0.0,
+            "geomaskformer_proposal_selection_gap_sum": 0.0,
+            "geomaskformer_proposal_score_dice_rank_corr_sum": 0.0,
+            "geomaskformer_proposal_count": 0.0,
+            "geomaskformer_proposal_score_nan_count": 0.0,
+            "geomaskformer_empty_prediction_count": 0.0,
+            "geomaskformer_invalid_surface_case_count": 0.0,
+            "geomaskformer_visibility_overlap_violation_count": 0.0,
             "gate_mean_sum": 0.0,
             "residual_abs_mean_sum": 0.0,
             "memory_update_rate_sum": 0.0,
@@ -1959,6 +2159,140 @@ class Trainer:
             "functional_anchor_aux_count": 0.0,
             "aux_count": 0.0,
         }
+
+    @staticmethod
+    def _geomaskformer_condition_name(visible: torch.Tensor, ed_frame=None, es_frame=None) -> str:
+        visible_ids = torch.nonzero(visible.bool(), as_tuple=False).flatten().tolist()
+        if not visible_ids:
+            return "all_mask_invisible"
+        phase_ids = {int(x) for x in (ed_frame, es_frame) if x is not None}
+        if phase_ids and set(int(x) for x in visible_ids).issubset(phase_ids):
+            return "ed_es_visible"
+        if 0 in {int(x) for x in visible_ids}:
+            return "first_frame_visible"
+        return "random_keyframe_visible"
+
+    @staticmethod
+    def _geomaskformer_distance_bucket(distance: int | None) -> str | None:
+        if distance is None:
+            return None
+        if distance <= 2:
+            return "distance_0_2"
+        if distance <= 5:
+            return "distance_3_5"
+        return "distance_6plus"
+
+    def _geomaskformer_condition_visibility(self, batch_data: dict, eval_indices: torch.Tensor) -> torch.Tensor:
+        visible = torch.zeros_like(eval_indices, dtype=torch.long, device=eval_indices.device)
+        protocol = str(
+            self.cfg.get("evaluation", {}).get(
+                "geomaskformer_condition_protocol",
+                self.cfg.get("model", {}).get("geomaskformer", {}).get("eval_condition_protocol", "first_frame_visible"),
+            )
+        ).lower()
+        label_valid = batch_data.get("label_valid")
+        valid = label_valid.to(device=eval_indices.device).bool() if torch.is_tensor(label_valid) else eval_indices.bool()
+        for bi in range(visible.shape[0]):
+            valid_ids = torch.nonzero(valid[bi], as_tuple=False).flatten()
+            if valid_ids.numel() == 0:
+                continue
+            if protocol in {"random_keyframe_visible", "random_keyframe"}:
+                candidates = valid_ids[~eval_indices[bi, valid_ids].bool()]
+                chosen = candidates[0] if candidates.numel() > 0 else valid_ids[0]
+                visible[bi, int(chosen.item())] = 1
+            elif protocol in {"ed_es_visible", "ed_es"}:
+                sample_eval_ids = torch.nonzero(eval_indices[bi], as_tuple=False).flatten().tolist()
+                ed_frame, es_frame = self._resolve_phase_eval_frames(batch_data, bi, sample_eval_ids)
+                for frame in (ed_frame, es_frame):
+                    if frame is not None and 0 <= int(frame) < visible.shape[1] and bool(valid[bi, int(frame)]):
+                        visible[bi, int(frame)] = 1
+                if not bool(visible[bi].any()):
+                    visible[bi, int(valid_ids[0].item())] = 1
+            else:
+                first = 0 if valid.shape[1] > 0 and bool(valid[bi, 0]) else int(valid_ids[0].item())
+                visible[bi, first] = 1
+        return visible
+
+    def _accumulate_geomaskformer_protocol_metrics(
+        self,
+        metric_totals: dict,
+        out: dict,
+        eval_indices: torch.Tensor,
+        condition_visibility: torch.Tensor | None = None,
+    ) -> None:
+        if not self._is_geomaskformer_model():
+            return
+        source_visibility = condition_visibility if torch.is_tensor(condition_visibility) else out.get("mask_visibility")
+        if not torch.is_tensor(source_visibility):
+            return
+        visible = source_visibility.to(device=eval_indices.device) > 0
+        supervised = eval_indices.bool()
+        masked = ~visible
+        metric_totals["geomaskformer_visible_frame_count_sum"] += float(visible.float().sum().item())
+        metric_totals["geomaskformer_masked_frame_count_sum"] += float(masked.float().sum().item())
+        metric_totals["geomaskformer_supervised_frame_count_sum"] += float(supervised.float().sum().item())
+        metric_totals["geomaskformer_supervised_frame_total"] += float(supervised.float().sum().item())
+        metric_totals["geomaskformer_visible_and_supervised_sum"] += float((visible & supervised).float().sum().item())
+        metric_totals["geomaskformer_masked_and_supervised_sum"] += float((masked & supervised).float().sum().item())
+        metric_totals["geomaskformer_samples_with_visible_condition_sum"] += float(visible.any(dim=1).float().sum().item())
+        metric_totals["geomaskformer_protocol_sample_count"] += float(visible.shape[0])
+
+    def _accumulate_geomaskformer_frame_metrics(
+        self,
+        metric_totals: dict,
+        out: dict,
+        bi: int,
+        ti: int,
+        gt_frame: torch.Tensor,
+        dice_t: float,
+        active_threshold: float,
+        condition_name: str,
+    ) -> None:
+        if not self._is_geomaskformer_model():
+            return
+        proposals = out.get("proposal_logits")
+        quality = out.get("quality_scores")
+        if not (torch.is_tensor(proposals) and torch.is_tensor(quality)):
+            return
+        if proposals.shape[0] <= bi or proposals.shape[1] <= ti or quality.shape[0] <= bi or quality.shape[1] <= ti:
+            return
+        prop_logits = proposals[bi, ti]
+        scores = quality[bi, ti].float()
+        if torch.isnan(scores).any():
+            metric_totals["geomaskformer_proposal_score_nan_count"] += float(torch.isnan(scores).sum().item())
+            scores = torch.nan_to_num(scores, nan=-1.0e4)
+        target = gt_frame.to(device=prop_logits.device, dtype=prop_logits.dtype)
+        if target.shape[-2:] != prop_logits.shape[-2:]:
+            target = F.interpolate(target, size=prop_logits.shape[-2:], mode="nearest")
+        dices = []
+        for qi in range(prop_logits.shape[0]):
+            prop_prob = torch.sigmoid(prop_logits[qi : qi + 1].unsqueeze(1))
+            prop_bin = self._postprocess_binary_mask((prop_prob > active_threshold).float())
+            prop_dice, _ = self._binary_overlap_metrics(prop_bin, target)
+            dices.append(float(prop_dice))
+        if not dices:
+            return
+        dice_tensor = torch.tensor(dices, device=scores.device, dtype=torch.float32)
+        selected_idx = int(torch.sigmoid(scores).argmax().item())
+        oracle_idx = int(dice_tensor.argmax().item())
+        selected = float(dice_tensor[selected_idx].item())
+        oracle = float(dice_tensor.max().item())
+        topk = min(4, dice_tensor.numel())
+        oracle_topk_mean = float(torch.topk(dice_tensor, k=max(topk, 1)).values.mean().item())
+        metric_totals["geomaskformer_proposal_selected_dice_sum"] += selected
+        metric_totals["geomaskformer_proposal_oracle_best_dice_sum"] += oracle
+        metric_totals["geomaskformer_proposal_oracle_topk_mean_dice_sum"] += oracle_topk_mean
+        metric_totals["geomaskformer_proposal_selection_gap_sum"] += oracle - selected
+        corr = torch.zeros((), device=scores.device)
+        if dice_tensor.numel() > 1:
+            q_rank = torch.argsort(torch.argsort(scores.detach())).float()
+            d_rank = torch.argsort(torch.argsort(dice_tensor)).float()
+            q_rank = q_rank - q_rank.mean()
+            d_rank = d_rank - d_rank.mean()
+            corr = (q_rank * d_rank).mean() / (q_rank.std(unbiased=False) * d_rank.std(unbiased=False)).clamp_min(1.0e-6)
+        metric_totals["geomaskformer_proposal_score_dice_rank_corr_sum"] += float(corr.item())
+        metric_totals["geomaskformer_proposal_count"] += 1.0
+        metric_totals[f"geomaskformer_query_usage_{oracle_idx}"] = metric_totals.get(f"geomaskformer_query_usage_{oracle_idx}", 0.0) + 1.0
 
     @staticmethod
     def _batch_scalar_index(batch_data: dict, key: str, bi: int) -> int | None:
@@ -2168,6 +2502,9 @@ class Trainer:
             "epoch": int(epoch),
             "metric_name": metric_name,
             "metric": metric,
+            "segmentation_dice": float(metrics.get("dice", metrics.get("dice_frame_mean", 0.0))),
+            "segmentation_hd95": float(metrics.get("hd95", metrics.get("hd95_original", 0.0))),
+            "segmentation_assd": float(metrics.get("assd", metrics.get("assd_original", 0.0))),
             "best_val_threshold": float(metrics.get("best_val_threshold", self.best_val_threshold)),
             "ema_enabled": self.ema_enabled,
             "ema_eval": self.ema_eval,
@@ -2180,7 +2517,20 @@ class Trainer:
             json.dump(metadata, handle, indent=2, sort_keys=True)
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:
-            logger.log_best(metrics, epoch=epoch, iteration=it)
+            if self._is_geomaskformer_model():
+                logger.log_metrics(
+                    {
+                        "segmentation/dice": metrics.get("dice", metrics.get("dice_frame_mean", 0.0)),
+                        "segmentation/hd95": metrics.get("hd95", metrics.get("hd95_original", 0.0)),
+                        "segmentation/assd": metrics.get("assd", metrics.get("assd_original", 0.0)),
+                        "epoch": float(epoch),
+                        "iter": float(it),
+                    },
+                    prefix="best",
+                    step=it,
+                )
+            else:
+                logger.log_best(metrics, epoch=epoch, iteration=it)
             for filename in saved_weight_files:
                 logger.log_checkpoint(self.run_path / filename, artifact_name=filename)
             logger.log_checkpoint(self.run_path / "best_summary.json", artifact_name="best_summary.json")
@@ -2219,12 +2569,24 @@ class Trainer:
                 for batch_idx, batch_data in enumerate(data_loader):
                     self._move_to_device(batch_data)
                     batch_data["init_mode"] = self._resolve_phase_init(mode)
+                    supervised_indices = self._resolve_supervised_indices(batch_data)
+                    eval_indices = self._resolve_eval_indices(batch_data)
+                    conditioned_out = None
+                    conditioned_visibility = None
+                    if self._is_geomaskformer_model():
+                        no_mask_visibility = torch.zeros_like(eval_indices, dtype=torch.long, device=eval_indices.device)
+                        batch_data["geomaskformer_mask_visibility"] = no_mask_visibility
+                        conditioned_visibility = self._geomaskformer_condition_visibility(batch_data, eval_indices)
 
                     with torch.amp.autocast(self.device.type, enabled=self.use_amp):
                         out = self._forward_eval_with_tta(batch_data)
-
-                    supervised_indices = self._resolve_supervised_indices(batch_data)
-                    eval_indices = self._resolve_eval_indices(batch_data)
+                    if self._is_geomaskformer_model() and torch.is_tensor(conditioned_visibility) and bool(
+                        self.cfg.get("evaluation", {}).get("geomaskformer_gain_vs_nomask", True)
+                    ):
+                        conditioned_batch = dict(batch_data)
+                        conditioned_batch["geomaskformer_mask_visibility"] = conditioned_visibility
+                        with torch.amp.autocast(self.device.type, enabled=self.use_amp):
+                            conditioned_out = self._forward_eval_with_tta(conditioned_batch)
                     required_eval_ids = sorted(torch.nonzero(eval_indices.any(dim=0), as_tuple=False).flatten().tolist())
                     mask_keys = [f"masks_{ti}" for ti in required_eval_ids]
 
@@ -2394,6 +2756,7 @@ class Trainer:
                             metric_totals[f"{key}_dice_count"] = 0.0
                         for key, value in self._metric_totals_template().items():
                             metric_totals.setdefault(key, value)
+                    self._accumulate_geomaskformer_protocol_metrics(metric_totals, out, eval_indices, conditioned_visibility)
 
                     conf_pred_frames = []
                     conf_gt_frames = []
@@ -2412,6 +2775,9 @@ class Trainer:
                         original_sizes = batch_data.get("original_size")
                         sample_eval_indices = torch.nonzero(eval_indices[bi], as_tuple=False).flatten().tolist()
                         ed_frame, es_frame = self._resolve_phase_eval_frames(batch_data, bi, sample_eval_indices)
+                        condition_name = "all_mask_invisible"
+                        if self._is_geomaskformer_model() and torch.is_tensor(conditioned_visibility):
+                            condition_name = self._geomaskformer_condition_name(conditioned_visibility[bi], ed_frame, es_frame)
                         for ti in sample_eval_indices:
                             pred = out[f"masks_{ti}"][bi:bi + 1]
                             if pred.shape[1] > 1:
@@ -2424,6 +2790,13 @@ class Trainer:
                                 metric_totals[f"{key}_dice_count"] += 1.0
                             pred_bin = self._postprocess_binary_mask((pred > active_threshold).float())
                             gt_frame = gt[bi, ti, ...].unsqueeze(0).unsqueeze(0).float()
+                            if self._is_geomaskformer_model() and float(pred_bin.float().sum().item()) <= 0.0:
+                                metric_totals["geomaskformer_empty_prediction_count"] += 1.0
+                            if self._is_geomaskformer_model():
+                                pred_empty = float(pred_bin.float().sum().item()) <= 0.0
+                                gt_empty = float(gt_frame.float().sum().item()) <= 0.0
+                                if pred_empty != gt_empty:
+                                    metric_totals["geomaskformer_invalid_surface_case_count"] += 1.0
                             faf_base_dice_curr = None
                             gar_base_dice_curr = None
                             gar_top1_dice_curr = None
@@ -3035,6 +3408,44 @@ class Trainer:
                                 metric_totals["faf_hard_frame_final_minus_base_count"] = (
                                     metric_totals.get("faf_hard_frame_final_minus_base_count", 0.0) + 1.0
                                 )
+                            self._accumulate_geomaskformer_frame_metrics(
+                                metric_totals,
+                                out,
+                                bi,
+                                ti,
+                                gt_frame,
+                                dice_t,
+                                active_threshold,
+                                condition_name,
+                            )
+                            if conditioned_out is not None and f"masks_{ti}" in conditioned_out:
+                                cond_pred = conditioned_out[f"masks_{ti}"][bi : bi + 1]
+                                if cond_pred.shape[1] > 1:
+                                    cond_pred = cond_pred[:, 1:2, ...]
+                                cond_bin = self._postprocess_binary_mask((cond_pred > active_threshold).float())
+                                cond_dice, _ = self._binary_overlap_metrics(cond_bin, gt_frame)
+                                gain = float(cond_dice - dice_t)
+                                metric_totals["geomaskformer_condition_nomask_dice_sum"] += float(dice_t)
+                                metric_totals["geomaskformer_condition_nomask_dice_count"] += 1.0
+                                metric_totals["geomaskformer_condition_conditioned_dice_sum"] += float(cond_dice)
+                                metric_totals["geomaskformer_condition_conditioned_dice_count"] += 1.0
+                                metric_totals["geomaskformer_condition_gain_vs_nomask_sum"] += gain
+                                metric_totals["geomaskformer_condition_gain_vs_nomask_count"] += 1.0
+                                metric_totals["geomaskformer_condition_all_mask_invisible_dice_sum"] += float(dice_t)
+                                metric_totals["geomaskformer_condition_all_mask_invisible_dice_count"] += 1.0
+                                metric_totals[f"geomaskformer_condition_{condition_name}_dice_sum"] += float(cond_dice)
+                                metric_totals[f"geomaskformer_condition_{condition_name}_dice_count"] += 1.0
+                                if torch.is_tensor(conditioned_visibility):
+                                    visible_ids = torch.nonzero(
+                                        conditioned_visibility[bi].to(device=gt_frame.device).bool(),
+                                        as_tuple=False,
+                                    ).flatten()
+                                    if visible_ids.numel() > 0:
+                                        distance = int((visible_ids - int(ti)).abs().min().item())
+                                        bucket = self._geomaskformer_distance_bucket(distance)
+                                        if bucket is not None:
+                                            metric_totals[f"geomaskformer_condition_{bucket}_gain_sum"] += gain
+                                            metric_totals[f"geomaskformer_condition_{bucket}_gain_count"] += 1.0
 
                             if self.main_process:
                                 sample_name = ""
@@ -3512,6 +3923,105 @@ class Trainer:
         }
         metrics["overall_dice"] = metrics["dice"]
         metrics["overall_hd95"] = metrics["hd95"]
+        if reduced.get("geomaskformer_protocol_sample_count", 0.0) > 0 or reduced.get("geomaskformer_proposal_count", 0.0) > 0:
+            supervised_total = max(reduced.get("geomaskformer_supervised_frame_total", 0.0), 1.0)
+            query_counts = [
+                value
+                for key, value in reduced.items()
+                if str(key).startswith("geomaskformer_query_usage_") and value > 0
+            ]
+            if query_counts:
+                query_probs = np.asarray(query_counts, dtype=np.float64)
+                query_probs = query_probs / max(float(query_probs.sum()), 1.0)
+                query_entropy = float(-(query_probs * np.log(np.clip(query_probs, 1.0e-12, 1.0))).sum())
+                active_queries = float((query_probs > 0).sum())
+            else:
+                query_entropy = 0.0
+                active_queries = 0.0
+            proposal_count = max(reduced.get("geomaskformer_proposal_count", 0.0), 1.0)
+            metrics.update(
+                {
+                    "geomaskformer/visible_frame_count": mean(
+                        "geomaskformer_visible_frame_count_sum", "geomaskformer_protocol_sample_count"
+                    ),
+                    "geomaskformer/masked_frame_count": mean(
+                        "geomaskformer_masked_frame_count_sum", "geomaskformer_protocol_sample_count"
+                    ),
+                    "geomaskformer/supervised_frame_count": mean(
+                        "geomaskformer_supervised_frame_count_sum", "geomaskformer_protocol_sample_count"
+                    ),
+                    "geomaskformer/visible_and_supervised_ratio": reduced.get(
+                        "geomaskformer_visible_and_supervised_sum", 0.0
+                    )
+                    / supervised_total,
+                    "geomaskformer/masked_and_supervised_ratio": reduced.get(
+                        "geomaskformer_masked_and_supervised_sum", 0.0
+                    )
+                    / supervised_total,
+                    "geomaskformer/samples_with_visible_condition_ratio": reduced.get(
+                        "geomaskformer_samples_with_visible_condition_sum", 0.0
+                    )
+                    / max(reduced.get("geomaskformer_protocol_sample_count", 0.0), 1.0),
+                    "geomaskformer/visibility_overlap_violation_count": reduced.get(
+                        "geomaskformer_visibility_overlap_violation_count", 0.0
+                    ),
+                    "geomaskformer/condition_nomask_dice": mean(
+                        "geomaskformer_condition_nomask_dice_sum", "geomaskformer_condition_nomask_dice_count"
+                    ),
+                    "geomaskformer/condition_conditioned_dice": mean(
+                        "geomaskformer_condition_conditioned_dice_sum",
+                        "geomaskformer_condition_conditioned_dice_count",
+                    ),
+                    "geomaskformer/proposal_selected_dice": reduced.get(
+                        "geomaskformer_proposal_selected_dice_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_oracle_best_dice": reduced.get(
+                        "geomaskformer_proposal_oracle_best_dice_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_oracle_top4_mean_dice": reduced.get(
+                        "geomaskformer_proposal_oracle_topk_mean_dice_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_selection_gap": reduced.get(
+                        "geomaskformer_proposal_selection_gap_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_score_dice_rank_corr": reduced.get(
+                        "geomaskformer_proposal_score_dice_rank_corr_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_active_query_count": active_queries,
+                    "geomaskformer/proposal_query_usage_entropy": query_entropy,
+                    "geomaskformer/proposal_score_nan_count": reduced.get(
+                        "geomaskformer_proposal_score_nan_count", 0.0
+                    ),
+                    "geomaskformer/empty_prediction_count": reduced.get(
+                        "geomaskformer_empty_prediction_count", 0.0
+                    ),
+                    "geomaskformer/invalid_surface_case_count": reduced.get(
+                        "geomaskformer_invalid_surface_case_count", 0.0
+                    ),
+                }
+            )
+            for condition in ("all_mask_invisible", "first_frame_visible", "random_keyframe_visible", "ed_es_visible"):
+                count_key = f"geomaskformer_condition_{condition}_dice_count"
+                if reduced.get(count_key, 0.0) > 0:
+                    metrics[f"geomaskformer/condition_{condition}_dice"] = mean(
+                        f"geomaskformer_condition_{condition}_dice_sum", count_key
+                    )
+            for bucket in ("distance_0_2", "distance_3_5", "distance_6plus"):
+                count_key = f"geomaskformer_condition_{bucket}_gain_count"
+                if reduced.get(count_key, 0.0) > 0:
+                    metrics[f"geomaskformer/condition_{bucket}_gain_vs_nomask"] = mean(
+                        f"geomaskformer_condition_{bucket}_gain_sum", count_key
+                    )
+            if reduced.get("geomaskformer_condition_gain_vs_nomask_count", 0.0) > 0:
+                metrics["geomaskformer/condition_gain_vs_nomask"] = mean(
+                    "geomaskformer_condition_gain_vs_nomask_sum",
+                    "geomaskformer_condition_gain_vs_nomask_count",
+                )
         protocol_name = self._eval_protocol_name()
         if protocol_name:
             metrics[f"dice/{protocol_name}"] = metrics["dice_frame_mean"]
@@ -3520,8 +4030,6 @@ class Trainer:
             metrics["anchor_ode/base_dice"] = metrics["base_only_dice_frame_mean"]
             metrics["anchor_ode/guided_dice"] = metrics["guided_only_dice_frame_mean"]
             metrics["anchor_ode/prior_dice"] = metrics["prior_only_dice_frame_mean"]
-        metrics["area_acceleration"] = metrics["area_smoothness"]
-        metrics["temporal_jitter"] = metrics["temporal_drift"]
         if reduced.get("functional_anchor_aux_count", 0.0) > 0:
             metrics.update(
                 {
@@ -3926,6 +4434,64 @@ class Trainer:
                 metrics[f"{prefix}_dice_frame_mean"] = mean(key, f"{prefix}_dice_count")
         return metrics
 
+    def _geomaskformer_eval_log_metrics(self, metrics: dict) -> dict[str, float]:
+        metric_space = str(self.cfg.get("evaluation", {}).get("metric_space", "original"))
+        out = {
+            "segmentation/dice": metrics.get("dice", metrics.get("dice_frame_mean", 0.0)),
+            "segmentation/iou": metrics.get("iou", metrics.get("iou_frame_mean", 0.0)),
+            "segmentation/hd95": metrics.get("hd95", 0.0),
+            "segmentation/assd": metrics.get("assd", 0.0),
+            "segmentation/boundary_dice": metrics.get("boundary_dice", metrics.get("boundary_dice_frame_mean", 0.0)),
+            "temporal/frame_to_frame_disagreement": metrics.get("temporal_drift", 0.0),
+            "temporal/area_second_difference_abs": metrics.get("area_smoothness", 0.0),
+            "temporal/centroid_displacement": metrics.get("centroid_jitter", 0.0),
+            "temporal/metrics_on_dice_ge_threshold": 0.0,
+            "condition/nomask_dice": metrics.get("geomaskformer/condition_nomask_dice", 0.0),
+            "condition/conditioned_dice": metrics.get("geomaskformer/condition_conditioned_dice", 0.0),
+            "proposal/selected_dice": metrics.get("geomaskformer/proposal_selected_dice", 0.0),
+            "proposal/oracle_best_dice": metrics.get("geomaskformer/proposal_oracle_best_dice", 0.0),
+            "proposal/oracle_top4_mean_dice": metrics.get("geomaskformer/proposal_oracle_top4_mean_dice", 0.0),
+            "proposal/selection_gap": metrics.get("geomaskformer/proposal_selection_gap", 0.0),
+            "proposal/score_dice_rank_corr": metrics.get("geomaskformer/proposal_score_dice_rank_corr", 0.0),
+            "proposal/active_query_count": metrics.get("geomaskformer/proposal_active_query_count", 0.0),
+            "proposal/query_usage_entropy": metrics.get("geomaskformer/proposal_query_usage_entropy", 0.0),
+            "debug/proposal_score_nan_count": metrics.get("geomaskformer/proposal_score_nan_count", 0.0),
+            "debug/empty_prediction_count": metrics.get("geomaskformer/empty_prediction_count", 0.0),
+            "debug/invalid_surface_case_count": metrics.get("geomaskformer/invalid_surface_case_count", 0.0),
+            "debug/visibility_overlap_violation_count": metrics.get(
+                "geomaskformer/visibility_overlap_violation_count", 0.0
+            ),
+        }
+        for src, dst in (
+            ("ed_dice", "segmentation/ED_dice"),
+            ("es_dice", "segmentation/ES_dice"),
+            ("ed_hd95", "segmentation/ED_hd95"),
+            ("es_hd95", "segmentation/ES_hd95"),
+            ("geomaskformer/condition_all_mask_invisible_dice", "condition/all_mask_invisible/dice"),
+            ("geomaskformer/condition_first_frame_visible_dice", "condition/first_frame_visible/dice"),
+            ("geomaskformer/condition_random_keyframe_visible_dice", "condition/random_keyframe_visible/dice"),
+            ("geomaskformer/condition_ed_es_visible_dice", "condition/ed_es_visible/dice"),
+            ("geomaskformer/condition_gain_vs_nomask", "condition/gain_vs_nomask"),
+            ("geomaskformer/condition_distance_0_2_gain_vs_nomask", "condition/distance_0_2/gain_vs_nomask"),
+            ("geomaskformer/condition_distance_3_5_gain_vs_nomask", "condition/distance_3_5/gain_vs_nomask"),
+            ("geomaskformer/condition_distance_6plus_gain_vs_nomask", "condition/distance_6plus/gain_vs_nomask"),
+        ):
+            if src in metrics:
+                out[dst] = metrics[src]
+        return {key: value for key, value in out.items() if value is not None}
+
+    def _geomaskformer_protocol_log_metrics(self, metrics: dict) -> dict[str, float]:
+        return {
+            "protocol/visible_frame_count": metrics.get("geomaskformer/visible_frame_count", 0.0),
+            "protocol/masked_frame_count": metrics.get("geomaskformer/masked_frame_count", 0.0),
+            "protocol/supervised_frame_count": metrics.get("geomaskformer/supervised_frame_count", 0.0),
+            "protocol/visible_and_supervised_ratio": metrics.get("geomaskformer/visible_and_supervised_ratio", 0.0),
+            "protocol/masked_and_supervised_ratio": metrics.get("geomaskformer/masked_and_supervised_ratio", 0.0),
+            "protocol/samples_with_visible_condition_ratio": metrics.get(
+                "geomaskformer/samples_with_visible_condition_ratio", 0.0
+            ),
+        }
+
     def _log_final_metrics(self, metrics, mode, it, epoch):
         log_items = []
         for k, v in metrics.items():
@@ -3941,7 +4507,18 @@ class Trainer:
 
         logger = getattr(self, "mlflow_logger", None)
         if logger is not None:
-            logger.log_eval_summary(metrics, mode=mode, step=it)
+            if self._is_geomaskformer_model():
+                logger.log_metrics(self._geomaskformer_eval_log_metrics(metrics), prefix=mode, step=it)
+                logger.log_metrics(self._geomaskformer_protocol_log_metrics(metrics), step=it)
+                metric_space = str(self.cfg.get("evaluation", {}).get("metric_space", "original"))
+                logger.log_params(
+                    {
+                        f"{mode}/segmentation/metric_resolution": metric_space,
+                        f"{mode}/segmentation/metric_unit": "pixels_original" if metric_space == "original" else "pixels_resized",
+                    }
+                )
+            else:
+                logger.log_eval_summary(metrics, mode=mode, step=it)
 
     def save_weights(self, it: int):
         if not self.main_process:

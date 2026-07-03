@@ -67,8 +67,25 @@ def _cfg_get(container, key: str, default=None):
 def _infer_temporal_access(cfg: DictConfig) -> str:
     model_cfg = cfg.get("model", {})
     model_name = str(_cfg_get(model_cfg, "name", cfg.get("model_name", ""))).lower()
+    method_cfg = _cfg_get(model_cfg, model_name, {})
+    if model_name in {"geomaskformer", "geo_maskformer"}:
+        method_cfg = _cfg_get(model_cfg, "geomaskformer", method_cfg)
     default = "full_window" if model_name == "debel" else "recurrent"
-    return str(cfg.get("temporal_access", _cfg_get(model_cfg, "temporal_access", default))).lower()
+    return str(
+        cfg.get(
+            "temporal_access",
+            _cfg_get(method_cfg, "temporal_access", _cfg_get(model_cfg, "temporal_access", default)),
+        )
+    ).lower()
+
+
+def _temporal_reasoning_mode(cfg: DictConfig) -> str:
+    access = _infer_temporal_access(cfg)
+    if access in {"full_video", "full_window", "global"}:
+        return "full_video_transformer"
+    if access in {"causal", "causal_transformer"}:
+        return "causal_transformer"
+    return "recurrent"
 
 
 def _infer_backbone_pretrain(cfg: DictConfig) -> tuple[bool, str]:
@@ -228,6 +245,21 @@ def _log_data_flow_summary(
     }
     info_if_rank_zero("[DataFlow] " + json.dumps(summary, sort_keys=True, default=str))
     params = {
+        "run/model_name": str(cfg.get("model_name", cfg.get("model", {}).get("name", ""))),
+        "run/dataset_name": dataset_name,
+        "run/dataset_resolution": "x".join(str(x) for x in summary["crop_size"]),
+        "run/sequence_length": summary["seq_length"],
+        "run/seed": int(cfg.get("seed", 0)),
+        "run/prediction_mode": summary["protocol"]["prediction_mode"],
+        "run/temporal_reasoning_mode": _temporal_reasoning_mode(cfg),
+        "run/protocol_name": str(cfg.get("data", {}).get("protocol_name", summary["evaluation"]["eval_protocol"])),
+        "run/init_mode_train": summary["protocol"]["init_mode_train"],
+        "run/init_mode_val": summary["protocol"]["init_mode_val"],
+        "run/init_mode_test": summary["protocol"]["init_mode_test"],
+        "run/use_first_frame_gt_init": summary["protocol"]["use_first_frame_gt_init"],
+        "run/exclude_init_frame_from_eval": summary["evaluation"]["exclude_init_frame"],
+        "run/backbone_pretrained": summary["protocol"]["backbone_pretrained"],
+        "run/pretrain_source": summary["protocol"]["pretrain_source"],
         "data/name": dataset_name,
         "data/path": data_path,
         "data/seq_length": summary["seq_length"],

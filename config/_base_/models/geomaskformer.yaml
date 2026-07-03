@@ -26,6 +26,7 @@ model:
     use_geometry_tokenizer: true
     gated_image_from_mask: true
     inference: "top1"
+    temporal_access: "full_video"
     training_stage: "stage2"
     image_token_dropout: 0.05
     mask_token_dropout: 0.10
@@ -39,5 +40,6 @@ model:
       boundary: 0.2
       score: 0.5
       temporal: 0.03
+      visible_reconstruction: 0.0
       topk: 4
       boundary_kernel: 5

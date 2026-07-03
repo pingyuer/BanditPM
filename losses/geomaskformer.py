@@ -71,9 +71,15 @@ def compute_geomaskformer_losses(lc, data: Dict[str, torch.Tensor], supervised_m
     mask_terms = []
     boundary_terms = []
     score_terms = []
+    visible_reconstruction_terms = []
     top1_scores = []
     oracle_scores = []
+    oracle_top4_scores = []
+    oracle_top10_scores = []
     best_ids = []
+    all_best_ids = []
+    all_score_quality = []
+    all_oracle_quality = []
 
     for bi in range(batch_size):
         frame_ids = lc._frame_ids_for_sample(supervised_mask, bi)
@@ -88,7 +94,12 @@ def compute_geomaskformer_losses(lc, data: Dict[str, torch.Tensor], supervised_m
                 top1_idx = torch.sigmoid(quality_scores[bi, ti]).argmax()
                 top1_scores.append(dice_k[top1_idx].detach())
                 oracle_scores.append(dice_k[best[0]].detach())
+                oracle_top4_scores.append(torch.topk(dice_k, k=min(4, num_queries), dim=0).values.mean().detach())
+                oracle_top10_scores.append(torch.topk(dice_k, k=min(10, num_queries), dim=0).values.mean().detach())
                 best_ids.append(best[0].detach())
+                all_best_ids.append(best[0].detach())
+                all_score_quality.append(torch.sigmoid(quality_scores[bi, ti]).detach())
+                all_oracle_quality.append(dice_k.detach())
             selected_logits = logits_k[best].unsqueeze(1)
             selected_target = target.expand(topk, -1, -1, -1)
             bce = F.binary_cross_entropy_with_logits(selected_logits, selected_target, reduction="none").mean(dim=(1, 2, 3))
@@ -98,6 +109,25 @@ def compute_geomaskformer_losses(lc, data: Dict[str, torch.Tensor], supervised_m
             quality_target = dice_k.detach().clamp(0.0, 1.0)
             quality_prob = torch.sigmoid(quality_scores[bi, ti])
             score_terms.append(F.smooth_l1_loss(quality_prob, quality_target))
+
+    visible_reconstruction_weight = float(getattr(lc, "lambda_geomaskformer_visible_reconstruction", 0.0))
+    mask_visibility = data.get("mask_visibility")
+    label_valid = data.get("label_valid")
+    if visible_reconstruction_weight > 0 and torch.is_tensor(mask_visibility) and torch.is_tensor(label_valid):
+        visible_supervised = (mask_visibility.to(device=proposal_logits.device) > 0) & label_valid.to(device=proposal_logits.device).bool()
+        for bi in range(batch_size):
+            for ti in torch.nonzero(visible_supervised[bi], as_tuple=False).flatten().tolist():
+                target = gt_for_loss[bi, ti : ti + 1]
+                logits_k = proposal_logits[bi, ti]
+                prob_k = torch.sigmoid(logits_k).unsqueeze(1)
+                target_k = target.expand(num_queries, -1, -1, -1)
+                with torch.no_grad():
+                    best = torch.topk(_binary_dice_score(prob_k, target_k), k=topk, dim=0).indices
+                selected_logits = logits_k[best].unsqueeze(1)
+                selected_target = target.expand(topk, -1, -1, -1)
+                bce = F.binary_cross_entropy_with_logits(selected_logits, selected_target, reduction="none").mean(dim=(1, 2, 3))
+                dice = _binary_dice_loss(torch.sigmoid(selected_logits), selected_target)
+                visible_reconstruction_terms.append((bce + dice).mean())
 
     out: Dict[str, torch.Tensor] = {}
     device = data["rgb"].device
@@ -111,9 +141,31 @@ def compute_geomaskformer_losses(lc, data: Dict[str, torch.Tensor], supervised_m
         out["aux_geomaskformer_bestofk_mask"] = raw_mask * lc.lambda_geomaskformer_mask
         out["aux_geomaskformer_boundary"] = raw_boundary * lc.lambda_geomaskformer_boundary
         out["aux_geomaskformer_score"] = raw_score * lc.lambda_geomaskformer_score
-        out["geomaskformer/proposal_top1_dice"] = torch.stack(top1_scores).mean()
-        out["geomaskformer/proposal_oracle_topk_dice"] = torch.stack(oracle_scores).mean()
-        out["geomaskformer/best_query_mean"] = torch.stack(best_ids).float().mean()
+        out["geomaskformer/proposal_selected_dice"] = torch.stack(top1_scores).mean()
+        out["geomaskformer/proposal_oracle_best_dice"] = torch.stack(oracle_scores).mean()
+        out["geomaskformer/proposal_oracle_topk_mean_dice"] = torch.stack(oracle_scores).mean()
+        out["geomaskformer/proposal_oracle_top4_dice"] = torch.stack(oracle_top4_scores).mean()
+        out["geomaskformer/proposal_oracle_top10_dice"] = torch.stack(oracle_top10_scores).mean()
+        hist = torch.bincount(torch.stack(all_best_ids).long(), minlength=num_queries).float()
+        probs = hist / hist.sum().clamp_min(1.0)
+        out["geomaskformer/proposal_active_query_count"] = (hist > 0).float().sum()
+        out["geomaskformer/proposal_query_usage_entropy"] = -(probs[probs > 0] * probs[probs > 0].log()).sum()
+        quality_flat = torch.cat(all_score_quality)
+        dice_flat = torch.cat(all_oracle_quality)
+        q_rank = torch.argsort(torch.argsort(quality_flat)).float()
+        d_rank = torch.argsort(torch.argsort(dice_flat)).float()
+        q_rank = q_rank - q_rank.mean()
+        d_rank = d_rank - d_rank.mean()
+        out["geomaskformer/proposal_score_dice_rank_corr"] = (
+            q_rank * d_rank
+        ).mean() / (q_rank.std(unbiased=False) * d_rank.std(unbiased=False)).clamp_min(1.0e-6)
+        out["geomaskformer/proposal_selection_gap"] = (
+            out["geomaskformer/proposal_oracle_best_dice"] - out["geomaskformer/proposal_selected_dice"]
+        )
+    if visible_reconstruction_terms:
+        raw_visible = torch.stack(visible_reconstruction_terms).mean()
+        out["raw_geomaskformer_visible_reconstruction"] = raw_visible.detach()
+        out["aux_geomaskformer_visible_reconstruction"] = raw_visible * visible_reconstruction_weight
     if lc.lambda_geomaskformer_temporal > 0 and torch.is_tensor(data.get("logits")):
         fg = torch.softmax(data["logits"], dim=2)[:, :, 1:2]
         area = fg.mean(dim=(2, 3, 4))

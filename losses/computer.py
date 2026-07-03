@@ -100,6 +100,9 @@ class LossComputer(nn.Module):
         self.lambda_geomaskformer_boundary = float(self.geomaskformer_loss_cfg.get("boundary", 0.2))
         self.lambda_geomaskformer_score = float(self.geomaskformer_loss_cfg.get("score", 0.5))
         self.lambda_geomaskformer_temporal = float(self.geomaskformer_loss_cfg.get("temporal", 0.03))
+        self.lambda_geomaskformer_visible_reconstruction = float(
+            self.geomaskformer_loss_cfg.get("visible_reconstruction", 0.0)
+        )
         self.geomaskformer_topk_loss = int(self.geomaskformer_loss_cfg.get("topk", 4))
         self.geomaskformer_boundary_kernel = int(self.geomaskformer_loss_cfg.get("boundary_kernel", 5))
         if self.geomaskformer_boundary_kernel < 3 or self.geomaskformer_boundary_kernel % 2 == 0:

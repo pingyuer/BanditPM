@@ -30,7 +30,14 @@ def _model_cfg(dim: int = 32, queries: int = 6):
                     "image_token_dropout": 0.0,
                     "mask_token_dropout": 0.0,
                     "condition_dropout": 0.0,
-                    "loss": {"mask": 1.0, "boundary": 0.2, "score": 0.5, "temporal": 0.01, "topk": 2},
+                    "loss": {
+                        "mask": 1.0,
+                        "boundary": 0.2,
+                        "score": 0.5,
+                        "temporal": 0.01,
+                        "visible_reconstruction": 0.0,
+                        "topk": 2,
+                    },
                 },
             }
         }
@@ -81,6 +88,40 @@ def test_mask_tokenizer_geometry_range_and_mask_token_grad():
     assert tokenizer.mask_token.grad.abs().sum().item() > 0.0
 
 
+def test_mask_tokenizer_invisible_masks_are_content_invariant_and_visible_masks_matter():
+    tokenizer = MaskTokenizer(dim=32, max_frames=8, use_geometry=True)
+    visibility = torch.tensor([[0, 1]], dtype=torch.long)
+    zeros = torch.zeros(1, 2, 1, 32, 32)
+    ones = zeros.clone()
+    ones[:, 0] = 1.0
+    noise = zeros.clone()
+    noise[:, 0] = torch.rand_like(noise[:, 0])
+    tokens_zero, _ = tokenizer(zeros, visibility, (4, 4))
+    tokens_one, _ = tokenizer(ones, visibility, (4, 4))
+    tokens_noise, _ = tokenizer(noise, visibility, (4, 4))
+    assert torch.equal(tokens_zero[:, 0], tokens_one[:, 0])
+    assert torch.equal(tokens_zero[:, 0], tokens_noise[:, 0])
+
+    visible_a = zeros.clone()
+    visible_b = zeros.clone()
+    visible_b[:, 1, :, 8:24, 8:24] = 1.0
+    tokens_a, _ = tokenizer(visible_a, visibility, (4, 4))
+    tokens_b, _ = tokenizer(visible_b, visibility, (4, 4))
+    assert not torch.allclose(tokens_a[:, 1], tokens_b[:, 1])
+
+
+def test_mask_tokenizer_geometry_channels_are_local_prior_not_sdf():
+    tokenizer = MaskTokenizer(dim=32, max_frames=8, use_geometry=True)
+    mask = torch.zeros(1, 1, 32, 32)
+    mask[:, :, 8:24, 8:24] = 1.0
+    geom = tokenizer.geometry(mask)
+    assert geom.shape[1] == 3
+    assert geom[:, 1].min().item() >= -1.0
+    assert geom[:, 1].max().item() <= 1.0
+    assert geom[:, 1, 16, 16].item() > geom[:, 1, 0, 0].item()
+    assert geom[:, 2].max().item() > 0.0
+
+
 def test_dual_stream_gate_initially_protects_image_stream_then_allows_gradient():
     transformer = DualStreamFactorizedTransformer(dim=32, depth=1, heads=4)
     x = torch.randn(2, 3, 5, 32, requires_grad=True)
@@ -107,6 +148,18 @@ def test_proposal_decoder_quality_bias_and_backprop():
     loss.backward()
     assert decoder.query_embed.grad is not None
     assert decoder.query_embed.grad.abs().sum().item() > 0.0
+
+
+def test_proposal_decoder_condition_distance_changes_queries():
+    decoder = ProposalDecoder(dim=32, pixel_dim=32, num_queries=6, num_layers=1, heads=4, max_frames=8)
+    x = torch.randn(1, 3, 16, 32)
+    m = torch.randn(1, 3, 16, 32)
+    pixels = torch.randn(1, 3, 32, 16, 16)
+    near = torch.zeros(1, 3, dtype=torch.long)
+    far = torch.full((1, 3), 3, dtype=torch.long)
+    out_near = decoder(x, m, pixels, condition_prev=near, condition_next=near)
+    out_far = decoder(x, m, pixels, condition_prev=far, condition_next=far)
+    assert not torch.allclose(out_near["quality_scores"], out_far["quality_scores"])
 
 
 def test_boundary_loss_penalizes_shifted_mask_more_than_aligned_mask():
@@ -139,6 +192,36 @@ def test_geomaskformer_forward_loss_backward_and_visibility_decoupling():
     assert model.image_tokenizer.patch_proj.weight.grad is not None
 
 
+def test_default_masked_completion_loss_excludes_visible_condition_frames():
+    cfg = _model_cfg()
+    model = GeoMaskFormer(cfg.model)
+    model.train()
+    data = _batch()
+    data.pop("geomaskformer_loss_visibility")
+    data["label_valid"][:] = True
+    data["geomaskformer_mask_visibility"] = torch.tensor([[1, 0, 0], [0, 1, 0]], dtype=torch.long)
+    out = model(data)
+    assert out["loss_visibility"][0].tolist() == [False, True, True]
+    assert out["loss_visibility"][1].tolist() == [True, False, True]
+
+
+def test_condition_mask_perturbation_changes_masked_prediction():
+    cfg = _model_cfg()
+    model = GeoMaskFormer(cfg.model)
+    model.eval()
+    data_a = _batch(batch_size=1)
+    data_a["geomaskformer_mask_visibility"] = torch.tensor([[1, 0, 0]], dtype=torch.long)
+    data_a["geomaskformer_loss_visibility"] = torch.tensor([[False, True, True]])
+    data_b = {k: v.clone() if torch.is_tensor(v) else v for k, v in data_a.items()}
+    data_b["cls_gt"] = data_a["cls_gt"].clone()
+    data_b["cls_gt"][:, 0] = 0
+    data_b["cls_gt"][:, 0, :, 2:16, 2:16] = 1
+    with torch.no_grad():
+        out_a = model(data_a)["logits"][:, 1:]
+        out_b = model(data_b)["logits"][:, 1:]
+    assert (out_a - out_b).abs().mean().item() > 1.0e-6
+
+
 def test_registry_builds_geomaskformer():
     model = build_model(_model_cfg(), device="cpu")
     assert isinstance(model, GeoMaskFormer)
@@ -162,7 +245,30 @@ def test_bestofk_selects_oracle_proposal_independent_of_quality_score():
     }
     supervised = torch.ones(1, 1, dtype=torch.bool)
     losses = compute_geomaskformer_losses(lc, data, supervised)
-    assert losses["geomaskformer/proposal_oracle_topk_dice"] > losses["geomaskformer/proposal_top1_dice"]
+    assert losses["geomaskformer/proposal_oracle_topk_mean_dice"] > losses["geomaskformer/proposal_selected_dice"]
     losses["aux_geomaskformer_bestofk_mask"].backward(retain_graph=True)
     grad = data["proposal_logits"].grad.abs().sum(dim=(0, 1, 3, 4))
     assert grad[1].item() > grad[0].item()
+
+
+def test_quality_loss_target_matches_detached_proposal_dice():
+    cfg = _model_cfg(queries=2)
+    cfg.model.geomaskformer.loss.topk = 1
+    lc = LossComputer(cfg, _stage_cfg())
+    gt = torch.zeros(1, 1, 1, 8, 8, dtype=torch.long)
+    gt[:, :, :, 2:6, 2:6] = 1
+    proposals = torch.full((1, 1, 2, 8, 8), -4.0)
+    proposals[:, :, 0, 2:6, 2:6] = 4.0
+    proposals[:, :, 1, 0:4, 0:4] = 4.0
+    quality_scores = torch.zeros(1, 1, 2, requires_grad=True)
+    data = {
+        "rgb": torch.randn(1, 1, 1, 8, 8),
+        "cls_gt": gt,
+        "proposal_logits": proposals,
+        "quality_scores": quality_scores,
+    }
+    losses = compute_geomaskformer_losses(lc, data, torch.ones(1, 1, dtype=torch.bool))
+    target = losses["geomaskformer/proposal_oracle_best_dice"]
+    assert target.item() > losses["geomaskformer/proposal_selected_dice"].item() - 1.0
+    losses["aux_geomaskformer_score"].backward()
+    assert quality_scores.grad is not None
