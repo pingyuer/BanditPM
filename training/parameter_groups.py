@@ -25,6 +25,9 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
     gar_boundary_lr_mult = float(stage_cfg.get("cardia_boundary_lr_mult", stage_cfg.get("gar_boundary_lr_mult", 2.0)))
     gar_proposal_lr_mult = float(stage_cfg.get("cardia_proposal_lr_mult", stage_cfg.get("gar_proposal_lr_mult", 2.0)))
     cardia_ode_control_lr_mult = float(stage_cfg.get("cardia_ode_control_lr_mult", 2.0))
+    geomaskformer_prompt_lr_mult = float(stage_cfg.get("geomaskformer_prompt_lr_mult", 1.5))
+    geomaskformer_proposal_lr_mult = float(stage_cfg.get("geomaskformer_proposal_lr_mult", 1.2))
+    geomaskformer_quality_lr_mult = float(stage_cfg.get("geomaskformer_quality_lr_mult", 2.0))
 
     if anchor_ode_lr_ratio is not None or functional_anchor_lr_ratio is not None or cardia_lr_ratio is not None or rebel_lr_ratio is not None or debel_lr_ratio is not None or geomaskformer_lr_ratio is not None:
         if geomaskformer_lr_ratio is not None:
@@ -54,6 +57,12 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
         gar_selector_params = []
         gar_boundary_params = []
         gar_proposal_params = []
+        geomaskformer_prompt_params = []
+        geomaskformer_prompt_no_decay_params = []
+        geomaskformer_proposal_params = []
+        geomaskformer_proposal_no_decay_params = []
+        geomaskformer_quality_params = []
+        geomaskformer_quality_no_decay_params = []
         cardia_ode_control_params = []
         cardia_ode_control_no_decay_params = []
         embed_params = []
@@ -81,9 +90,10 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
             memo.add(param)
             if name.startswith('module.'):
                 name = name[7:]
+            is_no_decay = no_decay_name(name) or param.ndim <= 1
 
             if name.startswith(('backbone.', 'frame_net.', 'encoder.backbone.')):
-                (unext_no_decay_params if no_decay_name(name) else unext_params).append(param)
+                (unext_no_decay_params if is_no_decay else unext_params).append(param)
                 if print_log:
                     log.info(f'{name} counted as a UNeXt/base segmenter parameter.')
             elif name.startswith(('gar_stage2.offset_head.', 'gar_stage3.offset_head.', 'ode_gen2.offset_head.', 'ode_gen3.offset_head.', 'ode.delta_obs_head.', 'ode.delta_mem_head.', 'grid_solver.head.')):
@@ -116,7 +126,7 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'query_decoder.',
                 'grid_solver.film.',
             )):
-                (cardia_ode_control_no_decay_params if no_decay_name(name) else cardia_ode_control_params).append(param)
+                (cardia_ode_control_no_decay_params if is_no_decay else cardia_ode_control_params).append(param)
                 if print_log:
                     log.info(f'{name} counted as an ODE-control parameter.')
             elif name.startswith((
@@ -155,6 +165,18 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 residual_params.append(param)
                 if print_log:
                     log.info(f'{name} counted as a functional_anchor residual head parameter.')
+            elif method_group_name == "geomaskformer" and name.startswith('prompt_query_adapter.'):
+                (geomaskformer_prompt_no_decay_params if is_no_decay else geomaskformer_prompt_params).append(param)
+                if print_log:
+                    log.info(f'{name} counted as a GeoMaskFormer prompt-query parameter.')
+            elif method_group_name == "geomaskformer" and name.startswith('proposal_decoder.quality.'):
+                (geomaskformer_quality_no_decay_params if is_no_decay else geomaskformer_quality_params).append(param)
+                if print_log:
+                    log.info(f'{name} counted as a GeoMaskFormer quality-head parameter.')
+            elif method_group_name == "geomaskformer" and name.startswith(('proposal_decoder.', 'variant_refiner.', 'full_res_refiner.', 'full_res_proposal_head.')):
+                (geomaskformer_proposal_no_decay_params if is_no_decay else geomaskformer_proposal_params).append(param)
+                if print_log:
+                    log.info(f'{name} counted as a GeoMaskFormer proposal-decoder parameter.')
             elif name.startswith((
                 'raw_stage3_injection_scale',
                 'state_encoder.',
@@ -203,11 +225,15 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'boundary_residual.',
                 'image_tokenizer.',
                 'mask_tokenizer.',
+                'prompt_query_adapter.',
                 'transformer.',
                 'pixel_decoder.',
                 'proposal_decoder.',
+                'variant_refiner.',
+                'full_res_refiner.',
+                'full_res_proposal_head.',
             )):
-                (temporal_no_decay_params if no_decay_name(name) else temporal_params).append(param)
+                (temporal_no_decay_params if is_no_decay else temporal_params).append(param)
                 if print_log:
                     log.info(f'{name} counted as a {method_group_name} method parameter.')
             elif any(name.endswith(e) for e in embedding_names):
@@ -265,6 +291,42 @@ def get_parameter_groups(model, stage_cfg, print_log=False):
                 'lr': base_lr * method_lr_ratio * gar_proposal_lr_mult,
                 'weight_decay': weight_decay,
                 'name': f'{method_group_name}_proposal_head',
+            },
+            {
+                'params': geomaskformer_prompt_params,
+                'lr': base_lr * method_lr_ratio * geomaskformer_prompt_lr_mult,
+                'weight_decay': weight_decay,
+                'name': 'geomaskformer_prompt_query_adapter',
+            },
+            {
+                'params': geomaskformer_prompt_no_decay_params,
+                'lr': base_lr * method_lr_ratio * geomaskformer_prompt_lr_mult,
+                'weight_decay': 0.0,
+                'name': 'geomaskformer_prompt_query_adapter_no_decay',
+            },
+            {
+                'params': geomaskformer_proposal_params,
+                'lr': base_lr * method_lr_ratio * geomaskformer_proposal_lr_mult,
+                'weight_decay': weight_decay,
+                'name': 'geomaskformer_proposal_decoder',
+            },
+            {
+                'params': geomaskformer_proposal_no_decay_params,
+                'lr': base_lr * method_lr_ratio * geomaskformer_proposal_lr_mult,
+                'weight_decay': 0.0,
+                'name': 'geomaskformer_proposal_decoder_no_decay',
+            },
+            {
+                'params': geomaskformer_quality_params,
+                'lr': base_lr * method_lr_ratio * geomaskformer_quality_lr_mult,
+                'weight_decay': weight_decay,
+                'name': 'geomaskformer_quality_head',
+            },
+            {
+                'params': geomaskformer_quality_no_decay_params,
+                'lr': base_lr * method_lr_ratio * geomaskformer_quality_lr_mult,
+                'weight_decay': 0.0,
+                'name': 'geomaskformer_quality_head_no_decay',
             },
             {
                 'params': cardia_ode_control_params,

@@ -1,0 +1,19 @@
+defaults:
+  - geomaskformer_echo
+  - _self_
+
+exp_id: "geomaskformer_echonet_pediatric"
+
+data_path: "${data_root}/echonet_pediatric/processed/echonet_pediatric_a4c_png128_10f"
+
+data:
+  protocol_name: "echonet_pediatric_a4c_endpoint"
+
+mlflow:
+  experiment_name: "geomaskformer"
+  tags:
+    method: "GeoMaskFormer"
+    dataset: "echonet_pediatric"
+    view: "A4C"
+    protocol: "stage2_masked_completion"
+    selection: "top1_quality"

@@ -1,0 +1,16 @@
+defaults:
+  - geomaskformer_echonet_pediatric
+  - _self_
+
+exp_id: "geomaskformer_cascade_refine_echonet_pediatric"
+
+model:
+  geomaskformer:
+    architecture_variant: "cascade_refine"
+
+mlflow:
+  experiment_name: "geomaskformer_search"
+  tags:
+    search_stage: "pediatric_screen"
+    architecture_variant: "cascade_refine"
+    dataset: "echonet_pediatric"

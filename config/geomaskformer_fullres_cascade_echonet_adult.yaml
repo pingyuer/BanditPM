@@ -1,0 +1,18 @@
+defaults:
+  - geomaskformer_echonet_adult
+  - _self_
+
+exp_id: "geomaskformer_fullres_cascade_echonet_adult"
+
+model:
+  geomaskformer:
+    architecture_variant: "fullres_cascade"
+    full_res_refine: true
+    full_res_head_dim: 48
+
+mlflow:
+  experiment_name: "geomaskformer_search"
+  tags:
+    search_stage: "adult_screen"
+    architecture_variant: "fullres_cascade"
+    dataset: "echonet_adult"

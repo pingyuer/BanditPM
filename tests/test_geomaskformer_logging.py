@@ -36,10 +36,21 @@ def test_geomaskformer_eval_logging_has_no_old_aliases():
             "temporal_drift": 0.2,
             "centroid_jitter": 0.03,
             "geomaskformer/proposal_oracle_top4_mean_dice": 0.9,
+            "geomaskformer/proposal_oracle_top5_best_dice": 0.91,
+            "geomaskformer/proposal_oracle_top5_mean_dice": 0.88,
+            "geomaskformer/proposal_top5_cover_rate_0p85": 1.0,
+            "geomaskformer/proposal_top5_cover_rate_0p90": 0.5,
         }
     )
     assert "temporal/area_second_difference_abs" in logged
+    assert "temporal/metrics_on_dice_ge_threshold" not in logged
+    assert logged["temporal/dice_ge_threshold_ratio"] == 0.0
     assert "proposal/oracle_top4_mean_dice" in logged
+    assert logged["proposal/oracle_top5_best_dice"] == 0.91
+    assert logged["proposal/oracle_top5_mean_dice"] == 0.88
+    assert logged["proposal/top5_cover_rate_0p85"] == 1.0
+    assert logged["proposal/top5_cover_rate_0p90"] == 0.5
+    assert not any("@" in key for key in logged)
     forbidden = {"area_acceleration", "temporal_jitter", "best_query_mean", "overall/Dice", "val/dice"}
     assert not any(any(alias in key for alias in forbidden) for key in logged)
 
@@ -69,6 +80,7 @@ def test_geomaskformer_parameter_accounting_closes():
     parts = (
         metrics["model/params_m_image_tokenizer"]
         + metrics["model/params_m_mask_tokenizer"]
+        + metrics["model/params_m_prompt_query_adapter"]
         + metrics["model/params_m_dual_stream_transformer"]
         + metrics["model/params_m_pixel_decoder"]
         + metrics["model/params_m_proposal_decoder"]
@@ -94,6 +106,7 @@ def test_geomaskformer_protocol_stats_use_condition_visibility():
 
 def test_geomaskformer_proposal_selection_gap_is_oracle_minus_selected():
     trainer = _trainer()
+    trainer.cfg.evaluation.geomaskformer_temporal_dice_threshold = 0.75
     totals = trainer._metric_totals_template()
     gt = torch.zeros(1, 1, 8, 8)
     gt[:, :, 2:6, 2:6] = 1.0
@@ -105,3 +118,6 @@ def test_geomaskformer_proposal_selection_gap_is_oracle_minus_selected():
     metrics = trainer._reduce_metric_totals(totals)
     assert metrics["geomaskformer/proposal_oracle_best_dice"] > metrics["geomaskformer/proposal_selected_dice"]
     assert metrics["geomaskformer/proposal_selection_gap"] > 0.0
+    assert metrics["geomaskformer/temporal_dice_threshold_frame_count"] == 1.0
+    assert metrics["geomaskformer/temporal_dice_ge_threshold_count"] == 0.0
+    assert metrics["geomaskformer/temporal_dice_ge_threshold_ratio"] == 0.0

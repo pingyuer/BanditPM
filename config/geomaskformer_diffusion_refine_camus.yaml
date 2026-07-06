@@ -1,0 +1,16 @@
+defaults:
+  - geomaskformer_camus
+  - _self_
+
+exp_id: "geomaskformer_diffusion_refine_camus"
+
+model:
+  geomaskformer:
+    architecture_variant: "diffusion_refine"
+    diffusion_refine_steps: 3
+
+mlflow:
+  experiment_name: "geomaskformer_search"
+  tags:
+    search_stage: "camus_confirm"
+    architecture_variant: "diffusion_refine"

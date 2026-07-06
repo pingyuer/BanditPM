@@ -1,0 +1,16 @@
+defaults:
+  - geomaskformer_echo
+  - _self_
+
+exp_id: "geomaskformer_echonet_adult"
+
+data_path: "${data_root}/echonet_adult/processed/echonet_png128_10f"
+
+mlflow:
+  experiment_name: "geomaskformer"
+  tags:
+    method: "GeoMaskFormer"
+    dataset: "echonet_adult"
+    view: "A4C"
+    protocol: "stage2_masked_completion"
+    selection: "top1_quality"

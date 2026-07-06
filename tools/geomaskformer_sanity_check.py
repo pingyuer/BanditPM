@@ -33,16 +33,19 @@ def _count(module) -> int:
 def _parameter_accounting(model) -> dict[str, float]:
     image = _count(getattr(model, "image_tokenizer", None))
     mask = _count(getattr(model, "mask_tokenizer", None))
+    prompt = _count(getattr(model, "prompt_query_adapter", None))
     transformer = _count(getattr(model, "transformer", None))
     pixel = _count(getattr(model, "pixel_decoder", None))
     proposal_module = getattr(model, "proposal_decoder", None)
     quality = _count(getattr(proposal_module, "quality", None))
     proposal = max(_count(proposal_module) - quality, 0)
     total = _count(model)
-    unclassified = max(total - image - mask - transformer - pixel - proposal - quality, 0)
+    unclassified = max(total - image - mask - prompt - transformer - pixel - proposal - quality, 0)
     return {
         "parameters_total": float(total),
-        "parameter_accounting_error": float(abs(total - image - mask - transformer - pixel - proposal - quality - unclassified)),
+        "parameter_accounting_error": float(
+            abs(total - image - mask - prompt - transformer - pixel - proposal - quality - unclassified)
+        ),
         "unclassified_parameter_count": float(unclassified),
     }
 

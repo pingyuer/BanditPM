@@ -20,15 +20,22 @@ def _cfg_section(cfg: Any, key: str) -> Any:
     return _cfg_get(cfg, key, {}) or {}
 
 
+def _group_norm(channels: int) -> nn.GroupNorm:
+    groups = min(8, int(channels))
+    while groups > 1 and int(channels) % groups != 0:
+        groups -= 1
+    return nn.GroupNorm(groups, int(channels))
+
+
 class DepthwiseSeparableConv(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_channels, in_channels, 3, stride=stride, padding=1, groups=in_channels, bias=False),
-            nn.BatchNorm2d(in_channels),
+            _group_norm(in_channels),
             nn.GELU(),
             nn.Conv2d(in_channels, out_channels, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
+            _group_norm(out_channels),
             nn.GELU(),
         )
 
@@ -47,7 +54,7 @@ class ImageTokenizer(nn.Module):
         c8 = int(base_channels) * 4
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, c2, 3, padding=1, bias=False),
-            nn.BatchNorm2d(c2),
+            _group_norm(c2),
             nn.GELU(),
         )
         self.down2 = DepthwiseSeparableConv(c2, c2, stride=2)
@@ -56,7 +63,7 @@ class ImageTokenizer(nn.Module):
         self.down4 = DepthwiseSeparableConv(c2, c4, stride=2)
         self.down8 = DepthwiseSeparableConv(c4, c8, stride=2)
         self.patch_proj = nn.Conv2d(c8, dim, 1)
-        self.out_channels = {"f2": c2, "f4": c4, "f8": c8, "tokens": dim}
+        self.out_channels = {"f1": c2, "f2": c2, "f4": c4, "f8": c8, "tokens": dim}
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         b, t, c, h, w = images.shape
@@ -71,7 +78,7 @@ class ImageTokenizer(nn.Module):
         token_map = self.patch_proj(f8)
         _, _, hp, wp = token_map.shape
         tokens = token_map.flatten(2).transpose(1, 2).reshape(b, t, hp * wp, self.dim)
-        return {"tokens": tokens, "token_map": token_map, "f2": f2, "f4": f4, "f8": f8, "grid_size": (hp, wp)}
+        return {"tokens": tokens, "token_map": token_map, "f1": f1, "f2": f2, "f4": f4, "f8": f8, "grid_size": (hp, wp)}
 
 
 def _soft_boundary(mask: torch.Tensor, kernel_size: int = 5) -> torch.Tensor:
@@ -297,15 +304,80 @@ class PixelDecoder(nn.Module):
         return z.reshape(b, t, self.out_dim, z.shape[-2], z.shape[-1])
 
 
+class PromptQueryAdapter(nn.Module):
+    """Convert visible mask prompts into per-frame proposal query biases."""
+
+    def __init__(self, dim: int = 128, num_queries: int = 20, max_frames: int = 16) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.num_queries = int(num_queries)
+        self.no_prompt = nn.Parameter(torch.empty(dim))
+        self.prompt_to_queries = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, num_queries * dim),
+        )
+        self.frame_gate = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, num_queries), nn.Sigmoid())
+        self.cond_prev_embed = nn.Embedding(max_frames + 1, dim)
+        self.cond_next_embed = nn.Embedding(max_frames + 1, dim)
+        nn.init.trunc_normal_(self.no_prompt, std=0.02)
+        nn.init.trunc_normal_(self.prompt_to_queries[-1].weight, std=0.01)
+        nn.init.zeros_(self.prompt_to_queries[-1].bias)
+
+    def forward(
+        self,
+        image_tokens: torch.Tensor,
+        mask_tokens: torch.Tensor,
+        mask_visibility: torch.Tensor,
+        condition_prev: torch.Tensor | None = None,
+        condition_next: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        b, t, n, d = mask_tokens.shape
+        visible = mask_visibility.to(device=mask_tokens.device).bool()
+        visible_weights = visible.reshape(b, t, 1, 1).to(dtype=mask_tokens.dtype)
+        denom = (visible_weights.sum(dim=(1, 2, 3), keepdim=False).reshape(b, 1) * float(n)).clamp_min(1.0)
+        prompt_proto = (mask_tokens * visible_weights).sum(dim=(1, 2)) / denom
+        has_prompt = visible.any(dim=1)
+        no_prompt = self.no_prompt.reshape(1, d).expand(b, d)
+        prompt_proto = torch.where(has_prompt.reshape(b, 1), prompt_proto, no_prompt)
+
+        if condition_prev is not None and condition_next is not None:
+            max_idx = self.cond_prev_embed.num_embeddings - 1
+            cp = condition_prev.long().clamp(0, max_idx)
+            cn = condition_next.long().clamp(0, max_idx)
+            cond = self.cond_prev_embed(cp) + self.cond_next_embed(cn)
+        else:
+            cond = mask_tokens.new_zeros(b, t, d)
+
+        frame_context = image_tokens.mean(dim=2) + cond
+        frame_gate = self.frame_gate(frame_context).unsqueeze(-1)
+        base_bias = self.prompt_to_queries(prompt_proto).reshape(b, 1, self.num_queries, d)
+        query_bias = frame_gate * base_bias
+        prompt_context = base_bias.expand(b, t, self.num_queries, d) + cond.unsqueeze(2)
+        prompt_context = torch.cat([prompt_proto.reshape(b, 1, 1, d).expand(b, t, 1, d), prompt_context], dim=2)
+        aux = {
+            "prompt_query_bias_norm": query_bias.detach().norm(dim=-1).mean(),
+            "prompt_context_norm": prompt_context.detach().norm(dim=-1).mean(),
+            "has_visible_prompt_ratio": has_prompt.float().mean().detach(),
+            "no_prompt_used_ratio": (~has_prompt).float().mean().detach(),
+        }
+        return query_bias, prompt_context, aux
+
+
 class ProposalDecoder(nn.Module):
     def __init__(self, dim: int = 128, pixel_dim: int = 128, num_queries: int = 20, num_layers: int = 2, heads: int = 4, max_frames: int = 16) -> None:
         super().__init__()
         self.num_queries = int(num_queries)
         self.query_embed = nn.Parameter(torch.empty(num_queries, dim))
         self.frame_cond = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
+        self.temporal_context = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, dim))
         self.temporal_embed = nn.Embedding(max_frames, dim)
         self.cond_prev_embed = nn.Embedding(max_frames + 1, dim)
         self.cond_next_embed = nn.Embedding(max_frames + 1, dim)
+        self.prompt_cross = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.prompt_norm = nn.LayerNorm(dim)
+        self.prompt_film = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim * 2))
         self.layers = nn.ModuleList(
             [
                 nn.ModuleDict(
@@ -324,20 +396,35 @@ class ProposalDecoder(nn.Module):
         self.mask_embed = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, pixel_dim))
         self.quality = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, dim // 2), nn.GELU(), nn.Linear(dim // 2, 1))
         nn.init.trunc_normal_(self.query_embed, std=0.02)
+        nn.init.trunc_normal_(self.frame_cond[-1].weight, std=0.02)
+        nn.init.zeros_(self.frame_cond[-1].bias)
+        nn.init.trunc_normal_(self.temporal_context[-1].weight, std=0.02)
+        nn.init.zeros_(self.temporal_context[-1].bias)
+        nn.init.trunc_normal_(self.mask_embed[-1].weight, std=0.02)
+        nn.init.zeros_(self.mask_embed[-1].bias)
+        nn.init.trunc_normal_(self.quality[-1].weight, std=0.02)
         nn.init.constant_(self.quality[-1].bias, -2.0)
+        nn.init.zeros_(self.prompt_film[-1].weight)
+        nn.init.zeros_(self.prompt_film[-1].bias)
 
     def forward(
         self,
         x: torch.Tensor,
         m: torch.Tensor,
         pixel_embedding: torch.Tensor,
+        prompt_query_bias: torch.Tensor | None = None,
+        prompt_context: torch.Tensor | None = None,
+        use_prompt_gate: bool = False,
         condition_prev: torch.Tensor | None = None,
         condition_next: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         b, t, n, d = x.shape
-        context = torch.cat([x, m], dim=2).reshape(b, t * n * 2, d)
+        frame_context = torch.cat([x, m], dim=2)
+        temporal_summary = self.temporal_context(frame_context.mean(dim=2))
         pooled = x.mean(dim=2)
         q = self.query_embed.reshape(1, 1, self.num_queries, d) + self.frame_cond(pooled).unsqueeze(2)
+        if prompt_query_bias is not None:
+            q = q + prompt_query_bias
         time = torch.arange(t, device=x.device).clamp_max(self.temporal_embed.num_embeddings - 1)
         q = q + self.temporal_embed(time).reshape(1, t, 1, d)
         if condition_prev is not None and condition_next is not None:
@@ -346,10 +433,20 @@ class ProposalDecoder(nn.Module):
             cn = condition_next.long().clamp(0, max_idx)
             q = q + self.cond_prev_embed(cp).unsqueeze(2) + self.cond_next_embed(cn).unsqueeze(2)
         q = q.reshape(b * t, self.num_queries, d)
-        ctx = context.repeat_interleave(t, dim=0)
+        local_ctx = frame_context.reshape(b * t, 2 * n, d)
+        temporal_ctx = temporal_summary[:, None].expand(b, t, t, d).reshape(b * t, t, d)
+        ctx = torch.cat([local_ctx, temporal_ctx], dim=1)
+        prompt_ctx = None
+        if use_prompt_gate and prompt_context is not None:
+            prompt_ctx = prompt_context.reshape(b * t, prompt_context.shape[2], d)
+            pooled_prompt = prompt_context.mean(dim=2).reshape(b * t, d)
+            gamma, beta = self.prompt_film(pooled_prompt).chunk(2, dim=-1)
+            q = q * (1.0 + 0.1 * torch.tanh(gamma).unsqueeze(1)) + 0.1 * beta.unsqueeze(1)
         for layer in self.layers:
             q = q + layer["self"](layer["ln1"](q), layer["ln1"](q), layer["ln1"](q), need_weights=False)[0]
             q = q + layer["cross"](layer["ln2"](q), ctx, ctx, need_weights=False)[0]
+            if prompt_ctx is not None:
+                q = q + self.prompt_cross(self.prompt_norm(q), prompt_ctx, prompt_ctx, need_weights=False)[0]
             q = q + layer["mlp"](layer["ln3"](q))
         q = q.reshape(b, t, self.num_queries, d)
         mask_embed = self.mask_embed(q)
@@ -357,6 +454,220 @@ class ProposalDecoder(nn.Module):
         pe = pixel_embedding
         logits = torch.einsum("btkd,btdhw->btkhw", mask_embed, pe) / math.sqrt(pe.shape[2])
         return {"proposal_logits": logits, "quality_scores": scores, "query_features": q}
+
+
+class ProposalCascadeRefiner(nn.Module):
+    """Light proposal-conditioned refinement without adding an explicit edge head."""
+
+    def __init__(self, dim: int = 128, pixel_dim: int = 128) -> None:
+        super().__init__()
+        self.query_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, pixel_dim), nn.GELU(), nn.Linear(pixel_dim, pixel_dim))
+        self.pixel_refine = nn.Sequential(
+            DepthwiseSeparableConv(pixel_dim, pixel_dim),
+            nn.Conv2d(pixel_dim, pixel_dim, 1),
+            nn.GELU(),
+        )
+        self.mask_refine = nn.Sequential(
+            nn.Conv2d(1, 8, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(8, 1, 3, padding=1),
+        )
+        nn.init.zeros_(self.query_proj[-1].bias)
+        nn.init.zeros_(self.mask_refine[-1].weight)
+        nn.init.zeros_(self.mask_refine[-1].bias)
+
+    def forward(self, logits: torch.Tensor, pixel_embedding: torch.Tensor, query_features: torch.Tensor) -> torch.Tensor:
+        b, t, k, h, w = logits.shape
+        bt = b * t
+        refined_pixel = self.pixel_refine(pixel_embedding.reshape(bt, pixel_embedding.shape[2], h, w))
+        refined_pixel = refined_pixel.reshape(b, t, refined_pixel.shape[1], h, w)
+        query = self.query_proj(query_features)
+        delta = torch.einsum("btkd,btdhw->btkhw", query, refined_pixel) / math.sqrt(refined_pixel.shape[2])
+        mask_delta = self.mask_refine(torch.sigmoid(logits).reshape(b * t * k, 1, h, w)).reshape(b, t, k, h, w)
+        return logits + 0.25 * delta + mask_delta
+
+
+class FullResolutionProposalRefiner(nn.Module):
+    """Refine every proposal at evaluation resolution before selection/loss."""
+
+    def __init__(self, dim: int = 128, f1_channels: int = 32, ref_dim: int = 32) -> None:
+        super().__init__()
+        self.ref_dim = int(ref_dim)
+        self.shallow = nn.Sequential(
+            nn.Conv2d(f1_channels, ref_dim, 3, padding=1, bias=False),
+            _group_norm(ref_dim),
+            nn.GELU(),
+        )
+        self.query_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, ref_dim), nn.GELU(), nn.Linear(ref_dim, ref_dim))
+        self.local_refine = nn.Sequential(
+            nn.Conv2d(ref_dim + 4, ref_dim, 3, padding=1),
+            _group_norm(ref_dim),
+            nn.GELU(),
+            nn.Conv2d(ref_dim, 1, 3, padding=1),
+        )
+        nn.init.trunc_normal_(self.query_proj[-1].weight, std=0.01)
+        nn.init.zeros_(self.query_proj[-1].bias)
+        nn.init.zeros_(self.local_refine[-1].weight)
+        nn.init.zeros_(self.local_refine[-1].bias)
+
+    def forward(
+        self,
+        lowres_logits: torch.Tensor,
+        query_features: torch.Tensor,
+        shallow_feature: torch.Tensor,
+        images: torch.Tensor,
+    ) -> torch.Tensor:
+        b, t, k = lowres_logits.shape[:3]
+        h, w = images.shape[-2:]
+        up = F.interpolate(
+            lowres_logits.reshape(b * t * k, 1, lowres_logits.shape[-2], lowres_logits.shape[-1]),
+            size=(h, w),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(b, t, k, h, w)
+        shallow = self.shallow(shallow_feature).reshape(b, t, self.ref_dim, h, w)
+        query = self.query_proj(query_features)
+        query_delta = torch.einsum("btkd,btdhw->btkhw", query, shallow) / math.sqrt(float(self.ref_dim))
+        prob = torch.sigmoid(up)
+        boundary = _soft_boundary(prob.reshape(b * t * k, 1, h, w)).reshape(b, t, k, h, w)
+        image = images.unsqueeze(2).expand(b, t, k, images.shape[2], h, w).reshape(b * t * k, images.shape[2], h, w)
+        shallow_rep = shallow.unsqueeze(2).expand(b, t, k, self.ref_dim, h, w).reshape(b * t * k, self.ref_dim, h, w)
+        local_ctx = torch.cat(
+            [
+                shallow_rep,
+                image,
+                up.reshape(b * t * k, 1, h, w),
+                prob.reshape(b * t * k, 1, h, w),
+                boundary.reshape(b * t * k, 1, h, w),
+            ],
+            dim=1,
+        )
+        local_delta = self.local_refine(local_ctx).reshape(b, t, k, h, w)
+        return up + 0.25 * torch.tanh(query_delta) + local_delta
+
+
+class FullResolutionProposalHead(nn.Module):
+    """Direct full-resolution dynamic mask head for K proposal generation.
+
+    This is intentionally closer to a compact U-Net mask head than a post-hoc
+    upsampler: full-resolution shallow features carry boundaries, while the
+    transformer query selects the proposed object hypothesis.
+    """
+
+    def __init__(self, dim: int = 128, f1_channels: int = 32, lowres_channels: int = 128, ref_dim: int = 48) -> None:
+        super().__init__()
+        self.ref_dim = int(ref_dim)
+        self.shallow = nn.Sequential(
+            nn.Conv2d(f1_channels, ref_dim, 3, padding=1, bias=False),
+            _group_norm(ref_dim),
+            nn.GELU(),
+            DepthwiseSeparableConv(ref_dim, ref_dim),
+        )
+        self.lowres_proj = nn.Sequential(
+            nn.Conv2d(lowres_channels, ref_dim, 1, bias=False),
+            _group_norm(ref_dim),
+            nn.GELU(),
+        )
+        self.image_proj = nn.Sequential(
+            nn.Conv2d(1, ref_dim, 3, padding=1, bias=False),
+            _group_norm(ref_dim),
+            nn.GELU(),
+        )
+        self.fuse = nn.Sequential(
+            DepthwiseSeparableConv(ref_dim, ref_dim),
+            nn.Conv2d(ref_dim, ref_dim, 1),
+            nn.GELU(),
+        )
+        self.query_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, ref_dim), nn.GELU(), nn.Linear(ref_dim, ref_dim))
+        self.local_refine = nn.Sequential(
+            nn.Conv2d(ref_dim + 3, ref_dim, 3, padding=1),
+            _group_norm(ref_dim),
+            nn.GELU(),
+            nn.Conv2d(ref_dim, 1, 3, padding=1),
+        )
+        self.lowres_scale = nn.Parameter(torch.tensor(0.5))
+        nn.init.trunc_normal_(self.query_proj[-1].weight, std=0.01)
+        nn.init.zeros_(self.query_proj[-1].bias)
+        nn.init.zeros_(self.local_refine[-1].weight)
+        nn.init.zeros_(self.local_refine[-1].bias)
+
+    def forward(
+        self,
+        lowres_logits: torch.Tensor,
+        lowres_pixel: torch.Tensor,
+        query_features: torch.Tensor,
+        shallow_feature: torch.Tensor,
+        images: torch.Tensor,
+    ) -> torch.Tensor:
+        b, t, k = lowres_logits.shape[:3]
+        h, w = images.shape[-2:]
+        lowres_prior = F.interpolate(
+            lowres_logits.reshape(b * t * k, 1, lowres_logits.shape[-2], lowres_logits.shape[-1]),
+            size=(h, w),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(b, t, k, h, w)
+
+        shallow = self.shallow(shallow_feature).reshape(b, t, self.ref_dim, h, w)
+        lowres_feat = lowres_pixel.reshape(b * t, lowres_pixel.shape[2], lowres_pixel.shape[-2], lowres_pixel.shape[-1])
+        lowres_feat = self.lowres_proj(lowres_feat)
+        lowres_feat = F.interpolate(lowres_feat, size=(h, w), mode="bilinear", align_corners=False)
+        lowres_feat = lowres_feat.reshape(b, t, self.ref_dim, h, w)
+        image_feat = self.image_proj(images.reshape(b * t, images.shape[2], h, w)).reshape(b, t, self.ref_dim, h, w)
+        fullres_pixel = self.fuse((shallow + lowres_feat + image_feat).reshape(b * t, self.ref_dim, h, w))
+        fullres_pixel = fullres_pixel.reshape(b, t, self.ref_dim, h, w)
+
+        query = self.query_proj(query_features)
+        dynamic_logits = torch.einsum("btkd,btdhw->btkhw", query, fullres_pixel) / math.sqrt(float(self.ref_dim))
+        prob = torch.sigmoid(lowres_prior)
+        boundary = _soft_boundary(prob.reshape(b * t * k, 1, h, w)).reshape(b, t, k, h, w)
+        pixel_rep = fullres_pixel.unsqueeze(2).expand(b, t, k, self.ref_dim, h, w).reshape(b * t * k, self.ref_dim, h, w)
+        local_ctx = torch.cat(
+            [
+                pixel_rep,
+                lowres_prior.reshape(b * t * k, 1, h, w),
+                prob.reshape(b * t * k, 1, h, w),
+                boundary.reshape(b * t * k, 1, h, w),
+            ],
+            dim=1,
+        )
+        local_delta = self.local_refine(local_ctx).reshape(b, t, k, h, w)
+        return dynamic_logits + self.lowres_scale * lowres_prior + local_delta
+
+
+class DeterministicMaskRefiner(nn.Module):
+    """Small diffusion-like iterative denoiser for proposal logits."""
+
+    def __init__(self, dim: int = 128, pixel_dim: int = 128, steps: int = 3) -> None:
+        super().__init__()
+        self.steps = int(steps)
+        self.query_proj = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, pixel_dim), nn.GELU(), nn.Linear(pixel_dim, pixel_dim))
+        self.step_embed = nn.Embedding(max(self.steps, 1), pixel_dim)
+        self.update = nn.Sequential(
+            nn.Conv2d(pixel_dim + 3, pixel_dim, 3, padding=1),
+            _group_norm(pixel_dim),
+            nn.GELU(),
+            nn.Conv2d(pixel_dim, 1, 3, padding=1),
+        )
+        nn.init.zeros_(self.update[-1].weight)
+        nn.init.zeros_(self.update[-1].bias)
+
+    def forward(self, logits: torch.Tensor, pixel_embedding: torch.Tensor, query_features: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        b, t, k, h, w = logits.shape
+        query = self.query_proj(query_features)
+        query_map = torch.einsum("btkd,btdhw->btkhw", query, pixel_embedding) / math.sqrt(pixel_embedding.shape[2])
+        current = logits
+        steps: list[torch.Tensor] = []
+        for si in range(self.steps):
+            prob = torch.sigmoid(current)
+            boundary = _soft_boundary(prob.reshape(b * t * k, 1, h, w)).reshape(b, t, k, h, w)
+            step = self.step_embed.weight[si].reshape(1, 1, 1, -1, 1, 1)
+            pixel = pixel_embedding.unsqueeze(2).expand(b, t, k, pixel_embedding.shape[2], h, w) + step
+            context = torch.cat([pixel.reshape(b * t * k, pixel.shape[3], h, w), current.reshape(b * t * k, 1, h, w), prob.reshape(b * t * k, 1, h, w), boundary.reshape(b * t * k, 1, h, w)], dim=1)
+            delta = self.update(context).reshape(b, t, k, h, w)
+            current = current + 0.5 * torch.tanh(delta) + 0.1 * query_map
+            steps.append(current)
+        return current, steps
 
 
 class GeoMaskFormer(nn.Module):
@@ -376,11 +687,18 @@ class GeoMaskFormer(nn.Module):
         self.decoder_layers = int(_cfg_get(method_cfg, "decoder_layers", 2))
         self.max_frames = int(_cfg_get(method_cfg, "max_frames", 16))
         self.stage = str(_cfg_get(method_cfg, "training_stage", "stage2")).lower()
+        self.architecture_variant = str(_cfg_get(method_cfg, "architecture_variant", "baseline")).lower()
         self.protocol_cfg = _cfg_section(method_cfg, "protocol")
         self.topk_inference = str(_cfg_get(method_cfg, "inference", "top1")).lower()
         self.image_token_dropout = float(_cfg_get(method_cfg, "image_token_dropout", 0.05))
         self.mask_token_dropout = float(_cfg_get(method_cfg, "mask_token_dropout", 0.10))
         self.condition_dropout = float(_cfg_get(method_cfg, "condition_dropout", 0.10))
+        self.mask_prompt_noise_prob = float(_cfg_get(method_cfg, "mask_prompt_noise_prob", 0.05))
+        self.mask_prompt_block_prob = float(_cfg_get(method_cfg, "mask_prompt_block_prob", 0.25))
+        self.mask_prompt_block_ratio = float(_cfg_get(method_cfg, "mask_prompt_block_ratio", 0.20))
+        self.full_res_refine = bool(_cfg_get(method_cfg, "full_res_refine", True))
+        self.full_res_refine_dim = int(_cfg_get(method_cfg, "full_res_refine_dim", 32))
+        self.full_res_head_dim = int(_cfg_get(method_cfg, "full_res_head_dim", max(32, self.full_res_refine_dim)))
         self.visible_reconstruction_weight = float(
             _cfg_get(_cfg_section(method_cfg, "loss"), "visible_reconstruction", 0.0)
         )
@@ -390,6 +708,7 @@ class GeoMaskFormer(nn.Module):
             max_frames=self.max_frames,
             use_geometry=bool(_cfg_get(method_cfg, "use_geometry_tokenizer", True)),
         )
+        self.prompt_query_adapter = PromptQueryAdapter(self.dim, num_queries=self.num_queries, max_frames=self.max_frames)
         self.transformer = DualStreamFactorizedTransformer(
             self.dim,
             depth=self.depth,
@@ -399,6 +718,21 @@ class GeoMaskFormer(nn.Module):
         )
         c = self.image_tokenizer.out_channels
         self.pixel_decoder = PixelDecoder(self.dim, c["f2"], c["f4"], c["f8"], out_dim=self.dim)
+        self.full_res_refiner = (
+            FullResolutionProposalRefiner(self.dim, f1_channels=c["f1"], ref_dim=self.full_res_refine_dim)
+            if self.full_res_refine and self.architecture_variant not in {"fullres_proposal", "fullres_cascade"}
+            else None
+        )
+        self.full_res_proposal_head = (
+            FullResolutionProposalHead(
+                self.dim,
+                f1_channels=c["f1"],
+                lowres_channels=self.dim,
+                ref_dim=self.full_res_head_dim,
+            )
+            if self.architecture_variant in {"fullres_proposal", "fullres_cascade"}
+            else None
+        )
         self.proposal_decoder = ProposalDecoder(
             self.dim,
             pixel_dim=self.dim,
@@ -407,6 +741,16 @@ class GeoMaskFormer(nn.Module):
             heads=self.heads,
             max_frames=self.max_frames,
         )
+        if self.architecture_variant in {"cascade_refine", "fullres_cascade"}:
+            self.variant_refiner = ProposalCascadeRefiner(self.dim, pixel_dim=self.dim)
+        elif self.architecture_variant == "diffusion_refine":
+            self.variant_refiner = DeterministicMaskRefiner(
+                self.dim,
+                pixel_dim=self.dim,
+                steps=int(_cfg_get(method_cfg, "diffusion_refine_steps", 3)),
+            )
+        else:
+            self.variant_refiner = None
         self.backbone_name = "geomaskformer"
         self.base_dim = self.base_channels
         self.value_dim = self.dim
@@ -451,7 +795,7 @@ class GeoMaskFormer(nn.Module):
                             count = min(2, idx.numel())
                             chosen = idx[torch.randperm(idx.numel(), device=device)[:count]]
                             mask_visibility[bi, chosen] = 1
-            elif self.stage == "stage1":
+            elif self.stage == "stage1" or not self.training:
                 mask_visibility.zero_()
             else:
                 mask_visibility = valid.long()
@@ -472,6 +816,53 @@ class GeoMaskFormer(nn.Module):
                 main_loss_visibility[empty] = loss_visibility[empty]
             loss_visibility = main_loss_visibility
         return mask_visibility, loss_visibility
+
+    def _corrupt_visible_prompt_masks(
+        self, masks: torch.Tensor, mask_visibility: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        device = masks.device
+        aux = {
+            "mask_prompt_pixel_corruption_ratio": torch.zeros((), device=device),
+            "mask_prompt_block_corruption_ratio": torch.zeros((), device=device),
+        }
+        if not self.training:
+            return masks, aux
+        visible = mask_visibility.reshape(mask_visibility.shape[0], mask_visibility.shape[1], 1, 1, 1) > 0
+        visible_pixels = visible.expand_as(masks)
+        if not visible_pixels.any():
+            return masks, aux
+
+        corrupted = masks.clone()
+        if self.mask_prompt_noise_prob > 0:
+            noise = (torch.rand_like(corrupted) < self.mask_prompt_noise_prob) & visible_pixels
+            random_bits = (torch.rand_like(corrupted) > 0.5).to(dtype=corrupted.dtype)
+            corrupted = torch.where(noise, random_bits, corrupted)
+            aux["mask_prompt_pixel_corruption_ratio"] = (
+                noise.float().sum() / visible_pixels.float().sum().clamp_min(1.0)
+            ).detach()
+
+        if self.mask_prompt_block_prob > 0 and self.mask_prompt_block_ratio > 0:
+            b, t, _, h, w = corrupted.shape
+            ratio = max(0.0, min(1.0, self.mask_prompt_block_ratio))
+            side = ratio**0.5
+            block_h = max(1, min(h, int(round(h * side))))
+            block_w = max(1, min(w, int(round(w * side))))
+            corrupted_frames = corrupted.new_zeros(())
+            visible_frames = (mask_visibility > 0).float().sum().clamp_min(1.0)
+            for bi in range(b):
+                for ti in range(t):
+                    if int(mask_visibility[bi, ti].item()) <= 0:
+                        continue
+                    if torch.rand((), device=device).item() >= self.mask_prompt_block_prob:
+                        continue
+                    top = int(torch.randint(0, max(1, h - block_h + 1), (1,), device=device).item())
+                    left = int(torch.randint(0, max(1, w - block_w + 1), (1,), device=device).item())
+                    fill_one = torch.rand((), device=device) > 0.5
+                    fill = 1.0 if bool(fill_one.item()) else 0.0
+                    corrupted[bi, ti, :, top : top + block_h, left : left + block_w] = fill
+                    corrupted_frames = corrupted_frames + 1.0
+            aux["mask_prompt_block_corruption_ratio"] = (corrupted_frames / visible_frames).detach()
+        return corrupted.clamp(0.0, 1.0), aux
 
     def _apply_token_dropout(self, x: torch.Tensor, m: torch.Tensor, mask_visibility: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         aux: dict[str, torch.Tensor] = {}
@@ -508,18 +899,39 @@ class GeoMaskFormer(nn.Module):
         time = torch.arange(images.shape[1], device=images.device).clamp_max(self.max_frames - 1)
         x = x + spatial + self.mask_tokenizer.temporal_embed(time).reshape(1, images.shape[1], 1, self.dim)
         x = x + self.mask_tokenizer.modality_embed(torch.zeros((), dtype=torch.long, device=images.device)).reshape(1, 1, 1, self.dim)
-        m, mask_aux = self.mask_tokenizer(masks, mask_visibility, img["grid_size"])
+        prompt_masks, corruption_aux = self._corrupt_visible_prompt_masks(masks, mask_visibility)
+        m, mask_aux = self.mask_tokenizer(prompt_masks, mask_visibility, img["grid_size"])
         x, m, drop_aux = self._apply_token_dropout(x, m, mask_visibility)
         x, m, former_aux = self.transformer(x, m)
         pixel = self.pixel_decoder(x, img)
+        prompt_query_bias, prompt_context, prompt_aux = self.prompt_query_adapter(
+            x,
+            m,
+            mask_visibility,
+            condition_prev=mask_aux.get("condition_prev"),
+            condition_next=mask_aux.get("condition_next"),
+        )
         proposal = self.proposal_decoder(
             x,
             m,
             pixel,
+            prompt_query_bias=prompt_query_bias,
+            prompt_context=prompt_context,
+            use_prompt_gate=self.architecture_variant == "v2_prompt_gate",
             condition_prev=mask_aux.get("condition_prev"),
             condition_next=mask_aux.get("condition_next"),
         )
-        prop_logits = proposal["proposal_logits"]
+        lowres_prop_logits = proposal["proposal_logits"]
+        prop_logits = lowres_prop_logits
+        proposal_steps: list[torch.Tensor] = []
+        if self.architecture_variant in {"cascade_refine", "fullres_cascade"} and self.variant_refiner is not None:
+            prop_logits = self.variant_refiner(prop_logits, pixel, proposal["query_features"])
+        elif self.architecture_variant == "diffusion_refine" and self.variant_refiner is not None:
+            prop_logits, proposal_steps = self.variant_refiner(prop_logits, pixel, proposal["query_features"])
+        if self.full_res_proposal_head is not None:
+            prop_logits = self.full_res_proposal_head(prop_logits, pixel, proposal["query_features"], img["f1"], images)
+        elif self.full_res_refiner is not None:
+            prop_logits = self.full_res_refiner(prop_logits, proposal["query_features"], img["f1"], images)
         scores = proposal["quality_scores"]
         if self.topk_inference == "top3":
             topk = min(3, self.num_queries)
@@ -527,35 +939,28 @@ class GeoMaskFormer(nn.Module):
             gather_idx = top_idx[..., None, None].expand(-1, -1, -1, prop_logits.shape[-2], prop_logits.shape[-1])
             top_logits = torch.gather(prop_logits, 2, gather_idx)
             weights = torch.softmax(top_scores, dim=2)[..., None, None]
-            fg_low = torch.logit((torch.sigmoid(top_logits) * weights).sum(dim=2).clamp(1.0e-4, 1.0 - 1.0e-4))
+            fg = torch.logit((torch.sigmoid(top_logits) * weights).sum(dim=2).clamp(1.0e-4, 1.0 - 1.0e-4))
             best_idx = top_idx[..., 0]
         else:
             best_idx = scores.argmax(dim=2)
             gather_idx = best_idx[..., None, None, None].expand(-1, -1, 1, prop_logits.shape[-2], prop_logits.shape[-1])
-            fg_low = torch.gather(prop_logits, 2, gather_idx).squeeze(2)
-        fg = F.interpolate(
-            fg_low.reshape(images.shape[0] * images.shape[1], 1, fg_low.shape[-2], fg_low.shape[-1]),
-            size=images.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
-        ).reshape(images.shape[0], images.shape[1], images.shape[-2], images.shape[-1])
+            fg = torch.gather(prop_logits, 2, gather_idx).squeeze(2)
         logits = torch.stack([-fg, fg], dim=2)
         out: dict[str, torch.Tensor] = {
             "logits": logits,
-            "proposal_logits": F.interpolate(
-                prop_logits.reshape(images.shape[0] * images.shape[1] * self.num_queries, 1, prop_logits.shape[-2], prop_logits.shape[-1]),
-                size=images.shape[-2:],
-                mode="bilinear",
-                align_corners=False,
-            ).reshape(images.shape[0], images.shape[1], self.num_queries, images.shape[-2], images.shape[-1]),
-            "proposal_logits_lowres": prop_logits,
+            "proposal_logits": prop_logits,
+            "proposal_logits_lowres": lowres_prop_logits,
+            "proposal_logits_steps_lowres": proposal_steps,
             "quality_scores": scores,
             "mask_visibility": mask_visibility,
             "loss_visibility": loss_visibility,
             "geomaskformer_aux": {
                 **mask_aux,
+                **corruption_aux,
                 **drop_aux,
                 **former_aux,
+                **prompt_aux,
+                "architecture_variant": self.architecture_variant,
                 "best_query": best_idx.detach(),
                 "quality_prob_mean": torch.sigmoid(scores).mean().detach(),
                 "active_query_count": best_idx.flatten().unique().numel(),
@@ -567,6 +972,12 @@ class GeoMaskFormer(nn.Module):
                 else torch.zeros((), device=images.device),
             },
             "num_objects": [1] * images.shape[0],
+            "geomaskformer_mask_prompt_pixel_corruption_ratio": corruption_aux[
+                "mask_prompt_pixel_corruption_ratio"
+            ],
+            "geomaskformer_mask_prompt_block_corruption_ratio": corruption_aux[
+                "mask_prompt_block_corruption_ratio"
+            ],
         }
         for ti in range(images.shape[1]):
             out[f"logits_{ti}"] = logits[:, ti]

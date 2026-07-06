@@ -23,6 +23,11 @@ model:
     num_queries: 20
     decoder_layers: 2
     max_frames: 16
+    architecture_variant: "baseline"
+    diffusion_refine_steps: 3
+    full_res_refine: true
+    full_res_refine_dim: 32
+    full_res_head_dim: 48
     use_geometry_tokenizer: true
     gated_image_from_mask: true
     inference: "top1"
@@ -31,6 +36,9 @@ model:
     image_token_dropout: 0.05
     mask_token_dropout: 0.10
     condition_dropout: 0.10
+    mask_prompt_noise_prob: 0.05
+    mask_prompt_block_prob: 0.25
+    mask_prompt_block_ratio: 0.20
     protocol:
       no_mask: 0.50
       first_frame: 0.25
@@ -39,7 +47,23 @@ model:
       mask: 1.0
       boundary: 0.2
       score: 0.5
+      ranking: 0.1
+      refinement: 0.1
       temporal: 0.03
-      visible_reconstruction: 0.0
+      diversity: 0.01
+      score_warmup_iters: 500
+      ranking_warmup_iters: 500
+      refinement_warmup_iters: 500
+      diversity_warmup_iters: 300
+      visible_reconstruction: 0.05
       topk: 4
       boundary_kernel: 5
+
+evaluation:
+  postprocess:
+    enabled: true
+    largest_component: true
+    fill_holes: true
+    remove_small_objects: true
+    binary_closing: false
+    min_size: 16

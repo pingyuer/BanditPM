@@ -4,6 +4,11 @@ from geomaskformer.geomaskformer import (
     ImageTokenizer,
     MaskTokenizer,
     PixelDecoder,
+    PromptQueryAdapter,
+    DeterministicMaskRefiner,
+    FullResolutionProposalHead,
+    FullResolutionProposalRefiner,
+    ProposalCascadeRefiner,
     ProposalDecoder,
 )
 
@@ -13,5 +18,10 @@ __all__ = [
     "ImageTokenizer",
     "MaskTokenizer",
     "PixelDecoder",
+    "PromptQueryAdapter",
+    "DeterministicMaskRefiner",
+    "FullResolutionProposalHead",
+    "FullResolutionProposalRefiner",
+    "ProposalCascadeRefiner",
     "ProposalDecoder",
 ]

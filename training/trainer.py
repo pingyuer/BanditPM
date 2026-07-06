@@ -362,22 +362,32 @@ class Trainer:
         model = self.model_without_ddp
         image = self._count_module_parameters(getattr(model, "image_tokenizer", None))
         mask = self._count_module_parameters(getattr(model, "mask_tokenizer", None))
+        prompt = self._count_module_parameters(getattr(model, "prompt_query_adapter", None))
         transformer = self._count_module_parameters(getattr(model, "transformer", None))
         pixel = self._count_module_parameters(getattr(model, "pixel_decoder", None))
         proposal_module = getattr(model, "proposal_decoder", None)
         quality = self._count_module_parameters(getattr(proposal_module, "quality", None))
         proposal_total = self._count_module_parameters(proposal_module)
+        full_res_refiner = self._count_module_parameters(getattr(model, "full_res_refiner", None))
+        full_res_head = self._count_module_parameters(getattr(model, "full_res_proposal_head", None))
+        variant_refiner = self._count_module_parameters(getattr(model, "variant_refiner", None))
         proposal_without_quality = max(proposal_total - quality, 0)
         total = self._count_module_parameters(model)
-        classified = image + mask + transformer + pixel + proposal_total
+        classified = image + mask + prompt + transformer + pixel + proposal_total + full_res_refiner + full_res_head + variant_refiner
         unclassified = max(total - classified, 0)
         return {
             "model/params_m_total": total / 1.0e6,
             "model/params_m_image_tokenizer": image / 1.0e6,
             "model/params_m_mask_tokenizer": mask / 1.0e6,
+            "model/params_m_prompt_query_adapter": prompt / 1.0e6,
             "model/params_m_dual_stream_transformer": transformer / 1.0e6,
             "model/params_m_pixel_decoder": pixel / 1.0e6,
-            "model/params_m_proposal_decoder": proposal_without_quality / 1.0e6,
+            "model/params_m_proposal_decoder": (
+                proposal_without_quality + full_res_refiner + full_res_head + variant_refiner
+            ) / 1.0e6,
+            "model/params_m_full_res_refiner": full_res_refiner / 1.0e6,
+            "model/params_m_full_res_proposal_head": full_res_head / 1.0e6,
+            "model/params_m_variant_refiner": variant_refiner / 1.0e6,
             "model/params_m_quality_head": quality / 1.0e6,
             "model/params_m_unclassified": unclassified / 1.0e6,
             "debug/unclassified_parameter_count": float(unclassified),
@@ -1016,6 +1026,7 @@ class Trainer:
                     ("lambda_geomaskformer_score", "raw_geomaskformer_score", "loss_quality"),
                     ("lambda_geomaskformer_boundary", "raw_geomaskformer_boundary", "loss_boundary"),
                     ("lambda_geomaskformer_temporal", "raw_geomaskformer_temporal", "loss_temporal"),
+                    ("lambda_geomaskformer_diversity", "raw_geomaskformer_diversity", "loss_diversity"),
                     (
                         "lambda_geomaskformer_visible_reconstruction",
                         "raw_geomaskformer_visible_reconstruction",
@@ -1031,10 +1042,18 @@ class Trainer:
                 for raw_key, log_key in (
                     ("geomaskformer/proposal_selected_dice", "proposal/selected_dice"),
                     ("geomaskformer/proposal_oracle_best_dice", "proposal/oracle_best_dice"),
+                    ("geomaskformer/proposal_oracle_top5_best_dice", "proposal/oracle_top5_best_dice"),
+                    ("geomaskformer/proposal_oracle_top5_mean_dice", "proposal/oracle_top5_mean_dice"),
+                    ("geomaskformer/proposal_top5_cover_rate_0p85", "proposal/top5_cover_rate_0p85"),
+                    ("geomaskformer/proposal_top5_cover_rate_0p90", "proposal/top5_cover_rate_0p90"),
+                    ("geomaskformer/score_warmup_scale", "loss/score_warmup_scale"),
+                    ("geomaskformer/diversity_warmup_scale", "loss/diversity_warmup_scale"),
                     ("geomaskformer/proposal_selection_gap", "proposal/selection_gap"),
                     ("geomaskformer/proposal_score_dice_rank_corr", "proposal/score_dice_rank_corr"),
                     ("geomaskformer/proposal_active_query_count", "proposal/active_query_count"),
                     ("geomaskformer/proposal_query_usage_entropy", "proposal/query_usage_entropy"),
+                    ("geomaskformer/mask_prompt_pixel_corruption_ratio", "protocol/mask_prompt_pixel_corruption_ratio"),
+                    ("geomaskformer/mask_prompt_block_corruption_ratio", "protocol/mask_prompt_block_corruption_ratio"),
                 ):
                     value = losses.get(raw_key)
                     if torch.is_tensor(value):
@@ -2048,9 +2067,16 @@ class Trainer:
             "geomaskformer_condition_distance_6plus_gain_count": 0.0,
             "geomaskformer_condition_gain_vs_nomask_sum": 0.0,
             "geomaskformer_condition_gain_vs_nomask_count": 0.0,
+            "geomaskformer_prompt_logit_sensitivity_sum": 0.0,
+            "geomaskformer_prompt_proposal_sensitivity_sum": 0.0,
+            "geomaskformer_prompt_sensitivity_count": 0.0,
             "geomaskformer_proposal_selected_dice_sum": 0.0,
             "geomaskformer_proposal_oracle_best_dice_sum": 0.0,
             "geomaskformer_proposal_oracle_topk_mean_dice_sum": 0.0,
+            "geomaskformer_proposal_oracle_top5_best_dice_sum": 0.0,
+            "geomaskformer_proposal_oracle_top5_mean_dice_sum": 0.0,
+            "geomaskformer_proposal_top5_cover_0p85_sum": 0.0,
+            "geomaskformer_proposal_top5_cover_0p90_sum": 0.0,
             "geomaskformer_proposal_selection_gap_sum": 0.0,
             "geomaskformer_proposal_score_dice_rank_corr_sum": 0.0,
             "geomaskformer_proposal_count": 0.0,
@@ -2058,6 +2084,8 @@ class Trainer:
             "geomaskformer_empty_prediction_count": 0.0,
             "geomaskformer_invalid_surface_case_count": 0.0,
             "geomaskformer_visibility_overlap_violation_count": 0.0,
+            "geomaskformer_temporal_dice_ge_threshold_count": 0.0,
+            "geomaskformer_temporal_dice_threshold_frame_count": 0.0,
             "gate_mean_sum": 0.0,
             "residual_abs_mean_sum": 0.0,
             "memory_update_rate_sum": 0.0,
@@ -2250,6 +2278,16 @@ class Trainer:
     ) -> None:
         if not self._is_geomaskformer_model():
             return
+        if math.isfinite(float(dice_t)):
+            threshold = float(
+                self.cfg.get("evaluation", {}).get(
+                    "geomaskformer_temporal_dice_threshold",
+                    self.cfg.get("evaluation", {}).get("temporal_dice_threshold", 0.8),
+                )
+            )
+            metric_totals["geomaskformer_temporal_dice_threshold_frame_count"] += 1.0
+            if float(dice_t) >= threshold:
+                metric_totals["geomaskformer_temporal_dice_ge_threshold_count"] += 1.0
         proposals = out.get("proposal_logits")
         quality = out.get("quality_scores")
         if not (torch.is_tensor(proposals) and torch.is_tensor(quality)):
@@ -2279,9 +2317,17 @@ class Trainer:
         oracle = float(dice_tensor.max().item())
         topk = min(4, dice_tensor.numel())
         oracle_topk_mean = float(torch.topk(dice_tensor, k=max(topk, 1)).values.mean().item())
+        top5 = min(5, dice_tensor.numel())
+        top5_values = torch.topk(dice_tensor, k=max(top5, 1)).values
+        oracle_top5_best = float(top5_values.max().item())
+        oracle_top5_mean = float(top5_values.mean().item())
         metric_totals["geomaskformer_proposal_selected_dice_sum"] += selected
         metric_totals["geomaskformer_proposal_oracle_best_dice_sum"] += oracle
         metric_totals["geomaskformer_proposal_oracle_topk_mean_dice_sum"] += oracle_topk_mean
+        metric_totals["geomaskformer_proposal_oracle_top5_best_dice_sum"] += oracle_top5_best
+        metric_totals["geomaskformer_proposal_oracle_top5_mean_dice_sum"] += oracle_top5_mean
+        metric_totals["geomaskformer_proposal_top5_cover_0p85_sum"] += 1.0 if oracle_top5_best >= 0.85 else 0.0
+        metric_totals["geomaskformer_proposal_top5_cover_0p90_sum"] += 1.0 if oracle_top5_best >= 0.90 else 0.0
         metric_totals["geomaskformer_proposal_selection_gap_sum"] += oracle - selected
         corr = torch.zeros((), device=scores.device)
         if dice_tensor.numel() > 1:
@@ -3431,6 +3477,16 @@ class Trainer:
                                 metric_totals["geomaskformer_condition_conditioned_dice_count"] += 1.0
                                 metric_totals["geomaskformer_condition_gain_vs_nomask_sum"] += gain
                                 metric_totals["geomaskformer_condition_gain_vs_nomask_count"] += 1.0
+                                metric_totals["geomaskformer_prompt_logit_sensitivity_sum"] += float(
+                                    (cond_pred - pred).abs().mean().item()
+                                )
+                                cond_prop = conditioned_out.get("proposal_logits") if isinstance(conditioned_out, dict) else None
+                                base_prop = out.get("proposal_logits") if isinstance(out, dict) else None
+                                if torch.is_tensor(cond_prop) and torch.is_tensor(base_prop):
+                                    metric_totals["geomaskformer_prompt_proposal_sensitivity_sum"] += float(
+                                        (cond_prop[bi : bi + 1, ti] - base_prop[bi : bi + 1, ti]).abs().mean().item()
+                                    )
+                                metric_totals["geomaskformer_prompt_sensitivity_count"] += 1.0
                                 metric_totals["geomaskformer_condition_all_mask_invisible_dice_sum"] += float(dice_t)
                                 metric_totals["geomaskformer_condition_all_mask_invisible_dice_count"] += 1.0
                                 metric_totals[f"geomaskformer_condition_{condition_name}_dice_sum"] += float(cond_dice)
@@ -3984,6 +4040,22 @@ class Trainer:
                         "geomaskformer_proposal_oracle_topk_mean_dice_sum", 0.0
                     )
                     / proposal_count,
+                    "geomaskformer/proposal_oracle_top5_best_dice": reduced.get(
+                        "geomaskformer_proposal_oracle_top5_best_dice_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_oracle_top5_mean_dice": reduced.get(
+                        "geomaskformer_proposal_oracle_top5_mean_dice_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_top5_cover_rate_0p85": reduced.get(
+                        "geomaskformer_proposal_top5_cover_0p85_sum", 0.0
+                    )
+                    / proposal_count,
+                    "geomaskformer/proposal_top5_cover_rate_0p90": reduced.get(
+                        "geomaskformer_proposal_top5_cover_0p90_sum", 0.0
+                    )
+                    / proposal_count,
                     "geomaskformer/proposal_selection_gap": reduced.get(
                         "geomaskformer_proposal_selection_gap_sum", 0.0
                     )
@@ -4003,8 +4075,20 @@ class Trainer:
                     "geomaskformer/invalid_surface_case_count": reduced.get(
                         "geomaskformer_invalid_surface_case_count", 0.0
                     ),
+                    "geomaskformer/temporal_dice_ge_threshold_count": reduced.get(
+                        "geomaskformer_temporal_dice_ge_threshold_count", 0.0
+                    ),
+                    "geomaskformer/temporal_dice_threshold_frame_count": reduced.get(
+                        "geomaskformer_temporal_dice_threshold_frame_count", 0.0
+                    ),
                 }
             )
+            dice_threshold_frame_count = reduced.get("geomaskformer_temporal_dice_threshold_frame_count", 0.0)
+            if dice_threshold_frame_count > 0:
+                metrics["geomaskformer/temporal_dice_ge_threshold_ratio"] = (
+                    reduced.get("geomaskformer_temporal_dice_ge_threshold_count", 0.0)
+                    / dice_threshold_frame_count
+                )
             for condition in ("all_mask_invisible", "first_frame_visible", "random_keyframe_visible", "ed_es_visible"):
                 count_key = f"geomaskformer_condition_{condition}_dice_count"
                 if reduced.get(count_key, 0.0) > 0:
@@ -4021,6 +4105,15 @@ class Trainer:
                 metrics["geomaskformer/condition_gain_vs_nomask"] = mean(
                     "geomaskformer_condition_gain_vs_nomask_sum",
                     "geomaskformer_condition_gain_vs_nomask_count",
+                )
+            if reduced.get("geomaskformer_prompt_sensitivity_count", 0.0) > 0:
+                metrics["geomaskformer/prompt_logit_sensitivity"] = mean(
+                    "geomaskformer_prompt_logit_sensitivity_sum",
+                    "geomaskformer_prompt_sensitivity_count",
+                )
+                metrics["geomaskformer/prompt_proposal_sensitivity"] = mean(
+                    "geomaskformer_prompt_proposal_sensitivity_sum",
+                    "geomaskformer_prompt_sensitivity_count",
                 )
         protocol_name = self._eval_protocol_name()
         if protocol_name:
@@ -4445,12 +4538,22 @@ class Trainer:
             "temporal/frame_to_frame_disagreement": metrics.get("temporal_drift", 0.0),
             "temporal/area_second_difference_abs": metrics.get("area_smoothness", 0.0),
             "temporal/centroid_displacement": metrics.get("centroid_jitter", 0.0),
-            "temporal/metrics_on_dice_ge_threshold": 0.0,
+            "temporal/dice_ge_threshold_ratio": metrics.get("geomaskformer/temporal_dice_ge_threshold_ratio", 0.0),
+            "temporal/dice_ge_threshold_count": metrics.get("geomaskformer/temporal_dice_ge_threshold_count", 0.0),
+            "temporal/dice_threshold_frame_count": metrics.get(
+                "geomaskformer/temporal_dice_threshold_frame_count", 0.0
+            ),
             "condition/nomask_dice": metrics.get("geomaskformer/condition_nomask_dice", 0.0),
             "condition/conditioned_dice": metrics.get("geomaskformer/condition_conditioned_dice", 0.0),
+            "prompt/logit_sensitivity": metrics.get("geomaskformer/prompt_logit_sensitivity", 0.0),
+            "prompt/proposal_sensitivity": metrics.get("geomaskformer/prompt_proposal_sensitivity", 0.0),
             "proposal/selected_dice": metrics.get("geomaskformer/proposal_selected_dice", 0.0),
             "proposal/oracle_best_dice": metrics.get("geomaskformer/proposal_oracle_best_dice", 0.0),
             "proposal/oracle_top4_mean_dice": metrics.get("geomaskformer/proposal_oracle_top4_mean_dice", 0.0),
+            "proposal/oracle_top5_best_dice": metrics.get("geomaskformer/proposal_oracle_top5_best_dice", 0.0),
+            "proposal/oracle_top5_mean_dice": metrics.get("geomaskformer/proposal_oracle_top5_mean_dice", 0.0),
+            "proposal/top5_cover_rate_0p85": metrics.get("geomaskformer/proposal_top5_cover_rate_0p85", 0.0),
+            "proposal/top5_cover_rate_0p90": metrics.get("geomaskformer/proposal_top5_cover_rate_0p90", 0.0),
             "proposal/selection_gap": metrics.get("geomaskformer/proposal_selection_gap", 0.0),
             "proposal/score_dice_rank_corr": metrics.get("geomaskformer/proposal_score_dice_rank_corr", 0.0),
             "proposal/active_query_count": metrics.get("geomaskformer/proposal_active_query_count", 0.0),

@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -20,6 +21,8 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 
 class MLflowLogger:
     """Single MLflow access layer for experiment tracking."""
+
+    METRIC_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_\-\. /:]")
 
     PARAM_ROOTS = {
         "model",
@@ -211,6 +214,7 @@ class MLflowLogger:
             if scalar is None or not math.isfinite(scalar):
                 continue
             name = f"{prefix}/{key}" if prefix else str(key)
+            name = self._sanitize_metric_name(name)
             clean[name] = scalar
         if clean:
             def _metrics():
@@ -276,6 +280,8 @@ class MLflowLogger:
         self.log_metrics(out, step=step, prefix="train")
 
     def log_eval_summary(self, metrics: Mapping[str, Any], *, mode: str, step: int | None = None) -> None:
+        if self._is_geomaskformer_run():
+            return
         out = self._standard_eval_metrics(metrics)
         self.log_metrics(out, step=step, prefix=mode)
         functional = self._functional_anchor_metrics(metrics)
@@ -862,6 +868,19 @@ class MLflowLogger:
             return self.cfg.get(key, default)
         return default
 
+    def _is_geomaskformer_run(self) -> bool:
+        cfg = self.cfg
+        model_cfg = cfg.get("model", {}) if hasattr(cfg, "get") else {}
+        if isinstance(model_cfg, (DictConfig, ListConfig)):
+            model_name = str(model_cfg.get("name", ""))
+        elif isinstance(model_cfg, Mapping):
+            model_name = str(model_cfg.get("name", ""))
+        else:
+            model_name = ""
+        explicit_name = str(self._cfg_get("model_name", ""))
+        names = {model_name.lower(), explicit_name.lower()}
+        return bool(names & {"geomaskformer", "geo_maskformer", "mgt_maskformer"})
+
     def _log_json_artifact(self, payload: Mapping[str, Any], filename: str, *, artifact_path: str) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         path = self.run_dir / filename
@@ -987,6 +1006,10 @@ class MLflowLogger:
             return float(value)
         except Exception:
             return None
+
+    @staticmethod
+    def _sanitize_metric_name(name: str) -> str:
+        return MLflowLogger.METRIC_NAME_PATTERN.sub("_", str(name))
 
     @staticmethod
     def _write_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:

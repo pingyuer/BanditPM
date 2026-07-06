@@ -47,13 +47,13 @@ class MLflowLoggerTests(unittest.TestCase):
             logger = MLflowLogger(cfg, run_dir=tmp, enabled=True, main_process=True)
             logger.start_run()
             logger.log_config(OmegaConf.create({"model": {"name": "debug"}, "seed": 7}))
-            logger.log_metrics({"dice": 0.9, "bad": float("nan")}, step=3, prefix="val")
+            logger.log_metrics({"dice": 0.9, "bad": float("nan"), "proposal/top5_cover_rate@0.85": 1.0}, step=3, prefix="val")
             logger.mark_failed()
 
         self.assertIn(("tracking_uri", "http://test-mlflow-server:5000"), calls)
         self.assertIn(("experiment", "anchor_ode"), calls)
         self.assertIn(("start_run", {"run_id": "abc"}), calls)
-        self.assertIn(("metrics", {"val/dice": 0.9}, 3), calls)
+        self.assertIn(("metrics", {"val/dice": 0.9, "val/proposal/top5_cover_rate_0.85": 1.0}, 3), calls)
         self.assertIn(("end_run", "FAILED"), calls)
         self.assertTrue(any(call == ("artifact", "config.yaml", "configs") for call in calls))
         self.assertTrue(any(call == ("artifact", "config_resolved.yaml", "configs") for call in calls))
@@ -187,6 +187,38 @@ class MLflowLoggerTests(unittest.TestCase):
             [call for call in calls if call[0] == "artifact" and call[1] == "summary.json"],
             [("artifact", "summary.json", "eval")],
         )
+
+    def test_geomaskformer_evaluation_result_suppresses_standard_aliases(self):
+        calls = []
+        fake_mlflow = types.SimpleNamespace(
+            log_metrics=lambda metrics, step=None: calls.append(("metrics", metrics, step)),
+            log_artifact=lambda path, artifact_path=None: calls.append(("artifact", Path(path).name, artifact_path)),
+        )
+        result = EvaluationResult(
+            mode="val",
+            iteration=10,
+            epoch=1,
+            summary_metrics={
+                "dice": 0.8,
+                "iou": 0.7,
+                "ed_dice": 0.9,
+                "es_dice": 0.75,
+                "area_smoothness": 0.01,
+                "temporal_drift": 0.2,
+            },
+        )
+        cfg = OmegaConf.create({"required": True, "model": {"name": "geomaskformer"}})
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {"mlflow": fake_mlflow}):
+            logger = MLflowLogger(cfg, run_dir=tmp, enabled=True, main_process=True)
+            logger.log_evaluation_result(result, step=10, log_artifacts=False)
+        logged = {}
+        for _, metrics, _ in calls:
+            logged.update(metrics)
+        assert "val/dice" not in logged
+        assert "val/overall/Dice" not in logged
+        assert "val/phase/ED_Dice" not in logged
+        assert "val/area_smoothness" not in logged
+        assert "val/temporal_drift" not in logged
 
     def test_run_logs_uploads_train_and_command_logs(self):
         calls = []
