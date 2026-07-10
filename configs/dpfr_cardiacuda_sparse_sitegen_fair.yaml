@@ -1,0 +1,49 @@
+defaults:
+  - cardiacuda_a4c_lv_predinit
+  - data/cardiacuda_sparse_sitegen
+  - model/dpfr
+  - runtime/default
+  - schedule/default_3k
+  - _self_
+
+exp_id: "dpfr_cardiacuda_sparse_sitegen_fair"
+prediction_mode: "dense10"
+target_index: -1
+temporal_access: "full_window"
+
+model:
+  backbone_pretrained: false
+  pretrain_source: "none"
+
+main_training:
+  num_iterations: 4000
+  batch_size: 2
+  num_workers: 4
+  lr_schedule: warmup_cosine
+  lr_warmup_iters: 300
+  lr_min_ratio: 0.05
+  unext_lr_ratio: 0.3
+  dpfr_lr_ratio: 1.0
+  use_ema: false
+  ema_eval: false
+
+evaluation:
+  protocol_version: "v3_canonical_no_leak"
+  threshold_search_during_training: false
+
+eval_stage:
+  test_every_eval: false
+  eval_interval: 500
+  num_vis: 0
+
+mlflow:
+  experiment_name: "fair_dpfr_gdkvm_six_tasks"
+  run_name: "dpfr_cardiacuda_sparse_sitegen_fair"
+  tags:
+    method: "DPFR"
+    dataset: "cardiacuda"
+    protocol: "sitegen_G100R126_to_G29"
+    task: "cardiacuda_sparse_sitegen"
+    temporal_access: "full_window"
+    prediction_mode: "dense10"
+    backbone_pretrained: "false"

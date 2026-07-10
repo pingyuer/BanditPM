@@ -1,6 +1,0 @@
-defaults:
-  - functional_anchor_echo_joint_residual
-  - _self_
-
-exp_id: "functional_anchor_echo_ablate_full"
-ablation_type: "full"

@@ -1,9 +1,0 @@
-defaults:
-  - config_unext_dynakey
-  - _self_
-
-exp_id: "unext_dynakey_include_init_eval"
-
-evaluation:
-  exclude_init_frame: false
-  protocol_version: "v2_no_leak_include_init_supplement"

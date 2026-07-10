@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 
 from model.modules.banditpm_core import BanditPMCore
-from model.modules.dynakey import DynaKeyMemoryCore
 from model.modules.gdr_core import GDRCore
 from model.modules.prototype_manager import BanditPrototypeManager
 from model.modules.prototype_value_head import PrototypeValueHead
@@ -45,7 +44,6 @@ class MemoryCore(nn.Module):
         self.prototype_manager = None
         self.bpm_key_adapter = None
         self.banditpm_core = None
-        self.dynakey_core = None
 
         temporal_type = self.memory_type
         if temporal_type in {"bpm"}:
@@ -61,14 +59,8 @@ class MemoryCore(nn.Module):
             self.gdr_core.freeze_parameters()
             if temporal_type == "banditpm_placeholder":
                 self.banditpm_core = BanditPMCore()
-        elif temporal_type == "dynakey":
-            dynakey_cfg = None
-            if memory_core_cfg is not None:
-                dynakey_cfg = memory_core_cfg.get("dynakey", None)
-            if dynakey_cfg is None and temporal_memory_cfg is not None:
-                dynakey_cfg = temporal_memory_cfg.get("dynakey", None)
-            self.dynakey_core = DynaKeyMemoryCore(dynakey_cfg, value_dim=value_dim)
-            self.gdr_core.freeze_parameters()
+        elif temporal_type not in {"original_gdr"}:
+            raise ValueError(f"Unsupported GDKVM memory type: {temporal_type!r}")
 
     def _resolve_memory_type(self, memory_core_cfg, temporal_memory_cfg) -> str:
         if temporal_memory_cfg is not None:
@@ -77,7 +69,6 @@ class MemoryCore(nn.Module):
                 "gdr": "original_gdr",
                 "none": "none",
                 "bpm": "bpm",
-                "dynakey": "dynakey",
             }
             temporal_core_type = mapping.get(temporal_type, temporal_type)
         else:
@@ -103,12 +94,6 @@ class MemoryCore(nn.Module):
             )
         if self.banditpm_core is not None:
             self.banditpm_core.reset_state(
-                batch_size=batch_size,
-                num_objects=num_objects,
-                device=device,
-            )
-        if self.dynakey_core is not None:
-            self.dynakey_core.reset_state(
                 batch_size=batch_size,
                 num_objects=num_objects,
                 device=device,
@@ -196,17 +181,6 @@ class MemoryCore(nn.Module):
                 policy_meta=policy_meta,
             )
             aux.update(placeholder_aux)
-            return readout_BNCHW, aux
-
-        if self.memory_type == "dynakey" and self.dynakey_core is not None:
-            readout_BNCHW, dynakey_aux = self.dynakey_core(
-                value_BNCHW=value_BNCHW,
-                key_BCHW=key_BCHW,
-                pixfeat_BCHW=pixfeat_BCHW,
-                mask_BNHW=mask_BNHW,
-                policy_meta=policy_meta,
-            )
-            aux["dynakey_aux"] = dynakey_aux
             return readout_BNCHW, aux
 
         # "none", "identity", and "static_proto" currently share the same readout.

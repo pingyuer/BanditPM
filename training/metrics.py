@@ -41,7 +41,7 @@ def postprocess_binary_mask(mask: torch.Tensor, cfg) -> torch.Tensor:
     eval_cfg = cfg.get("evaluation", {})
     post_cfg = eval_cfg.get("postprocess", {})
     if isinstance(post_cfg, dict) or hasattr(post_cfg, "get"):
-        default = str(cfg.get("model", {}).get("name", "")).lower() in {"anchor_ode_v2", "unext_anchor_ode_affine"}
+        default = False
         enabled = bool(post_cfg.get("enabled", default))
     else:
         enabled = bool(post_cfg)

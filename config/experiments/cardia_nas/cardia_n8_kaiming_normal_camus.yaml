@@ -1,9 +1,0 @@
-defaults:
-  - cardia_s7_camus
-  - _self_
-exp_id: "cardia_n8_kaiming_normal"
-model:
-  cardia:
-    backbone_init: kaiming_normal
-mlflow:
-  tags: { method: "CARDIA_nas2", version: "n8_kaiming_normal" }

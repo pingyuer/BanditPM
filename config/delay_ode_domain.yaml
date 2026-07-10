@@ -1,9 +1,0 @@
-defaults:
-  - cardiacuda_a4c_lv_predinit
-  - _base_/datasets/domain
-  - _base_/models/delay_ode
-  - _base_/runtime/default_runtime
-  - _base_/schedules/default_3k
-  - _self_
-
-exp_id: "delay_ode_domain"

@@ -1,5 +1,0 @@
-defaults:
-  - delay_ode_camus
-  - _self_
-
-exp_id: "delay_ode_v2_camus"

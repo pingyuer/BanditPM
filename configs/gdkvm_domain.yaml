@@ -1,0 +1,9 @@
+defaults:
+  - cardiacuda_a4c_lv_dense_predinit
+  - data/domain
+  - model/gdkvm
+  - runtime/default
+  - schedule/default_3k
+  - _self_
+
+exp_id: "gdkvm_domain"

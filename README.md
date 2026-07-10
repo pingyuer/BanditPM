@@ -1,111 +1,103 @@
-# BanditPM / GDKVM Research Workspace
+# GDKVM / DPFR Research Workspace
 
-这是一个面向超声心动图视频分割的研究代码库。当前主线已经整理为三条方法线和三类数据集，推荐通过 canonical config 与本地 registry 扩展，而不是继续在旧脚本里堆分支。
+This repository is an echocardiography video segmentation project. The public
+project surface now exposes two runnable method families:
 
-## 方法线
+- `gdkvm`: the GDKVM path with its KPFF/GDR internals kept private to the method.
+- `dpfr`: Dual-Prompt Flow Refinement with prompt, flow, and fusion diagnostics.
 
-- `gdkvm`: 原 GDKVM 风格路径，包含 KPFF 与 GDR memory。
-- `kpff`: 只保留 KPFF 空间融合，关闭 temporal/memory，用作轻量 baseline。
-- `unext_fusion`: UNeXt 单帧分割主干 + DynaKey/spatial memory/mid-level fusion。
+The codebase is being migrated to a standard `src/gdkvm_project/` layout. Legacy
+top-level modules may still exist as implementation compatibility, but new code
+should import from `gdkvm_project`.
 
-## 数据集
-
-- `echo`: EchoNet 风格 endpoint clips。
-- `camus`: CAMUS dense/short clips。
-- `domain`: CardiacUDA A4C LV domain 数据，在代码中映射到现有 `cardiacuda` loader 路径。
-
-数据根目录通过环境变量控制：
+## Entry Points
 
 ```bash
-export DATASETS_ROOT="${DATASETS_ROOT:-$HOME/datasets}"
+PYTHONPATH=src:. /home/tahara/miniconda3/bin/uv run python train.py --config-name gdkvm_echo
+PYTHONPATH=src:. /home/tahara/miniconda3/bin/uv run python train.py --config-name dpfr_echo
 ```
 
-## 快速运行
-
-单个 canonical 实验：
+Console scripts are also declared:
 
 ```bash
-PYTHONPATH=. /home/tahara/miniconda3/bin/uv run python train.py --config-name unext_fusion_echo
+gdkvm-train --config-name dpfr_echo
+gdkvm-visualize /path/to/run --split val
+gdkvm-compare /path/to/local_run /path/to/other_server_run
 ```
 
-运行一个子矩阵：
+## Configuration
 
-```bash
-METHOD=unext_fusion DATASET=echo bash scripts/run_canonical_matrix.sh
-METHOD=all DATASET=domain bash scripts/run_canonical_matrix.sh
-```
-
-兼容的分方法入口仍保留：
-
-```bash
-bash scripts/run_gdkvm_matrix.sh
-bash scripts/run_kpff_matrix.sh
-bash scripts/run_unext_fusion_matrix.sh
-```
-
-常用测试：
-
-```bash
-PYTHONPATH=. /home/tahara/miniconda3/bin/uv run pytest -q
-```
-
-数据协议检查：
-
-```bash
-PYTHONPATH=. /home/tahara/miniconda3/bin/uv run python scripts/check_dataset_protocol.py \
-  --dataset echonet \
-  --data_path "$DATASETS_ROOT/processed/echonet_png128_10f"
-```
-
-## 配置入口
-
-推荐新实验使用 canonical config：
+Hydra configs live in `configs/`:
 
 ```text
-gdkvm_echo          gdkvm_camus          gdkvm_domain
-kpff_echo           kpff_camus           kpff_domain
-unext_fusion_echo   unext_fusion_camus   unext_fusion_domain
+configs/model/{gdkvm,dpfr}.yaml
+configs/data/{echo,camus,domain,...}.yaml
+configs/runtime/default.yaml
+configs/schedule/default_3k.yaml
+configs/gdkvm_*.yaml
+configs/dpfr_*.yaml
 ```
 
-这些配置按 Hydra `_base_` 风格组合：
+Current canonical configs are the `gdkvm_*` and `dpfr_*` experiment files. All
+formal no-leak runs should keep:
 
-- `config/_base_/models/{gdkvm,kpff,unext_fusion}.yaml`
-- `config/_base_/datasets/{echo,camus,domain}.yaml`
-- `config/_base_/runtime/default_runtime.yaml`
-- `config/_base_/schedules/default_3k.yaml`
-
-旧的 `config_unext_*`、`config_dynakey_*`、`config_gdkvm_*` 文件保留为 legacy/ablation，不作为新实验首选入口。
-
-## 二次开发
-
-详细开发说明在 `docs/`：
-
-- [文档总览](docs/README.md)
-- [架构与数据流](docs/architecture.md)
-- [添加模型/模块](docs/develop-modules.md)
-- [添加数据集](docs/develop-datasets.md)
-- [配置指南](docs/config-guide.md)
-- [日志与指标](docs/logging-guide.md)
-- [实验指南](docs/experiment-guide.md)
-- [工程规范](docs/project-guidelines.md)
-
-核心扩展原则：
-
-- 新模型通过 `MODEL_REGISTRY` 注册。
-- 新数据集通过 `DATASET_REGISTRY` 注册。
-- 新实验优先新增 `_base_` 与 canonical config。
-- 新日志指标优先从 model aux 返回，再由 `Trainer`/`Evaluator` 聚合到 MLflow；`summary.csv` 仅作为 artifact 保留。
-
-## 输出与记录
-
-历史本地实验可用 legacy 工具汇总为：
-
-```text
-outputs/EXPERIMENT_SUMMARY.csv
+```yaml
+evaluation:
+  init_mode: pred_or_zero
+  exclude_init_frame: true
+  protocol_version: v3_canonical_no_leak
 ```
 
-正式实验比较以 MLflow UI 为准。如需重新汇总并清理旧 run：
+## Public Python API
+
+```python
+from gdkvm_project.models import build_model
+from gdkvm_project.training import Trainer
+from gdkvm_project.losses import LossComputer
+from gdkvm_project.tracking import RunRecorder, MLflowLogger
+from gdkvm_project.visualization import render_sequence_panel
+```
+
+Extension registries are available for future methods:
+
+- `MODEL_REGISTRY`
+- `LOSS_REGISTRY`
+- `METRIC_COLLECTOR_REGISTRY`
+- `VISUALIZER_REGISTRY`
+
+## Tests
 
 ```bash
-python scripts/summarize_and_clean_outputs.py --clean
+PYTHONPATH=src:. /home/tahara/miniconda3/bin/uv run pytest -q
 ```
+
+The current test suite covers config composition, public registry boundaries,
+GDKVM/DPFR synthetic smoke tests, local run recording, and visualization panel
+rendering.
+
+## Score Diagnostics
+
+When a run scores lower than another server, compare artifacts before changing
+the model:
+
+```bash
+PYTHONPATH=src:. /home/tahara/miniconda3/bin/uv run python -m gdkvm_project.reports.compare_runs /path/to/a /path/to/b
+```
+
+The most important fields are commit, config, data split counts, label sparsity,
+effective batch size, backbone pretraining, AMP/CUDA/cuDNN, threshold, TTA, and
+postprocess settings. DPFR should also be judged by anchor/prompt/flow deltas:
+if anchor dice is low, refinement has little to rescue; if final-minus-anchor is
+negative, prompt or flow refinement is hurting the segmentation task.
+
+Current local evidence points to a few likely causes for lower DPFR scores:
+unpretrained UNeXt anchors, small effective batch, sparse ED/ES supervision,
+domain shift, and flow refinement that may not align well with low-texture
+ultrasound boundaries.
+
+For GDKVM-vs-DPFR reporting, the intended fairness grain is evaluation-facing:
+both methods are compared on the same split, same visible video clip, same
+`label_valid` supervised frames, same foreground Dice definition, and logits are
+aligned to the target mask size before scoring. The methods may use different
+internal temporal mechanisms as long as the test protocol and metric space stay
+fixed.

@@ -33,8 +33,8 @@ init_mode: str
 1. 在 `dataset/` 下实现 `torch.utils.data.Dataset`。
 2. 确认 `mode=train|val|test`、`seq_length`、`max_num_obj`、`size` 参数兼容 `train.py`。
 3. 在 `dataset/registry.py` 注册别名。
-4. 新增 `config/_base_/datasets/<name>.yaml`。
-5. 新增一个 canonical config，例如 `unext_fusion_<name>.yaml`。
+4. 新增 `configs/data/<name>.yaml`。
+5. 新增一个 canonical config，例如 `dpfr_<name>.yaml` 或 `gdkvm_<name>.yaml`。
 6. 写 dataset 解析测试和 dataloader smoke。
 
 注册示例：

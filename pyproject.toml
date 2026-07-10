@@ -19,6 +19,12 @@ dependencies = [
     "tqdm>=4.67.1",
 ]
 
+[project.scripts]
+gdkvm-train = "gdkvm_project.cli.train:main"
+gdkvm-eval = "gdkvm_project.cli.eval:main"
+gdkvm-visualize = "gdkvm_project.cli.visualize:main"
+gdkvm-compare = "gdkvm_project.cli.compare:main"
+
 [tool.uv.sources]
 torch = [
   { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }

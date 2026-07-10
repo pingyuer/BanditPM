@@ -1,0 +1,61 @@
+defaults:
+  - data/echo
+  - model/dpfr
+  - runtime/default
+  - schedule/default_3k
+  - _self_
+
+exp_id: "dpfr_echo"
+temporal_access: "full_window"
+
+phase_init:
+  train: "pred_or_zero"
+  val: "pred_or_zero"
+  test: "pred_or_zero"
+
+main_training:
+  num_iterations: 4000
+  batch_size: 2
+  num_workers: 4
+  lr_schedule: warmup_cosine
+  lr_warmup_iters: 300
+  lr_min_ratio: 0.05
+  lr_schedule_steps: [2000, 3200]
+  lr_schedule_gamma: 0.1
+  unext_lr_ratio: 0.3
+  dpfr_lr_ratio: 1.0
+  use_ema: false
+  ema_eval: false
+
+evaluation:
+  protocol_version: "v3_canonical_no_leak"
+  threshold_search_during_training: false
+  threshold_search_start: 0.30
+  threshold_search_end: 0.75
+  threshold_search_step: 0.01
+  tta:
+    enabled: true
+    modes: ["identity", "hflip"]
+  postprocess:
+    enabled: true
+    largest_component: true
+    fill_holes: true
+    remove_small_objects: true
+    min_size: 8
+    binary_closing: false
+
+eval_stage:
+  test_every_eval: false
+  eval_interval: 500
+  num_vis: 0
+
+mlflow:
+  experiment_name: "dpfr"
+  run_name: "dpfr_echo"
+  tags:
+    method: "DPFR"
+    dataset: "echonet"
+    view: "A4C"
+    protocol: "echonet_ed2es_endpoint"
+    temporal_access: "full_window"
+    prediction_mode: "dense10"

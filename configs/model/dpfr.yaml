@@ -1,0 +1,80 @@
+# @package _global_
+model_name: "DPFR"
+
+model:
+  name: "dpfr"
+  allow_oracle_init_when_requested: false
+  use_first_frame_gt_init: false
+  use_kpff: false
+  memory_core:
+    type: "none"
+  temporal_memory:
+    type: "none"
+    bpm:
+      ENABLE: false
+  aux_loss:
+    sensory:
+      weight: 0.0
+    query:
+      weight: 0.0
+  dpfr:
+    in_channels: 1
+    num_classes: 2
+    backbone:
+      name: official
+      base_dim: 144
+      mlp_expansion: 2.0
+      latent_blocks: 2
+      decoder_mlp_blocks: 1
+    d_model: 192
+    temporal_layers: 4
+    temporal_heads: 6
+    mlp_ratio: 4.0
+    dropout: 0.1
+    max_time: 32
+    image_pool_hw: [2, 4]
+    mask_pool_hw: [2, 2]
+    prompt_injection: "gated_add"
+    prompt_scales: ["low", "mid", "high"]
+    gate_init: -2.0
+    output_init_std: 1.0e-5
+    flow_target: "logits"
+    flow_steps: 1
+    flow_context_channels: 16
+    flow_hidden_channels: 64
+    max_disp: 0.05
+    align_corners: true
+    padding_mode: "border"
+    final_fusion:
+      gate_init: -2.0
+      max_prompt_scale: 0.5
+      max_flow_scale: 0.5
+    detach_mask_prompt: true
+    mask_prompt_train:
+      use_gt: true
+      gt_prob_start: 1.0
+      gt_prob_end: 0.5
+      schedule_iters: 1500
+      mask_prob: 0.1
+    mask_prompt_eval:
+      use_gt: false
+      source: "anchor_or_mask"
+
+loss:
+  name: dpfr
+  dpfr:
+    lambda_final: 1.0
+    lambda_anchor: 0.3
+    lambda_prompt: 0.3
+    lambda_flow_seg: 0.2
+    lambda_flow_mag: 0.005
+    lambda_flow_smooth: 0.01
+    lambda_flow_temp: 0.01
+
+mlflow:
+  tags:
+    method: DPFR
+    full_name: "Dual-Prompt Flow Refinement"
+    backbone: "unext_official"
+    temporal_module: "DualPromptFullWindowTransformer"
+    solver: "bounded_grid_sample_flow"

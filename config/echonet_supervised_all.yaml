@@ -1,5 +1,0 @@
-# @package _global_
-evaluation:
-  frame_scope: "supervised_only"
-  exclude_init_frame: false
-  eval_protocol: "echonet_supervised_all"

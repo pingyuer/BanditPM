@@ -1,0 +1,31 @@
+defaults:
+  - gdkvm_camus
+  - _self_
+
+exp_id: "gdkvm_camus_fair_dense10"
+prediction_mode: "dense10"
+target_index: -1
+temporal_access: "recurrent"
+
+model:
+  backbone_pretrained: false
+  pretrain_source: "none"
+
+main_training:
+  num_iterations: 4000
+  batch_size: 4
+  lr_schedule: warmup_cosine
+  lr_warmup_iters: 300
+  lr_min_ratio: 0.05
+
+mlflow:
+  experiment_name: "gdkvm_dpfr_fair_six_tasks"
+  run_name: "gdkvm_camus_fair_dense10"
+  tags:
+    method: "GDKVM"
+    dataset: "camus"
+    protocol: "fair_dense10"
+    temporal_access: "recurrent"
+    prediction_mode: "dense10"
+    backbone_pretrained: "false"
+    task: "camus"

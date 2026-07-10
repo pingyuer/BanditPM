@@ -1,116 +1,45 @@
-# 日志与指标
+# Logging And Metrics
 
-## 输出位置
+Formal experiment comparison uses MLflow. Local artifacts are still mandatory so
+runs remain inspectable without a tracking server.
 
-Hydra run dir 由 config 决定，默认在：
+## Local Artifacts
 
-```text
-outputs/BanditPM/<exp_id>/<date>/<time>
-```
-
-MLflow UI 是正式实验入口。每个 run 可包含：
-
-- MLflow run。
-- `summary.csv`。
-- checkpoint / weights。
-- configs / eval / visuals / env / source artifacts。
-
-本地 legacy 汇总工具可读取历史 run：
+`RunRecorder` owns the stable local files:
 
 ```text
-outputs/EXPERIMENT_SUMMARY.csv
+config_resolved.yaml
+runtime.json
+git.json
+metrics.jsonl
+summary.json
+data_flow_summary.json
 ```
 
-命令：
+Model code should not write these files directly. Training, evaluation, metric
+collectors, and visualizers should pass structured data into recorder/tracking
+facades.
 
-```bash
-python scripts/summarize_and_clean_outputs.py --clean
-```
+## MLflow
 
-## MLflow 配置
+`MLflowLogger` remains the remote tracking facade. Use tags for grouping, params
+for compact comparable settings, metrics for scalar time series, and artifacts
+for configs, checkpoints, visual panels, and environment/source records.
 
-入口在 `train.py`：
-
-- `mlflow.enabled`: 是否启用 MLflow。
-- `mlflow.tracking_uri`: tracking server。
-- `mlflow.experiment_name`: 实验名。
-- `mlflow.run_name`: run 名，留空时自动生成。
-- `mlflow.resume_run_id`: 恢复已有 run。
-
-默认 tracking server：
-
-```bash
-http://172.16.240.77:5000
-```
-
-## MLflow 记录语义
-
-- Tags 用于检索和分组：`run_type`、`method_family`、`model_name`、`dataset_name`、`protocol_name`、`exp_id`、`seed`、`git_commit`、`git_dirty`、`ddp_world_size`。
-- Params 只保存可比较的小型超参，例如学习率、batch size、训练步数、协议版本和模型/数据关键开关。
-- Metrics 只保存标量时间序列，例如 `train/*`、`val/*`、`test/*`、`anchor_ode/*`、`dynakey/*`。
-- Artifacts 保存大文件和结构化明细：`configs/`、`checkpoints/`、`eval/`、`visuals/`、`env/`、`source/`。
-- 完整 config 只上传到 `configs/resolved_config.yaml`，不全量展开到 params。
-- 训练期 val/test 默认只写 metrics；per-frame/per-video/sweep 明细只在 final eval 或独立 eval run 上传。
-
-## Trainer 日志流
-
-主要位置：
-
-- `Trainer._log_train_metrics()`: loss dict。
-- `Trainer._log_dynakey_stats()`: DynaKey / UNeXt-DynaKey aux 指标。
-- `Trainer._log_final_metrics()`: val/test metrics。
-- `Trainer._write_summary_row()`: `summary.csv`。
-
-新增指标推荐流程：
-
-1. 模块 forward 返回 tensor aux，尽量 `.detach()`。
-2. 主模型把 aux 放到 `aux_t` 或 `memory_aux_t`。
-3. `Trainer` 聚合 batch/time 维度，写 MLflow。
-4. 如果是最终评估指标，再写入 `summary.csv`。
-
-## 命名约定
-
-推荐 prefix：
+Recommended metric prefixes:
 
 ```text
-loss/...              主 loss 或辅助 loss
-metrics/...           val/test 指标
-dynakey/...           legacy/global DynaKey dictionary
-unext_dynakey/...     UNeXt-DynaKey refine/fusion/memory
-q_policy/...          Q policy 专用诊断，后续可拆出
-protocol/...          no-leak、init、label_valid 等协议信息
+train/...            training losses and learning rates
+val/...              validation metrics
+test/...             test metrics
+gdkvm/...            GDKVM-specific diagnostics
+dpfr/...             DPFR anchor/prompt/flow/fusion diagnostics
+protocol/...         no-leak, init mode, frame validity
+runtime/...          throughput and environment summaries
 ```
 
-已有常见字段：
+## Extension Flow
 
-```text
-dynakey/occupancy_ratio
-dynakey/active_key_count
-dynakey/retrieval_entropy
-dynakey/prediction_error
-dynakey/action_count_*
-unext_dynakey/gate_mean
-unext_dynakey/residual_abs_mean
-unext_dynakey/memory_update_rate
-unext_dynakey/mid_memory_gate_mean
-unext_dynakey/spatial_memory_entropy
-```
-
-## summary.csv legacy 原则
-
-`summary.csv` 只作为本地兼容文件和 MLflow artifact，不作为主实验入口；不要记录过细的 step-level debug。
-
-适合写入 summary：
-
-- final/best Dice、IoU、HD95、ASD。
-- best threshold。
-- `exclude_init_frame`、`init_mode`、`oracle_gt_used`。
-- temporal consistency 类最终指标。
-
-不适合写入 summary：
-
-- 每 step 的 gate mean。
-- 每 frame 的 slot id。
-- 大 tensor 或 histogram。
-
-这类信息应写 MLflow 或 debug script 输出。
+Future methods should expose diagnostics through `METRIC_COLLECTOR_REGISTRY` and
+visual panels through `VISUALIZER_REGISTRY`. The trainer should call collectors
+through stable interfaces instead of growing method-specific branches.

@@ -1,5 +1,0 @@
-defaults:
-  - delay_ode_domain
-  - _self_
-
-exp_id: "delay_ode_v2_domain"
